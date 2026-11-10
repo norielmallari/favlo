@@ -89,7 +89,7 @@ def calls_in_order(calls: list[str]) -> bool:
 
 
 async def run_file_task(
-    base_url: str, workspace: Path, *, model: str = "qwen36-35b-a3b"
+    base_url: str, workspace: Path, *, model: str = "qwen36_35b_a3b"
 ) -> tuple[list[str], str]:
     """Run one agent step per tool. Returns the tool order and the file text.
 

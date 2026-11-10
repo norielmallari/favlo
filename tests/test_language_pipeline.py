@@ -74,7 +74,7 @@ def test_a_named_oserror_can_count_as_the_client() -> None:
 
 
 def test_qwen38_27b_on_open_resets_halted() -> None:
-    from qwen38_27b.chat import Pipeline
+    from qwen38_27b.metal41.chat import Pipeline
 
     runtime = SimpleNamespace(_halted=True, _stop=True)
     Pipeline().on_open(runtime, _Reply(stopped=False), None)
@@ -83,7 +83,7 @@ def test_qwen38_27b_on_open_resets_halted() -> None:
 
 
 def test_qwen36_treats_only_the_client_message_as_closed() -> None:
-    from qwen36_35b_a3b.chat import Pipeline
+    from qwen36_35b_a3b.metal41.chat import Pipeline
 
     pipe = Pipeline()
     assert pipe.client_closed(OSError("client closed"))

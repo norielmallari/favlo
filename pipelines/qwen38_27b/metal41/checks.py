@@ -1,0 +1,1078 @@
+"""Host formulas and the dispatches that have to match them."""
+
+from __future__ import annotations
+
+import math
+import struct
+
+import numpy as np
+
+from qwen38_27b.metal41.formats import dequant_e4m3_block, dequant_fp4, dequant_fp8, quantize_fp4, quantize_fp8
+from qwen38_27b.metal41.session import Session
+
+EPS = np.float32(1e-6)
+
+
+def _close(
+    name: str,
+    got: np.ndarray,
+    expect: np.ndarray,
+    *,
+    rtol: float = 1e-3,
+    atol: float = 1e-3,
+) -> None:
+    if got.shape != expect.shape:
+        message = f"{name} shape {got.shape} != {expect.shape}"
+        raise AssertionError(message)
+    if not np.allclose(got, expect, rtol=rtol, atol=atol, equal_nan=True):
+        delta = float(np.max(np.abs(got.astype(np.float64) - expect.astype(np.float64))))
+        message = f"{name} max abs {delta}"
+        raise AssertionError(message)
+
+
+def _probe_fp4(rows: int, cols: int, inner: int) -> tuple[np.ndarray, bytes, bytes, np.ndarray]:
+    activation = np.zeros((rows, inner), dtype=np.float16)
+    activation[:, 0] = np.float16(1.0)
+    codes = np.zeros((cols, inner), dtype=np.uint8)
+    codes[:, 0] = np.arange(cols, dtype=np.uint8) % 8
+    packed = bytearray()
+    flat = codes.reshape(-1)
+    for index in range(0, flat.size, 2):
+        packed.append(int(flat[index] & 0xF) | (int(flat[index + 1] & 0xF) << 4))
+    blocks = inner // 32
+    scales = bytearray()
+    for _row in range(cols):
+        scales.append(130)
+        scales.extend(b"\x00" * (blocks - 1))
+    magnitudes = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+    column = magnitudes[np.arange(cols) % 8] * np.float32(8.0)
+    expected = np.broadcast_to(column, (rows, cols)).copy()
+    return activation, bytes(packed), bytes(scales), expected
+
+
+def check_fp4_tile(session: Session) -> None:
+    activation, data, scales, expected = _probe_fp4(64, 64, 256)
+    got = session.prefill("prefill_fp4_n64", activation, data, scales, 64, 64, 256)
+    _close("fp4 tile", got, expected, rtol=0.0, atol=0.0)
+    activation, data, scales, expected = _probe_fp4(64, 32, 32)
+    got = session.prefill("prefill_fp4_e8m0", activation, data, scales, 64, 32, 32)
+    _close("fp4 32-col", got, expected, rtol=0.0, atol=0.0)
+    activation, data, scales, expected = _probe_fp4(64, 128, 256)
+    got = session.prefill("prefill_fp4_m32", activation, data, scales, 64, 128, 256)
+    _close("fp4 32x128", got, expected, rtol=0.0, atol=0.0)
+
+
+def check_fp4_gemv(session: Session) -> None:
+    activation, data, scales, expected = _probe_fp4(1, 32, 256)
+    got = session.gemv_fp4(activation.reshape(-1), data, scales, 32, 256)
+    _close("fp4 gemv", got, expected.reshape(-1), rtol=0.0, atol=0.0)
+
+
+def check_fp4_x4(session: Session) -> None:
+    rng = np.random.default_rng(0)
+    cols, inner = 8, 256
+    activation = rng.normal(scale=0.05, size=inner).astype(np.float32)
+    weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+    data, scales = quantize_fp4(weight)
+    destination = session.zeros(cols * 4)
+    session.dispatch(
+        "gemv_fp4_x4",
+        [
+            session.upload(activation),
+            session.upload(data),
+            session.upload(scales),
+            destination,
+        ],
+        [np.uint32(cols).tobytes(), np.uint32(inner).tobytes()],
+        (cols // 4, 1, 1),
+        (32, 1, 1),
+    )
+    expect = dequant_fp4(data, scales, cols, inner) @ activation
+    _close("fp4 x4", session.download_f32(destination, cols), expect.astype(np.float32), atol=1e-4)
+
+
+def check_fp4_span2(session: Session) -> None:
+    rng = np.random.default_rng(1)
+    cols, inner = 8, 256
+    act0 = rng.normal(scale=0.05, size=inner).astype(np.float32)
+    act1 = rng.normal(scale=0.05, size=inner).astype(np.float32)
+    weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+    data, scales = quantize_fp4(weight)
+    dest0 = session.zeros(cols * 4)
+    dest1 = session.zeros(cols * 4)
+    session.dispatch(
+        "gemv_fp4_span2",
+        [
+            session.upload(act0),
+            session.upload(act1),
+            session.upload(data),
+            session.upload(scales),
+            dest0,
+            dest1,
+        ],
+        [np.uint32(cols).tobytes(), np.uint32(inner).tobytes()],
+        (cols // 4, 1, 1),
+        (32, 1, 1),
+    )
+    matrix = dequant_fp4(data, scales, cols, inner)
+    _close("fp4 span2 a", session.download_f32(dest0, cols), (matrix @ act0).astype(np.float32), atol=1e-4)
+    _close("fp4 span2 b", session.download_f32(dest1, cols), (matrix @ act1).astype(np.float32), atol=1e-4)
+
+
+def check_fp4_span3(session: Session) -> None:
+    rng = np.random.default_rng(3)
+    cols, inner = 8, 256
+    acts = [rng.normal(scale=0.05, size=inner).astype(np.float32) for _ in range(3)]
+    weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+    data, scales = quantize_fp4(weight)
+    dests = [session.zeros(cols * 4) for _ in range(3)]
+    session.dispatch(
+        "gemv_fp4_span3",
+        [
+            *[session.upload(act) for act in acts],
+            session.upload(data),
+            session.upload(scales),
+            *dests,
+        ],
+        [np.uint32(cols).tobytes(), np.uint32(inner).tobytes()],
+        (cols // 4, 1, 1),
+        (32, 1, 1),
+    )
+    matrix = dequant_fp4(data, scales, cols, inner)
+    for index, act in enumerate(acts):
+        _close(
+            f"fp4 span3 {index}",
+            session.download_f32(dests[index], cols),
+            (matrix @ act).astype(np.float32),
+            atol=1e-4,
+        )
+
+
+def _fp8_case(cols: int, inner: int, seed: int) -> tuple[np.ndarray, bytes, bytes, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    activation = rng.normal(scale=0.05, size=inner).astype(np.float32)
+    weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+    data, scales = quantize_fp8(weight)
+    expect = dequant_fp8(data, scales, cols, inner) @ activation
+    return activation, data, scales, expect.astype(np.float32)
+
+
+def check_fp8_prefill(session: Session) -> None:
+    rng = np.random.default_rng(2)
+    shapes = (("fp8 gate", 64, 128, 256), ("fp8 down", 64, 64, 512))
+    for label, rows, cols, inner in shapes:
+        activation = rng.normal(scale=0.05, size=(rows, inner)).astype(np.float16)
+        weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+        data, scales = quantize_fp8(weight)
+        got = session.prefill("prefill_fp8_n64", activation, data, scales, rows, cols, inner)
+        matrix = dequant_fp8(data, scales, cols, inner)
+        expect = activation.astype(np.float32) @ matrix.T
+        _close(label, got, expect.astype(np.float32), atol=2e-3)
+    activation = rng.normal(scale=0.05, size=(64, 256)).astype(np.float16)
+    weight = rng.normal(scale=0.05, size=(128, 256)).astype(np.float32)
+    data, scales = quantize_fp8(weight)
+    got = session.prefill("prefill_fp8_m32", activation, data, scales, 64, 128, 256)
+    matrix = dequant_fp8(data, scales, 128, 256)
+    expect = activation.astype(np.float32) @ matrix.T
+    _close("fp8 32x128", got, expect.astype(np.float32), atol=2e-3)
+
+
+def check_fp8_x4(session: Session) -> None:
+    activation, data, scales, expect = _fp8_case(8, 256, 3)
+    destination = session.zeros(8 * 4)
+    session.dispatch(
+        "gemv_fp8_x4",
+        [
+            session.upload(activation),
+            session.upload(data),
+            session.upload(scales),
+            destination,
+        ],
+        [np.uint32(8).tobytes(), np.uint32(256).tobytes()],
+        (2, 1, 1),
+        (256, 1, 1),
+    )
+    _close("fp8 x4", session.download_f32(destination, 8), expect, atol=1e-3)
+    activation, data, scales, expect = _fp8_case(4, 2560, 5)
+    destination = session.zeros(4 * 4)
+    session.dispatch(
+        "gemv_fp8_x4",
+        [
+            session.upload(activation),
+            session.upload(data),
+            session.upload(scales),
+            destination,
+        ],
+        [np.uint32(4).tobytes(), np.uint32(2560).tobytes()],
+        (1, 1, 1),
+        (160, 1, 1),
+    )
+    _close("fp8 x4 160", session.download_f32(destination, 4), expect, atol=1e-3)
+
+
+def check_fp8_gate_up(session: Session) -> None:
+    rng = np.random.default_rng(4)
+    rows, inner = 8, 256
+    activation = rng.normal(scale=0.05, size=inner).astype(np.float32)
+    gate = rng.normal(scale=0.05, size=(rows, inner)).astype(np.float32)
+    up = rng.normal(scale=0.05, size=(rows, inner)).astype(np.float32)
+    gate_data, gate_scales = quantize_fp8(gate)
+    up_data, up_scales = quantize_fp8(up)
+    gate_dest = session.zeros(rows * 4)
+    up_dest = session.zeros(rows * 4)
+    session.dispatch(
+        "ffn_gate_up_fp8",
+        [
+            session.upload(activation),
+            session.upload(gate_data),
+            session.upload(gate_scales),
+            session.upload(up_data),
+            session.upload(up_scales),
+            gate_dest,
+            up_dest,
+        ],
+        [np.uint32(rows).tobytes(), np.uint32(inner).tobytes()],
+        (rows // 4, 1, 1),
+        (256, 1, 1),
+    )
+    gate_expect = dequant_fp8(gate_data, gate_scales, rows, inner) @ activation
+    up_expect = dequant_fp8(up_data, up_scales, rows, inner) @ activation
+    _close("fp8 gate", session.download_f32(gate_dest, rows), gate_expect.astype(np.float32), atol=1e-3)
+    _close("fp8 up", session.download_f32(up_dest, rows), up_expect.astype(np.float32), atol=1e-3)
+
+
+def check_rms(session: Session) -> None:
+    width = 5120
+    values = np.ones(width, dtype=np.float32)
+    weight = np.full(width, 2.0, dtype=np.float16)
+    destination = session.zeros(width * 4)
+    session.dispatch(
+        "rmsnorm_f32",
+        [session.upload(values), session.upload(weight), destination],
+        [np.uint32(width).tobytes(), np.float32(EPS).tobytes()],
+        (1, 1, 1),
+        (256, 1, 1),
+    )
+    inv = np.float32(1.0) / np.sqrt(np.mean(values * values) + EPS)
+    _close("rms", session.download_f32(destination, width), values * inv * np.float32(3.0), atol=1e-4)
+
+
+def check_swiglu(session: Session) -> None:
+    gate = np.array([0.0, 1.0, -1.0, 2.0], dtype=np.float32)
+    up = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    destination = session.zeros(16)
+    session.dispatch(
+        "swiglu_f32",
+        [session.upload(gate), session.upload(up), destination],
+        [],
+        (4, 1, 1),
+        (1, 1, 1),
+    )
+    silu = gate / (1.0 + np.exp(-gate))
+    _close("swiglu", session.download_f32(destination, 4), (silu * up).astype(np.float32), atol=1e-5)
+
+
+def _softplus(value: np.ndarray) -> np.ndarray:
+    return np.where(value > 20.0, value, np.log1p(np.exp(value))).astype(np.float32)
+
+
+def check_deltanet(session: Session) -> None:
+    mixed = np.ones(10240, dtype=np.float32)
+    raw_a = np.zeros(64, dtype=np.float32)
+    raw_b = np.zeros(64, dtype=np.float32)
+    gate = np.ones(6144, dtype=np.float32)
+    a_log = np.zeros(48, dtype=np.float16)
+    dt_bias = np.zeros(48, dtype=np.float16)
+    norm = np.ones(128, dtype=np.float16)
+    state0 = np.ones((48, 128, 128), dtype=np.float32)
+    destination = session.zeros(6144 * 4)
+    state = session.upload(state0)
+    session.dispatch(
+        "gdn_state_rows",
+        [
+            state,
+            session.upload(mixed),
+            session.upload(raw_a),
+            session.upload(raw_b),
+            session.upload(gate),
+            session.upload(a_log),
+            session.upload(dt_bias),
+            session.upload(norm),
+            destination,
+        ],
+        [np.float32(EPS).tobytes(), np.uint32(1).tobytes()],
+        (48, 1, 1),
+        (128, 1, 1),
+    )
+    q = np.ones((16, 128), dtype=np.float32)
+    k = np.ones((16, 128), dtype=np.float32)
+    v = np.ones((48, 128), dtype=np.float32)
+    qn = q / np.sqrt(np.sum(q * q, axis=1, keepdims=True) + EPS) / np.sqrt(np.float32(128.0))
+    kn = k / np.sqrt(np.sum(k * k, axis=1, keepdims=True) + EPS)
+    decay = -np.exp(np.float32(0.0)) * _softplus(np.float32(0.0))
+    alpha = np.exp(decay).astype(np.float32)
+    beta = np.float32(1.0 / (1.0 + np.exp(np.float32(0.0))))
+    out = np.zeros((48, 128), dtype=np.float32)
+    silu = np.float32(1.0) / (1.0 + np.exp(np.float32(-1.0)))
+    for head in range(48):
+        state_h = state0[head] * alpha
+        retrieved = state_h @ kn[head // 3]
+        delta = beta * (v[head] - retrieved)
+        state_h = state_h + np.outer(delta, kn[head // 3])
+        y = state_h @ qn[head // 3]
+        inv = 1.0 / np.sqrt(np.mean(y * y) + EPS)
+        out[head] = y * inv * silu
+    got = session.download_f32(destination, 48 * 128).reshape(48, 128)
+    _close("deltanet", got, out, atol=2e-3)
+
+
+def check_conv(session: Session) -> None:
+    channels = 10240
+    history = np.zeros((3, channels), dtype=np.float16)
+    current = np.ones(channels, dtype=np.float32)
+    weight = np.zeros((channels, 4), dtype=np.float16)
+    weight[:, 3] = np.float16(1.0)
+    destination = session.zeros(channels * 4)
+    session.dispatch(
+        "gdn_conv_shift",
+        [
+            session.upload(history),
+            session.upload(current),
+            session.upload(weight),
+            destination,
+        ],
+        [np.uint32(channels).tobytes()],
+        (channels // 256, 1, 1),
+        (256, 1, 1),
+    )
+    silu = current / (1.0 + np.exp(-current))
+    _close("conv", session.download_f32(destination, channels), silu.astype(np.float32), atol=1e-4)
+
+
+def check_e4m3(session: Session) -> None:
+    codes = np.array([0x00, 0x38, 0x7E, 0x80, 0x40], dtype=np.uint8)
+    padded = np.zeros(32, dtype=np.uint8)
+    padded[: codes.size] = codes
+    destination = session.zeros(32 * 4)
+    session.dispatch(
+        "dequant_e4m3",
+        [session.upload(padded), destination],
+        [np.uint32(127).tobytes()],
+        (32, 1, 1),
+        (1, 1, 1),
+    )
+    expect = dequant_e4m3_block(padded, 127)
+    _close("e4m3", session.download_f32(destination, 32), expect, atol=1e-4)
+
+
+def check_rope(session: Session) -> None:
+    query = np.ones(24 * 256, dtype=np.float32)
+    key = np.ones(4 * 256, dtype=np.float32)
+    weight = np.ones(256, dtype=np.float16)
+    q_buf = session.upload(query)
+    k_buf = session.upload(key)
+    session.dispatch(
+        "qk_norm_rope",
+        [q_buf, k_buf, session.upload(weight), session.upload(weight)],
+        [
+            np.float32(1e7).tobytes(),
+            np.float32(EPS).tobytes(),
+            np.uint32(0).tobytes(),
+            np.uint32(0).tobytes(),
+            np.uint32(0).tobytes(),
+        ],
+        (28, 1, 1),
+        (256, 1, 1),
+    )
+    got = session.download_f32(q_buf, 24 * 256)
+    inv = np.float32(2.0) / np.sqrt(np.float32(1.0) + EPS)
+    _close("rope", got, np.full_like(got, inv), atol=1e-4)
+
+
+def check_vision_gelu(session: Session) -> None:
+    values = np.array([0.0, 1.0, -0.5, 20.0, -20.0], dtype=np.float64)
+    destination = session.zeros(values.size * 4)
+    session.dispatch(
+        "vision_gelu_tanh",
+        [session.upload(values.astype(np.float32)), destination],
+        [np.uint32(values.size).tobytes()],
+        (1, 1, 1),
+        (32, 1, 1),
+    )
+    cube = values * values * values
+    inner = np.sqrt(2.0 / np.pi) * (values + 0.044715 * cube)
+    expect = (0.5 * values * (1.0 + np.tanh(inner))).astype(np.float32)
+    _close("vision gelu", session.download_f32(destination, values.size), expect, atol=1e-4)
+
+
+def check_vision_gelu_erf(session: Session) -> None:
+    values = np.array([0.0, 1.0, -0.5], dtype=np.float32)
+    destination = session.zeros(values.size * 4)
+    session.dispatch(
+        "vision_gelu_erf",
+        [session.upload(values), destination],
+        [np.uint32(values.size).tobytes()],
+        (1, 1, 1),
+        (values.size, 1, 1),
+    )
+    import math
+
+    scaled = values * np.float32(2.0**-0.5)
+    expect = np.float32(0.5) * values * (1.0 + np.vectorize(math.erf)(scaled))
+    _close("vision erf gelu", session.download_f32(destination, values.size), expect, atol=1e-5)
+
+
+def check_attention(session: Session) -> None:
+    """Four equal tokens. fp8 of 1 is exact, and a zero gate is sigmoid 1/2."""
+    from qwen38_27b.metal41.attn import attend_plane, bind_plane
+    from qwen38_27b.metal41.cache import plane_bytes
+
+    class Runtime:
+        pass
+
+    runtime = Runtime()
+    runtime.session = session
+    runtime.max_pos = 256
+    runtime.kv_cache = "fp8_e4m3"
+    runtime.k_cache = [session.zeros(plane_bytes(256, "fp8_e4m3"))]
+    runtime.v_cache = [session.zeros(plane_bytes(256, "fp8_e4m3"))]
+    bind_plane(runtime)
+    count = 4
+    query = np.ones((count, 24, 256), dtype=np.float32)
+    key = np.ones((count, 4, 256), dtype=np.float32)
+    value = np.ones((count, 4, 256), dtype=np.float32)
+    for token in range(count):
+        value[token] = np.float32(token + 1)
+    gate = np.zeros((count, 24, 256), dtype=np.float32)
+    dest = session.zeros(count * 24 * 256 * 4)
+    session.begin()
+    attend_plane(
+        runtime,
+        query=session.upload(query),
+        key=session.upload(key),
+        value=session.upload(value),
+        gate=session.upload(gate),
+        dest=dest,
+        pos0=0,
+        count=count,
+        slot=0,
+    )
+    session.end()
+    got = session.download_f32(dest, count * 24 * 256).reshape(count, 24, 256)
+    expect = np.zeros_like(got)
+    for token in range(count):
+        expect[token] = np.float32(0.5 * (token + 2) / 2.0)
+    _close("attention", got, expect, atol=2e-3)
+
+
+def check_attention_half(session: Session) -> None:
+    """Four equal tokens on the half plane. A zero gate is sigmoid 1/2."""
+    from qwen38_27b.metal41.attn import attend_plane, bind_plane
+    from qwen38_27b.metal41.cache import plane_bytes
+
+    class Runtime:
+        pass
+
+    runtime = Runtime()
+    runtime.session = session
+    runtime.max_pos = 512
+    runtime.kv_cache = "half"
+    runtime.k_cache = [session.zeros(plane_bytes(512, "half"))]
+    runtime.v_cache = [session.zeros(plane_bytes(512, "half"))]
+    bind_plane(runtime)
+    count = 4
+    query = np.ones((count, 24, 256), dtype=np.float32)
+    key = np.ones((count, 4, 256), dtype=np.float32)
+    value = np.ones((count, 4, 256), dtype=np.float32)
+    for token in range(count):
+        value[token] = np.float32(token + 1)
+    gate = np.zeros((count, 24, 256), dtype=np.float32)
+    dest = session.zeros(count * 24 * 256 * 4)
+    session.begin()
+    attend_plane(
+        runtime,
+        query=session.upload(query),
+        key=session.upload(key),
+        value=session.upload(value),
+        gate=session.upload(gate),
+        dest=dest,
+        pos0=0,
+        count=count,
+        slot=0,
+    )
+    session.end()
+    got = session.download_f32(dest, count * 24 * 256).reshape(count, 24, 256)
+    expect = np.zeros_like(got)
+    for token in range(count):
+        expect[token] = np.float32(0.5 * (token + 2) / 2.0)
+    _close("attention half", got, expect, atol=2e-3)
+    query1 = np.ones((1, 24, 256), dtype=np.float32)
+    key1 = np.ones((1, 4, 256), dtype=np.float32)
+    value1 = np.full((1, 4, 256), 5.0, dtype=np.float32)
+    gate1 = np.zeros((1, 24, 256), dtype=np.float32)
+    dest1 = session.zeros(24 * 256 * 4)
+    session.begin()
+    attend_plane(
+        runtime,
+        query=session.upload(query1),
+        key=session.upload(key1),
+        value=session.upload(value1),
+        gate=session.upload(gate1),
+        dest=dest1,
+        pos0=4,
+        count=1,
+        slot=0,
+    )
+    session.end()
+    got1 = session.download_f32(dest1, 24 * 256).reshape(24, 256)
+    expect1 = np.full_like(got1, np.float32(1.5))
+    _close("attention half decode", got1, expect1, atol=2e-3)
+
+
+def check_attention_blocks(session: Session) -> None:
+    """Decode across two 512-key blocks. Values 1 and 2 are exact in fp8."""
+    from qwen38_27b.metal41.attn import attend_plane, bind_plane
+    from qwen38_27b.metal41.cache import plane_bytes
+
+    class Runtime:
+        pass
+
+    runtime = Runtime()
+    runtime.session = session
+    runtime.max_pos = 2048
+    runtime.kv_cache = "fp8_e4m3"
+    runtime.k_cache = [session.zeros(plane_bytes(2048, "fp8_e4m3"))]
+    runtime.v_cache = [session.zeros(plane_bytes(2048, "fp8_e4m3"))]
+    bind_plane(runtime)
+    count = 1024
+    query = np.ones((count, 24, 256), dtype=np.float32)
+    key = np.ones((count, 4, 256), dtype=np.float32)
+    value = np.ones((count, 4, 256), dtype=np.float32)
+    value[512:] = np.float32(2)
+    gate = np.zeros((count, 24, 256), dtype=np.float32)
+    session.begin()
+    attend_plane(
+        runtime,
+        query=session.upload(query),
+        key=session.upload(key),
+        value=session.upload(value),
+        gate=session.upload(gate),
+        dest=session.zeros(count * 24 * 256 * 4),
+        pos0=0,
+        count=count,
+        slot=0,
+    )
+    session.end()
+    one = 1
+    dest = session.zeros(one * 24 * 256 * 4)
+    session.begin()
+    attend_plane(
+        runtime,
+        query=session.upload(np.ones((one, 24, 256), dtype=np.float32)),
+        key=session.upload(np.ones((one, 4, 256), dtype=np.float32)),
+        value=session.upload(np.full((one, 4, 256), np.float32(2))),
+        gate=session.upload(np.zeros((one, 24, 256), dtype=np.float32)),
+        dest=dest,
+        pos0=count,
+        count=one,
+        slot=0,
+    )
+    session.end()
+    got = session.download_f32(dest, one * 24 * 256).reshape(one, 24, 256)
+    expect = np.full_like(got, np.float32(0.5 * (512 + 513 * 2) / 1025))
+    _close("attention blocks", got, expect, atol=2e-3)
+
+
+def _codes_close(name: str, got: np.ndarray, expect: np.ndarray) -> None:
+    delta = np.abs(got.astype(np.int16) - expect.astype(np.int16))
+    step = int(delta.max()) if delta.size else 0
+    if step > 1:
+        message = f"{name} code step {step}"
+        raise AssertionError(message)
+
+
+def _channel_i8(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    peak = np.max(np.abs(matrix), axis=1)
+    scale = np.where(peak > 0.0, peak / np.float32(127.0), np.float32(0.0)).astype(np.float32)
+    inv = np.zeros_like(peak)
+    np.divide(np.float32(127.0), peak, out=inv, where=peak > 0.0)
+    codes = np.rint(matrix * inv[:, None])
+    return np.clip(codes, -127, 127).astype(np.int8), scale
+
+
+def _row_i8(activation: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    values = np.ascontiguousarray(activation, dtype=np.float32)
+    return _channel_i8(values)
+
+
+def _i8_product(
+    act_codes: np.ndarray,
+    act_scale: np.ndarray,
+    weight_codes: np.ndarray,
+    weight_scale: np.ndarray,
+) -> np.ndarray:
+    acc = act_codes.astype(np.int64) @ weight_codes.astype(np.int64).T
+    return (acc * act_scale.astype(np.float64)[:, None] * weight_scale.astype(np.float64)[None, :]).astype(
+        np.float32
+    )
+
+
+def check_i8_prefill(session: Session) -> None:
+    rng = np.random.default_rng(7)
+    cases = (
+        ("fp4", "prefill_i8_n64", 64, 64, 256),
+        ("fp8", "prefill_i8_n64", 64, 64, 256),
+        ("fp4", "prefill_i8_m32", 64, 128, 256),
+    )
+    for kind, kernel, rows, cols, inner in cases:
+        activation = rng.normal(scale=0.25, size=(rows, inner)).astype(np.float16)
+        activation[0, :] = np.float16(0.0)
+        weight = rng.normal(scale=0.25, size=(cols, inner)).astype(np.float32)
+        weight[1, :] = np.float32(0.0)
+        if kind == "fp4":
+            data, scales = quantize_fp4(weight)
+            restored = dequant_fp4(data, scales, cols, inner)
+            restore = "restore_fp4_i8"
+        else:
+            data, scales = quantize_fp8(weight)
+            restored = dequant_fp8(data, scales, cols, inner)
+            restore = "restore_fp8_i8"
+        expect_codes, expect_scale = _channel_i8(restored)
+        act_codes, act_scale = _row_i8(activation.astype(np.float32))
+        stage = session.zeros(cols * inner + cols * 4)
+        act = session.zeros(rows * inner)
+        act_factors = session.zeros(rows * 4)
+        destination = session.zeros(rows * cols * 4)
+        width = int(session.pipes[kernel].threadExecutionWidth())
+        groups = (cols // 128, rows // 32, 1) if kernel.endswith("m32") else (cols // 64, rows // 64, 1)
+        session.begin()
+        session.encode(
+            restore,
+            [
+                (session.upload(data), 0),
+                (session.upload(scales), 0),
+                (stage, 0),
+                (stage, cols * inner),
+            ],
+            [np.uint32(cols).tobytes(), np.uint32(inner).tobytes()],
+            (cols, 1, 1),
+            (256, 1, 1),
+        )
+        session.encode(
+            "quantize_half_i8",
+            [
+                (session.upload(np.ascontiguousarray(activation)), 0),
+                (act, 0),
+                (act_factors, 0),
+            ],
+            [np.uint32(rows).tobytes(), np.uint32(inner).tobytes()],
+            (rows, 1, 1),
+            (256, 1, 1),
+        )
+        session.encode(
+            kernel,
+            [(act, 0), (stage, 0), (destination, 0)],
+            [np.uint32(rows).tobytes(), np.uint32(cols).tobytes(), np.uint32(inner).tobytes()],
+            groups,
+            (width * 4, 1, 1),
+        )
+        session.encode(
+            "scale_i8_f32",
+            [(destination, 0), (act_factors, 0), (stage, cols * inner)],
+            [np.uint32(rows).tobytes(), np.uint32(cols).tobytes()],
+            ((rows * cols + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        session.end()
+        got_codes = np.frombuffer(session.download(stage, cols * inner), dtype=np.int8).reshape(cols, inner)
+        got_scale = np.frombuffer(
+            session.download(stage, cols * inner + cols * 4)[cols * inner :], dtype=np.float32
+        )
+        _codes_close(f"{kind} {kernel} restore", got_codes, expect_codes)
+        _close(f"{kind} {kernel} scale", got_scale, expect_scale, rtol=1e-6, atol=1e-6)
+        got_act = np.frombuffer(session.download(act, rows * inner), dtype=np.int8).reshape(rows, inner)
+        got_act_scale = session.download_f32(act_factors, rows)
+        _codes_close(f"{kind} {kernel} activation", got_act, act_codes)
+        _close(f"{kind} {kernel} act scale", got_act_scale, act_scale, rtol=1e-6, atol=1e-6)
+        expect = _i8_product(got_act, got_act_scale, got_codes, got_scale)
+        got = session.download_f32(destination, rows * cols).reshape(rows, cols)
+        _close(f"{kind} {kernel}", got, expect, rtol=1e-5, atol=1e-4)
+
+
+def _draw_id(logits: list[float], temperature: float, top_p: float, top_k: int, uniform: float) -> int:
+    """Sort reference for the device draw. A tie keeps the lower id."""
+    scores = [float(value) for value in logits]
+    count = len(scores)
+    if 0 < top_k < count:
+        order = sorted(range(count), key=lambda index: (-scores[index], index))
+        keep = set(order[:top_k])
+    else:
+        keep = set(range(count))
+    scaled = [
+        scores[index] / temperature if index in keep and math.isfinite(scores[index]) else -math.inf
+        for index in range(count)
+    ]
+    finite = [value for value in scaled if math.isfinite(value)]
+    if not finite:
+        return max(range(count), key=lambda index: (scores[index], -index))
+    peak = max(finite)
+    probs = [math.exp(value - peak) if math.isfinite(value) else 0.0 for value in scaled]
+    total = sum(probs)
+    if 0.0 < top_p < 1.0 and total > 0.0:
+        order = sorted(range(count), key=lambda index: (-probs[index], index))
+        cursor = 0.0
+        chosen: list[int] = []
+        for index in order:
+            if probs[index] <= 0.0:
+                break
+            cursor += probs[index] / total
+            chosen.append(index)
+            if cursor > top_p:
+                break
+        mask = [0.0] * count
+        for index in chosen:
+            mask[index] = probs[index]
+        probs = mask
+        total = sum(probs)
+    pick = float(np.float32(uniform))
+    cursor = 0.0
+    last = 0
+    for index, prob in enumerate(probs):
+        if prob <= 0.0:
+            continue
+        cursor += prob / total
+        last = index
+        if pick < cursor:
+            return index
+    return last
+
+
+def _picked(session: Session, pick: Any) -> int:
+    _value, index = struct.unpack_from("<fI", session.download(pick, 8))
+    return int(index)
+
+
+def check_sample(session: Session) -> None:
+    count = 256
+    groups = (count + 255) // 256
+    logits = np.full(count, -100.0, dtype=np.float32)
+    logits[4] = np.float32(3.0)
+    logits[9] = np.float32(3.0)
+    buf = session.upload(logits)
+    values = session.zeros(groups * 4)
+    indexes = session.zeros(groups * 4)
+    pick = session.zeros(16)
+    session.begin()
+    session.encode(
+        "argmax_partial",
+        [(buf, 0), (values, 0), (indexes, 0)],
+        [struct.pack("<I", count)],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_final",
+        [(values, 0), (indexes, 0), (pick, 0), (pick, 4)],
+        [struct.pack("<I", groups)],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 4
+
+    logits = np.full(count, -100.0, dtype=np.float32)
+    logits[0] = np.float32(1.0)
+    logits[1] = np.float32(1.2)
+    buf = session.upload(logits)
+    ids = struct.pack("<I", 1)
+    deltas = struct.pack("<f", -0.5)
+    session.begin()
+    session.encode(
+        "logit_adjust",
+        [(buf, 0), (session.upload(ids), 0), (session.upload(deltas), 0)],
+        [struct.pack("<I", 1)],
+        (1, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_partial",
+        [(buf, 0), (values, 0), (indexes, 0)],
+        [struct.pack("<I", count)],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_final",
+        [(values, 0), (indexes, 0), (pick, 0), (pick, 4)],
+        [struct.pack("<I", groups)],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 0
+
+    logits = np.full(count, -100.0, dtype=np.float32)
+    logits[2] = np.float32(4.0)
+    logits[3] = np.float32(3.5)
+    buf = session.upload(logits)
+    counts = session.zeros(count * 4)
+    session.begin()
+    session.encode(
+        "bump_count",
+        [(counts, 0)],
+        [struct.pack("<I", 2), struct.pack("<I", count)],
+        (1, 1, 1),
+        (32, 1, 1),
+    )
+    session.encode(
+        "penalize",
+        [(buf, 0), (counts, 0)],
+        [
+            struct.pack("<I", count),
+            struct.pack("<f", 1.5),
+            struct.pack("<f", 0.0),
+        ],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_partial",
+        [(buf, 0), (values, 0), (indexes, 0)],
+        [struct.pack("<I", count)],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_final",
+        [(values, 0), (indexes, 0), (pick, 0), (pick, 4)],
+        [struct.pack("<I", groups)],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 3
+
+    logits = np.full(count, -100.0, dtype=np.float32)
+    logits[10] = np.float32(5.0)
+    logits[20] = np.float32(4.0)
+    logits[30] = np.float32(1.0)
+    buf = session.upload(logits)
+    top_s = session.zeros(groups * 32 * 4)
+    top_i = session.zeros(groups * 32 * 4)
+    for uniform, expect in ((0.0, 10), (0.9, 20)):
+        session.begin()
+        session.encode(
+            "sample_topk_partial",
+            [(buf, 0), (top_s, 0), (top_i, 0)],
+            [struct.pack("<I", count), struct.pack("<I", 2)],
+            (groups, 1, 1),
+            (256, 1, 1),
+        )
+        session.encode(
+            "sample_topk_draw",
+            [(top_s, 0), (top_i, 0), (pick, 0), (pick, 4)],
+            [
+                struct.pack("<I", groups),
+                struct.pack("<I", 2),
+                struct.pack("<f", 1.0),
+                struct.pack("<f", 1.0),
+                struct.pack("<f", uniform),
+            ],
+            (1, 1, 1),
+            (1, 1, 1),
+        )
+        session.end()
+        got = _picked(session, pick)
+        assert got == expect, (uniform, got, expect)
+        assert got == _draw_id(logits.tolist(), 1.0, 1.0, 2, uniform)
+
+    session.begin()
+    session.encode(
+        "sample_topk_partial",
+        [(buf, 0), (top_s, 0), (top_i, 0)],
+        [struct.pack("<I", count), struct.pack("<I", 2)],
+        (groups, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "sample_topk_draw",
+        [(top_s, 0), (top_i, 0), (pick, 0), (pick, 4)],
+        [
+            struct.pack("<I", groups),
+            struct.pack("<I", 2),
+            struct.pack("<f", 1.0),
+            struct.pack("<f", 0.5),
+            struct.pack("<f", 0.99),
+        ],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 10
+
+    wide = np.full(count, -100.0, dtype=np.float32)
+    for index in range(50):
+        wide[index] = np.float32(float(50 - index))
+    wide_buf = session.upload(wide)
+    session.begin()
+    session.encode(
+        "sample_scan",
+        [(wide_buf, 0), (top_s, 0), (pick, 0), (pick, 4)],
+        [
+            struct.pack("<I", count),
+            struct.pack("<f", 1.0),
+            struct.pack("<f", 0.8),
+            struct.pack("<I", 0),
+            struct.pack("<f", 0.25),
+        ],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    expect = _draw_id(wide.tolist(), 1.0, 0.8, 0, 0.25)
+    got = _picked(session, pick)
+    assert got == expect, (got, expect)
+
+    session.begin()
+    session.encode(
+        "sample_scan",
+        [(wide_buf, 0), (top_s, 0), (pick, 0), (pick, 4)],
+        [
+            struct.pack("<I", count),
+            struct.pack("<f", 0.7),
+            struct.pack("<f", 0.95),
+            struct.pack("<I", 40),
+            struct.pack("<f", 0.1),
+        ],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    expect = _draw_id(wide.tolist(), 0.7, 0.95, 40, 0.1)
+    got = _picked(session, pick)
+    assert got == expect, (got, expect)
+
+    count2 = 512
+    groups2 = 2
+    span = np.full(count2, -50.0, dtype=np.float32)
+    span[300] = np.float32(9.0)
+    span_buf = session.upload(span)
+    values2 = session.zeros(groups2 * 4)
+    indexes2 = session.zeros(groups2 * 4)
+    session.begin()
+    session.encode(
+        "argmax_partial",
+        [(span_buf, 0), (values2, 0), (indexes2, 0)],
+        [struct.pack("<I", count2)],
+        (groups2, 1, 1),
+        (256, 1, 1),
+    )
+    session.encode(
+        "argmax_final",
+        [(values2, 0), (indexes2, 0), (pick, 0), (pick, 4)],
+        [struct.pack("<I", groups2)],
+        (1, 1, 1),
+        (1, 1, 1),
+    )
+    session.end()
+    assert _picked(session, pick) == 300
+
+
+def check_fill_mrope(session: Session) -> None:
+    from qwen38_27b.metal41.vision import pack_segments, position_at
+
+    segments = ((0, 1, 0, 0), (1, 4, 1, 2), (5, 1, 3, 0))
+    blob = session.upload(pack_segments(segments))
+
+    def run(pos0: int, count: int) -> None:
+        dest = session.zeros(count * 12)
+        session.begin()
+        session.encode(
+            "fill_mrope",
+            [(dest, 0), (blob, 0)],
+            [struct.pack("<I", pos0), struct.pack("<I", count), struct.pack("<I", len(segments))],
+            ((count + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        session.end()
+        raw = struct.unpack(f"<{count * 3}I", session.download(dest, count * 12))
+        for offset in range(count):
+            expect = position_at(segments, pos0 + offset)
+            assert expect is not None
+            got = raw[offset * 3 : offset * 3 + 3]
+            assert got == expect
+
+    run(0, 6)
+    run(2, 2)
+
+
+def check_patch_cast(session: Session) -> None:
+    rows, row_pad, logical, inner, stride = 2, 2, 2, 4, 2
+    src = np.array([1.5, 2.5, 3.5, 4.5], dtype=np.float32)
+    dst = session.zeros(row_pad * inner * 2)
+    session.begin()
+    session.encode(
+        "vision_to_half",
+        [(session.upload(src), 0), (dst, 0)],
+        [struct.pack("<I", value) for value in (rows, row_pad, logical, inner, stride)],
+        ((row_pad * inner + 255) // 256, 1, 1),
+        (256, 1, 1),
+    )
+    session.end()
+    got = np.frombuffer(session.download(dst, row_pad * inner * 2), dtype=np.float16).reshape(row_pad, inner)
+    expect = np.zeros((row_pad, inner), dtype=np.float16)
+    expect[0, :2] = np.array([1.5, 2.5], dtype=np.float16)
+    expect[1, :2] = np.array([3.5, 4.5], dtype=np.float16)
+    assert np.array_equal(got, expect)
+
+
+CHECKS = (
+    ("fp4 tile", check_fp4_tile),
+    ("int8 prefill", check_i8_prefill),
+    ("fp4 gemv", check_fp4_gemv),
+    ("fp4 x4", check_fp4_x4),
+    ("fp4 span2", check_fp4_span2),
+    ("fp4 span3", check_fp4_span3),
+    ("fp8 prefill", check_fp8_prefill),
+    ("fp8 x4", check_fp8_x4),
+    ("fp8 gate up", check_fp8_gate_up),
+    ("rms", check_rms),
+    ("swiglu", check_swiglu),
+    ("deltanet", check_deltanet),
+    ("conv", check_conv),
+    ("e4m3", check_e4m3),
+    ("rope", check_rope),
+    ("vision gelu", check_vision_gelu),
+    ("vision erf gelu", check_vision_gelu_erf),
+    ("attention", check_attention),
+    ("attention half", check_attention_half),
+    ("attention blocks", check_attention_blocks),
+    ("sample", check_sample),
+    ("image rope", check_fill_mrope),
+    ("patch cast", check_patch_cast),
+)
+
+
+def run_checks(session: Session | None = None) -> dict[str, object]:
+    device = session if session is not None else Session()
+    rows: list[tuple[str, bool, str]] = []
+    for name, fn in CHECKS:
+        try:
+            fn(device)
+        except (AssertionError, RuntimeError, ValueError) as exc:
+            rows.append((name, False, str(exc)))
+        else:
+            rows.append((name, True, ""))
+    passed = all(ok for _name, ok, _detail in rows)
+    return {"ok": passed, "rows": rows, "device": device.device_name}
+
+
+def format_report(report: dict[str, object]) -> str:
+    lines = [f"device: {report['device']}"]
+    rows = report["rows"]
+    assert isinstance(rows, list)
+    for name, ok, detail in rows:
+        state = "ok" if ok else "mismatch"
+        suffix = f" {detail}" if detail else ""
+        lines.append(f"{name}: {state}{suffix}")
+    return "\n".join(lines)

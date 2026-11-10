@@ -6,17 +6,17 @@ import io
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35-4b"
+_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35_4b"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from favlo.console import Console  # noqa: E402
-from qwen35_4b import progress  # noqa: E402
+from qwen35_4b.metal41 import progress  # noqa: E402
 
 
 def test_phase_helpers_use_format_rate() -> None:
     stream = io.StringIO()
-    ui = Console("plain", pipeline="qwen35-4b", stream=stream, start_thread=False)
+    ui = Console("plain", pipeline="qwen35_4b", stream=stream, start_thread=False)
     prefill = progress.begin_phase(ui, "prefill", 10)
     progress.note_prefill(prefill, 4)
     assert prefill.done == 4
@@ -37,7 +37,7 @@ def test_prefill_chunk_waits_before_the_progress_tick() -> None:
         Path(__file__).resolve().parents[1]
         / "pipelines"
         / "metal41"
-        / "qwen35-4b"
+        / "qwen35_4b"
         / "qwen35_4b"
         / "forward.py"
     )

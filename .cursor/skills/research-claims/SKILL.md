@@ -58,7 +58,7 @@ The package license and readme are the rerun instructions. Do not add another li
 
 ## Key/value plane
 
-A recorded rate, a dispatch sum, or a needle row names the key/value plane that serve loaded. Planes differ in width, scale, and layout. A number measured on one plane does not fill a row for another. The pipeline note lists the planes that server accepts. Read that note for the names, and write the loaded name after aliases resolve. On `qwen36-35b-a3b` those names are `half`, `fp8_e4m3`, `e2m1`, and `f32`. On `qwen38-27b` those names are `half` and `fp8_e4m3`; an omitted cache uses `half`. `f16` and `fp16` resolve to `half`. `e4m3` and `fp8` resolve to `fp8_e4m3`. `fp4` resolves to `e2m1`.
+A recorded rate, a dispatch sum, or a needle row names the key/value plane that serve loaded. Planes differ in width, scale, and layout. A number measured on one plane does not fill a row for another. The pipeline note lists the planes that server accepts. Read that note for the names, and write the loaded name after aliases resolve. On `qwen36_35b_a3b` those names are `half`, `fp8_e4m3`, `e2m1`, and `f32`. On `qwen38_27b` those names are `half` and `fp8_e4m3`; an omitted cache uses `half`. `f16` and `fp16` resolve to `half`. `e4m3` and `fp8` resolve to `fp8_e4m3`. `fp4` resolves to `e2m1`.
 
 ## Needle
 

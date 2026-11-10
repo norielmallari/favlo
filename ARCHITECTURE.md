@@ -1,6 +1,6 @@
 # Favlo architecture
 
-One model is one pipeline. `favlo serve` listens with nothing loaded. A new `favlo serve` stops another listener on that address and any pipeline process before it listens. The `model` field on `POST /v1/responses` loads one registry row. Every served language pipeline answers that route through `handle_responses`. `POST /v1/chat/completions` is translated on the listener (`chat_to_responses` and `ChatWire` in `favlo.responses`) into that same path; pipelines do not implement Chat Completions. A chat record and a media record are not resident together. An embeddings record opens beside the resident model and stays warm for `embeddings_ttl_seconds` after the request returns (`0` closes immediately). A pipeline does not import another pipeline. Z-Image-Turbo and Z-Image both call the shared forward in `pipelines/metal41/z-image/z_image/`. No other pipeline shares a forward, records, or kernels. Quantize and the other non-serve commands require `favlo --<pipeline>`. A pipeline command does not generate. `favlo media` is that call.
+One model is one pipeline. `favlo serve` listens with nothing loaded. A new `favlo serve` stops another listener on that address and any pipeline process before it listens. The `model` field on `POST /v1/responses` loads one registry row. Every served language pipeline answers that route through `handle_responses`. `POST /v1/chat/completions` is translated on the listener (`chat_to_responses` and `ChatWire` in `favlo.responses`) into that same path; pipelines do not implement Chat Completions. A chat record and a media record are not resident together. An embeddings record opens beside the resident model and stays warm for `embeddings_ttl_seconds` after the request returns (`0` closes immediately). A pipeline does not import another pipeline. Z-Image-Turbo and Z-Image both call the shared forward in `pipelines/z_image/metal41/`. No other pipeline shares a forward, records, or kernels. Quantize and the other non-serve commands require `favlo --<pipeline>`. A pipeline command does not generate. `favlo media` is that call.
 
 This file is the map and the write set. It wins for the listener, the registry, the console, and which files an agent may edit. A pipeline note wins for that pipeline's records, cache, and kernels. A measured research remainder stays at `docs/<pipeline>/research/<slug>.md` and is indexed from [RESEARCH.md](RESEARCH.md).
 
@@ -8,7 +8,7 @@ This file is the map and the write set. It wins for the listener, the registry, 
 
 | Area | Code | Note |
 |---|---|---|
-| Command discovery | `src/favlo/cli.py` | This file. The command scans `pipelines/<runtime>/<pipeline>/` and each `pipeline_root` stored on a registry row. Adding a runtime does not edit `cli.py`. |
+| Command discovery | `src/favlo/cli.py` | This file. The command scans `pipelines/<pipeline>/<runtime>/` and each `pipeline_root` stored on a registry row. Adding a runtime does not edit `cli.py`. |
 | Listener and daemon | `src/favlo/listener.py`, `src/favlo/daemon.py` | [docs/serve.md](docs/serve.md) |
 | Persona and configuration tools | `src/favlo/persona.py`, `src/favlo/config_tools.py` | [docs/ai-assistance](docs/ai-assistance/README.md). The persona is the horse. Favlo web stores it on the Favlo agent and enables the configuration tool group there. |
 | Console | `src/favlo/console.py` | [docs/console.md](docs/console.md) |
@@ -29,59 +29,41 @@ Shared code is `src/favlo/`. `Pipeline` in `pipeline.py` is the daemon call. `La
 
 Each runtime is a separate write set. An agent developing one runtime edits that set and leaves the others untouched.
 
-| Pipeline | Entry | Package | As-built note |
-|---|---|---|---|
-| `qwen38-27b` | `pipelines/metal41/qwen38-27b/qwen38-27b.py` | `pipelines/metal41/qwen38-27b/qwen38_27b/` | [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md) |
-| `qwen36-35b-a3b` | `pipelines/metal41/qwen36-35b-a3b/qwen36-35b-a3b.py` | `pipelines/metal41/qwen36-35b-a3b/qwen36_35b_a3b/` | [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md) |
-| `gemma4-26b-a4b` | `pipelines/metal41/gemma4-26b-a4b/gemma4-26b-a4b.py` | `pipelines/metal41/gemma4-26b-a4b/gemma4_26b_a4b/` | [docs/gemma4-26b-a4b/README.md](docs/gemma4-26b-a4b/README.md) |
-| `qwen35-4b` | `pipelines/metal41/qwen35-4b/qwen35-4b.py` | `pipelines/metal41/qwen35-4b/qwen35_4b/` | [docs/qwen35-4b/README.md](docs/qwen35-4b/README.md) |
-| `umt5-xxl` | `pipelines/metal41/umt5-xxl/umt5-xxl.py` | `pipelines/metal41/umt5-xxl/umt5_xxl/` | [docs/umt5-xxl/README.md](docs/umt5-xxl/README.md) |
-| `bge-m3` | `pipelines/metal41/bge-m3/bge-m3.py` | `pipelines/metal41/bge-m3/bge_m3/` | [docs/bge-m3/README.md](docs/bge-m3/README.md) |
+| Pipeline | Package | As-built note |
+|---|---|---|
+| `qwen38_27b` | `pipelines/qwen38_27b/metal41/` | [docs/qwen38_27b/README.md](docs/qwen38_27b/README.md) |
+| `qwen36_35b_a3b` | `pipelines/qwen36_35b_a3b/metal41/` | [docs/qwen36_35b_a3b/README.md](docs/qwen36_35b_a3b/README.md) |
+| `gemma4_26b_a4b` | `pipelines/gemma4_26b_a4b/metal41/` | [docs/gemma4_26b_a4b/README.md](docs/gemma4_26b_a4b/README.md) |
+| `qwen35_4b` | `pipelines/qwen35_4b/metal41/` | [docs/qwen35_4b/README.md](docs/qwen35_4b/README.md) |
+| `umt5_xxl` | `pipelines/umt5_xxl/metal41/` | [docs/umt5_xxl/README.md](docs/umt5_xxl/README.md) |
+| `bge_m3` | `pipelines/bge_m3/metal41/` | [docs/bge_m3/README.md](docs/bge_m3/README.md) |
 
-A media pipeline is `pipelines/<runtime>/<pipeline>/` and is registered by its module.
+A media pipeline is `pipelines/<pipeline>/<runtime>/` and is registered by its module.
 
-| Pipeline | Entry | Package | As-built note |
-|---|---|---|---|
-| `z-image-turbo` | `pipelines/metal41/z-image-turbo/z-image-turbo.py` | `pipelines/metal41/z-image-turbo/z_image_turbo/` | [docs/z-image-turbo/README.md](docs/z-image-turbo/README.md) |
-| `z-image-base` | `pipelines/metal41/z-image-base/z-image-base.py` | `pipelines/metal41/z-image-base/z_image_base/` | [docs/z-image-base/README.md](docs/z-image-base/README.md) |
+| Pipeline | Package | As-built note |
+|---|---|---|
+| `z_image_turbo` | `pipelines/z_image_turbo/metal41/` | [docs/z_image_turbo/README.md](docs/z_image_turbo/README.md) |
+| `z_image_base` | `pipelines/z_image_base/metal41/` | [docs/z_image_base/README.md](docs/z_image_base/README.md) |
 
-Z-Image-Turbo and Z-Image share the forward in `pipelines/metal41/z-image/z_image/`. That directory has no entry file, so the command scan does not list it. Each pipeline entry puts that directory on its path. The note is [docs/z-image/README.md](docs/z-image/README.md).
+Z-Image-Turbo and Z-Image share the forward in `pipelines/z_image/metal41/`. That package has no `PIPELINE` assignment, so the command scan does not list it. Served pipelines import `z_image.metal41`. The note is [docs/z_image/README.md](docs/z_image/README.md).
 
-The entry filename may contain hyphens. The command loads it by path from `{pipeline_root}/`. That directory is the pipeline's own root. It is not an importable module name. The package beside it uses underscores. The entry sets `PIPELINE` to that filename stem. A runtime's write set is the entry file, the package, `docs/<pipeline>/`, and tests that import only that package. A new runtime adds a row to the table above and its own doc directory. It does not edit another row's package, shaders, tests, or docs. Shipped rows use `runtime` `metal41` and `pipeline_root` `pipelines/metal41/<pipeline>`. `pipelines/cuda` is empty until a CUDA pipeline names the toolkit it needs. A missing or unknown `runtime` is an error.
+Layout is model → runtime: `pipelines/<pipeline>/<runtime>/` is the importable package (`import qwen35_4b.metal41`). The model directory name is the pipeline id and the CLI flag stem. `PIPELINE` on the runtime package equals that id. The write set for one backend is `pipelines/<pipeline>/<runtime>/`, `docs/<pipeline>/`, and tests that import only that package. A new runtime under an existing model adds `pipelines/<pipeline>/<runtime>/` and does not edit another model's tree. Shipped rows use `runtime` `metal41` and `pipeline_root` `pipelines/<pipeline>/metal41`. A CUDA backend for the same model is `pipelines/<pipeline>/cuda/`. A missing or unknown `runtime` is an error.
 
-## Parked
-
-A parked pipeline is not discovered and is not served. Its entry is not under `pipelines/metal41` or `pipelines/cuda`. The command scan does not list its flag. `serve` does not load it. The code stays for a future implementation.
-
-| Pipeline | Entry | Package | Note |
-|---|---|---|---|
-| `qwen38-flash-next` | `pipelines/parked/qwen38-flash-next.py` | `pipelines/parked/qwen38_flash_next/` | [docs/parked/qwen38-flash-next/architecture.md](docs/parked/qwen38-flash-next/architecture.md) |
-| `spark-x26-1-7b` | `pipelines/parked/spark-x26-1-7b.py` | `pipelines/parked/spark_x26_1_7b/` | [docs/parked/spark-x26-1-7b/README.md](docs/parked/spark-x26-1-7b/README.md) |
-
-## Failed
-
-A failed pipeline is not discovered and is not served. Its entry is not under `pipelines/metal41` or `pipelines/cuda`. `serve` does not load it, and the command scan does not list its flag.
-
-| Pipeline | Entry | Package | Note |
-|---|---|---|---|
-| `ternary-bonsai-2` | `pipelines/failed/ternary-bonsai-2.py` | `pipelines/failed/ternary_bonsai_2/` | [docs/failed/ternary-bonsai-2/README.md](docs/failed/ternary-bonsai-2/README.md) |
-| `zonos2` | `pipelines/failed/zonos2.py` | `pipelines/failed/zonos2/` | [docs/failed/zonos2/README.md](docs/failed/zonos2/README.md) |
+Parked and failed pipelines are not in the actively developed tree. Measured claims that remain are under [docs/research/history/](docs/research/history/) and say the source exists only in git history.
 
 Tests for the listener, the registry, and the console live in `tests/test_cli.py`, `tests/test_server.py`, `tests/test_registry.py`, and `tests/test_console.py`. A pipeline's tests do not import another pipeline.
 
 ## Registry
 
-`models/registry.json` is gitignored. A row stores the folder, `directory` (the quantized record that was written), the pipeline entry, `runtime`, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, `mtp`, `mtp_depth`, `enable_thinking`, optional `reasoning_effort`, and the sampling card copied from that pipeline's `sampling.py`. A row that omits `mtp` does not draft. A row that omits `mtp_depth` uses 3. A chat request that sets either field overrides the row. A row may store `parts`, named quantized directories such as `umt5`, `high`, and `low`. `serve` opens `directory` and passes `parts` to a runtime that accepts them. A row that omits `directory` opens `models/<folder>`. `runtime` is `metal41` or `cuda`. Every row stores `pipeline_root`. An omitted root is `pipelines/<runtime>/<pipeline>`. A relative root resolves against the checkout. `serve` loads `{pipeline_root}/<pipeline>.py`. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no sampling suffix. The pipeline applies its default sampling card, or the card the request selects. A suffix is a sampling preset only. Thinking follows OpenAI request fields, else `enable_thinking` / `reasoning_effort` on the row. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered language row, including each sampling suffix that row stores, and each object includes `context_length`. A pipeline that defines `handle_image`, `handle_video`, `handle_music`, `handle_voice`, or `handle_embed` is omitted, and `GET /v1/models/{id}` for that id is 404. `POST /v1/embeddings` loads the pipeline that defines `handle_embed`. An embeddings request waits until the open chat completion returns, does not set `preempt`, and does not close the resident model. Its process closes when the request returns. A chat that has not started waits while an embeddings request is queued or running. `media` stores default folder ids for `image`, `i2v`, `t2v`, `music`, and `voice`. The first registered row for a kind fills an empty key. A later read fills a key that is still empty and saves it. `embeddings` stores the folder id `POST /v1/embeddings` uses when the body omits `model`. The first registered row whose pipeline defines `handle_embed` fills an empty key. A later read fills a key that is still empty and saves it.
+`models/registry.json` is gitignored. A row stores the folder, `directory` (the quantized record that was written), the pipeline id, `runtime`, an alias, the BF16 source path, the key/value mode, the resident percent, `context_length`, `mtp`, `mtp_depth`, `enable_thinking`, optional `reasoning_effort`, and the sampling card copied from that pipeline's `sampling.py`. A row that omits `mtp` does not draft. A row that omits `mtp_depth` uses 3. A chat request that sets either field overrides the row. A row may store `parts`, named quantized directories such as `umt5`, `high`, and `low`. `serve` opens `directory` and passes `parts` to a runtime that accepts them. A row that omits `directory` opens `models/<folder>`. `runtime` is `metal41` or `cuda`. Every row stores `pipeline_root`. An omitted root is `pipelines/<pipeline>/<runtime>`. A relative root resolves against the checkout. `serve` imports `{pipeline}.{runtime}`. A row that omits `context_length` uses 131072. The stored names are the `:suffix` ids. A bare model id selects no sampling suffix. The pipeline applies its default sampling card, or the card the request selects. A suffix is a sampling preset only. Thinking follows OpenAI request fields, else `enable_thinking` / `reasoning_effort` on the row. `serve` does not register a record it finds on disk. A fresh tree has no rows. `GET /v1/models` lists every registered language and embeddings row from `registry.json`, including each sampling suffix that row stores, and each object includes `context_length`. The list does not import pipeline packages. A media row is omitted, and `GET /v1/models/{id}` for that id is 404. `POST /v1/embeddings` loads the pipeline that defines `handle_embed`. An embeddings request waits until the open chat completion returns, does not set `preempt`, and does not close the resident model. Its process closes when the request returns. A chat that has not started waits while an embeddings request is queued or running. `media` stores default folder ids for `image`, `i2v`, `t2v`, `music`, and `voice`. The first registered row for a kind fills an empty key. A later read fills a key that is still empty and saves it. `embeddings` stores the folder id `POST /v1/embeddings` uses when the body omits `model`. The first registered row whose pipeline defines `handle_embed` fills an empty key. A later read fills a key that is still empty and saves it.
 
 ## Layout
 
 ```text
-pipelines/metal41/      shipped pipelines that require Metal 4.1
-pipelines/cuda/         empty until a CUDA pipeline exists
-pipelines/parked/       pipelines kept for a future implementation; not discovered and not served
-pipelines/failed/       pipelines that are not discovered and are not served
+pipelines/<model>/metal41/   Metal 4.1 implementation package for that model
+pipelines/<model>/cuda/      CUDA implementation when that backend exists
 src/favlo/              process entry; the pipeline manager loads the pipeline a request names
-  cli.py                discovers entry files; a new runtime does not edit this
+  cli.py                discovers model packages; a new model does not edit this
   web_host.py           starts the web API and the Expo app; it does not start the listener. It does not start when the registry has no language model. The first run stores that registry model as the application default
   registry.py           folders, aliases, pipelines, and sampling variants
   listener.py           the socket; a terminal runs this process
@@ -119,7 +101,7 @@ harness/                file agent, coding agent, needle agent, worktree agent, 
 docs/                   as-built notes; see docs/README.md
 ```
 
-Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's flag: `favlo --qwen38-27b quantize`, and the same flag for the other commands. The listener runs one request. A language-model pipeline does not fuse a whole layer into one kernel. An image, video, music, or voice pipeline may place several kernels of one generation in one command buffer and may fuse those kernels. Prefill, decode, and the calibration prefill are Metal shaders. A missing kernel stays missing. The Neural Engine may run a module.
+Probe, matmul, kernels, bf16, complete, and quantize stay on that pipeline's flag: `favlo --qwen38_27b quantize`, and the same flag for the other commands. The listener runs one request. A language-model pipeline does not fuse a whole layer into one kernel. An image, video, music, or voice pipeline may place several kernels of one generation in one command buffer and may fuse those kernels. Prefill, decode, and the calibration prefill are Metal shaders. A missing kernel stays missing. The Neural Engine may run a module.
 
 ## Commands
 
@@ -128,23 +110,23 @@ uv sync --extra dev
 uv run pytest
 uv run favlo serve
 uv run favlo web
-uv run favlo --qwen38-27b quantize
-uv run favlo --qwen36-35b-a3b kernels
-uv run favlo --qwen36-35b-a3b quantize
+uv run favlo --qwen38_27b quantize
+uv run favlo --qwen36_35b_a3b kernels
+uv run favlo --qwen36_35b_a3b quantize
 uv run python -m harness.file_agent --base-url http://127.0.0.1:8129/v1 --workspace ./note-workspace
-uv run python -m harness --model qwen38-27b
-uv run python -m harness.benchmarks --model qwen38-27b
-uv run python -m harness.coding --model qwen38-27b
-uv run python -m harness.needle --model qwen36-35b-a3b --tokens 65536
-uv run python -m harness.needle --model qwen36-35b-a3b --tokens 65536 --mode retrieve --depth 0.5
-uv run python -m harness.worktree --model qwen36-35b-a3b
-uv run python -m harness.image_smoke_agent --pipeline z-image-turbo --tool generate_image
-uv run python -m harness.image_persona --pipeline z-image-turbo --tool generate_image
-uv run python -m harness.video_smoke_agent --pipeline wan22-i2v --tool generate_video
+uv run python -m harness --model qwen38_27b
+uv run python -m harness.benchmarks --model qwen38_27b
+uv run python -m harness.coding --model qwen38_27b
+uv run python -m harness.needle --model qwen36_35b_a3b --tokens 65536
+uv run python -m harness.needle --model qwen36_35b_a3b --tokens 65536 --mode retrieve --depth 0.5
+uv run python -m harness.worktree --model qwen36_35b_a3b
+uv run python -m harness.image_smoke_agent --pipeline z_image_turbo --tool generate_image
+uv run python -m harness.image_persona --pipeline z_image_turbo --tool generate_image
+uv run python -m harness.video_smoke_agent --pipeline wan22_i2v --tool generate_video
 uv run python -m harness.media_pipeline
 uv run python -m harness.language_pipeline
 uv run python -m harness.voice_smoke_agent --pipeline voxcpm2 --tool generate_voice
-uv run python -m harness.music_long_agent --pipeline ace-step-15-turbo --tool generate_music
+uv run python -m harness.music_long_agent --pipeline ace_step_15_turbo --tool generate_music
 uv run python -m harness.embeddings_agent
 uv run python -m harness.server status
 ```

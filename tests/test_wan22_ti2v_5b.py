@@ -8,13 +8,13 @@ from pathlib import Path
 
 import numpy as np
 
-from wan22_ti2v_5b.activations import apply_rope
-from wan22_ti2v_5b.avi import encode_avi
-from wan22_ti2v_5b.png import decode_png, encode_png
-from wan22_ti2v_5b.quant import pack_fp4, pack_int8, relative_rms, score_matrix
-from wan22_ti2v_5b.request import VideoRequestError, list_resolutions, parse_request, video_modes
-from wan22_ti2v_5b.runtime import _require_int8_pack
-from wan22_ti2v_5b.schedule import (
+from wan22_ti2v_5b.metal41.activations import apply_rope
+from wan22_ti2v_5b.metal41.avi import encode_avi
+from wan22_ti2v_5b.metal41.png import decode_png, encode_png
+from wan22_ti2v_5b.metal41.quant import pack_fp4, pack_int8, relative_rms, score_matrix
+from wan22_ti2v_5b.metal41.request import VideoRequestError, list_resolutions, parse_request, video_modes
+from wan22_ti2v_5b.metal41.runtime import _require_int8_pack
+from wan22_ti2v_5b.metal41.schedule import (
     blend,
     image_mask,
     latent_grid,
@@ -23,7 +23,7 @@ from wan22_ti2v_5b.schedule import (
     timesteps,
     token_count,
 )
-from wan22_ti2v_5b.vae import _patch, _unpatch
+from wan22_ti2v_5b.metal41.vae import _patch, _unpatch
 
 
 def test_video_modes_cover_text_and_image() -> None:
@@ -115,7 +115,7 @@ def test_int8_relative_rms_is_finite() -> None:
 
 
 def test_duration_floors_to_four_n_plus_one() -> None:
-    from wan22_ti2v_5b.schedule import frames_from_duration
+    from wan22_ti2v_5b.metal41.schedule import frames_from_duration
 
     assert frames_from_duration(5.0) == 117
     body = parse_request({"prompt": "a pond", "duration": 5.0})
@@ -170,7 +170,7 @@ def test_png_and_avi_roundtrip(tmp_path) -> None:
 
 
 def test_open_sets_the_ledger_cap_and_refuses_a_short_budget(tmp_path: Path, monkeypatch) -> None:
-    from wan22_ti2v_5b import runtime as runtime_mod
+    from wan22_ti2v_5b.metal41 import runtime as runtime_mod
 
     record = tmp_path / "record"
     record.mkdir()
@@ -188,8 +188,8 @@ def test_open_sets_the_ledger_cap_and_refuses_a_short_budget(tmp_path: Path, mon
 
 
 def test_a_later_budget_raises_the_tile_and_a_dip_does_not(monkeypatch) -> None:
-    from wan22_ti2v_5b.request import VideoRequest
-    from wan22_ti2v_5b.runtime import Runtime, _require_fit
+    from wan22_ti2v_5b.metal41.request import VideoRequest
+    from wan22_ti2v_5b.metal41.runtime import Runtime, _require_fit
 
     sequence = [2_000_000_000, 4_000_000_000, 1_000_000_000]
     held = {"n": sequence[0]}
@@ -199,7 +199,7 @@ def test_a_later_budget_raises_the_tile_and_a_dip_does_not(monkeypatch) -> None:
             held["n"] = sequence.pop(0)
         return held["n"]
 
-    monkeypatch.setattr("wan22_ti2v_5b.runtime.memory.budget", budget)
+    monkeypatch.setattr("wan22_ti2v_5b.metal41.runtime.memory.budget", budget)
     runtime = Runtime.__new__(Runtime)
     runtime._ceiling = 0
     runtime.frame_tile = 1

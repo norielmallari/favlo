@@ -308,7 +308,7 @@ def test_a_chat_call_does_not_unpickle_a_media_hold(tmp_path) -> None:
     import pickle
 
     from favlo.pipeline_worker import _child_state
-    from z_image.hold import ImageHold
+    from z_image.metal41.hold import ImageHold
 
     path = tmp_path / "image_hold.pkl"
     path.write_bytes(pickle.dumps(ImageHold(stage="text")))

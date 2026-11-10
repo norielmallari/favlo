@@ -19,7 +19,7 @@ from favlo.logs import favlo_home
 from favlo.registry import load_registry, models_dir
 
 MIN_RAM_BYTES = 16 << 30
-QWEN38_27B = "qwen38-27b"
+QWEN38_27B = "qwen38_27b"
 QWEN38_27B_REPO = "Qwen/Qwen3.8-27B"
 QWEN38_27B_CHECKOUT = "Qwen3.8-27B-bf16"
 _PID_NAME = "qwen38-27b.pid"
@@ -186,7 +186,7 @@ def offer_qwen38_27b(
 
 
 def _disk_check(root: Path | None) -> str | None:
-    command = [sys.executable, "-m", "favlo", "--qwen38-27b", "download", "--check"]
+    command = [sys.executable, "-m", "favlo", "--qwen38_27b", "download", "--check"]
     env = os.environ.copy()
     if root is not None:
         env["FAVLO_ROOT"] = str(root)
@@ -215,7 +215,7 @@ def _spawn(root: Path | None, home: Path | None) -> int:
         sys.executable,
         "-m",
         "favlo",
-        "--qwen38-27b",
+        "--qwen38_27b",
         "download",
         "--console",
         "plain",

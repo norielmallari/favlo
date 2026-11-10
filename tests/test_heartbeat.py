@@ -17,7 +17,7 @@ from favlo.machine import (
     suggestions_enabled,
 )
 from favlo.registry import save_registry
-from qwen38_27b.fetch import remaining_download, shortfall
+from qwen38_27b.metal41.fetch import remaining_download, shortfall
 
 
 def test_reminders_start_on_and_can_be_turned_off(tmp_path: Path) -> None:
@@ -49,7 +49,7 @@ def test_a_registered_row_is_not_offered(tmp_path: Path) -> None:
         {
             "version": 1,
             "models": {
-                "Qwen3.8-27B-fp4": {"pipeline": "qwen38-27b", "alias": "qwen38-27b"},
+                "Qwen3.8-27B-fp4": {"pipeline": "qwen38_27b", "alias": "qwen38_27b"},
             },
         },
         tmp_path,
@@ -92,7 +92,7 @@ def test_a_ready_machine_starts_the_download_once(tmp_path: Path) -> None:
 
 
 def test_a_live_pid_counts_as_downloading(tmp_path: Path) -> None:
-    path = tmp_path / "downloads" / "qwen38-27b.pid"
+    path = tmp_path / "downloads" / "qwen38_27b.pid"
     path.parent.mkdir()
     path.write_text(f"{os.getpid()}\n", encoding="utf-8")
     assert download_state(tmp_path, tmp_path) == "running"

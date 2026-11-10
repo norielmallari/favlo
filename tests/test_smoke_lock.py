@@ -63,7 +63,7 @@ def test_acquire_closes_an_idle_model(tmp_path: Path, capsys) -> None:
     try:
         code = acquire(
             root=tmp_path,
-            pipeline="qwen36-35b-a3b",
+            pipeline="qwen36_35b_a3b",
             command="smoke",
             port=port,
             pid=os.getpid(),
@@ -75,7 +75,7 @@ def test_acquire_closes_an_idle_model(tmp_path: Path, capsys) -> None:
     assert code == 0
     assert "released example-model" in text
     body = json.loads((tmp_path / "artifacts" / "pipeline-test.lock").read_text())
-    assert body == {"pipeline": "qwen36-35b-a3b", "pid": os.getpid(), "command": "smoke"}
+    assert body == {"pipeline": "qwen36_35b_a3b", "pid": os.getpid(), "command": "smoke"}
 
 
 def test_acquire_leaves_the_lock_when_a_request_is_open(tmp_path: Path) -> None:
@@ -83,7 +83,7 @@ def test_acquire_leaves_the_lock_when_a_request_is_open(tmp_path: Path) -> None:
     try:
         code = acquire(
             root=tmp_path,
-            pipeline="qwen36-35b-a3b",
+            pipeline="qwen36_35b_a3b",
             command="smoke",
             port=port,
             pid=os.getpid(),
@@ -98,7 +98,7 @@ def test_acquire_leaves_the_lock_when_a_request_is_open(tmp_path: Path) -> None:
 def test_acquire_holds_the_lock_when_serve_is_down(tmp_path: Path) -> None:
     code = acquire(
         root=tmp_path,
-        pipeline="qwen38-27b",
+        pipeline="qwen38_27b",
         command="kernels",
         port=1,
         pid=os.getpid(),
@@ -110,7 +110,7 @@ def test_acquire_holds_the_lock_when_serve_is_down(tmp_path: Path) -> None:
 def test_clear_hold_leaves_the_lock_file(tmp_path: Path) -> None:
     path = tmp_path / "artifacts" / "pipeline-test.lock"
     path.parent.mkdir()
-    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": os.getpid(), "command": "smoke"}))
+    path.write_text(json.dumps({"pipeline": "qwen38_27b", "pid": os.getpid(), "command": "smoke"}))
     server, port = _serve(200)
     try:
         code = clear_hold(port=port, pid=os.getpid())
@@ -124,7 +124,7 @@ def test_clear_hold_leaves_the_lock_file(tmp_path: Path) -> None:
 def test_release_removes_only_this_pid(tmp_path: Path) -> None:
     path = tmp_path / "artifacts" / "pipeline-test.lock"
     path.parent.mkdir()
-    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": os.getpid(), "command": "smoke"}))
+    path.write_text(json.dumps({"pipeline": "qwen38_27b", "pid": os.getpid(), "command": "smoke"}))
     server, port = _serve(200)
     try:
         code = release(root=tmp_path, port=port, pid=os.getpid())
@@ -147,10 +147,10 @@ def test_owner_pid_is_the_shell_above_uv(monkeypatch) -> None:
 def test_acquire_replaces_a_dead_pid(tmp_path: Path) -> None:
     path = tmp_path / "artifacts" / "pipeline-test.lock"
     path.parent.mkdir()
-    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": 2**30, "command": "smoke"}))
+    path.write_text(json.dumps({"pipeline": "qwen38_27b", "pid": 2**30, "command": "smoke"}))
     code = acquire(
         root=tmp_path,
-        pipeline="qwen38-27b",
+        pipeline="qwen38_27b",
         command="agent-smoke",
         port=1,
         pid=os.getpid(),
@@ -162,12 +162,12 @@ def test_acquire_replaces_a_dead_pid(tmp_path: Path) -> None:
 def test_hold_leaves_a_lock_this_shell_already_owns(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "artifacts" / "pipeline-test.lock"
     path.parent.mkdir()
-    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": 4242, "command": "smoke"}))
+    path.write_text(json.dumps({"pipeline": "qwen38_27b", "pid": 4242, "command": "smoke"}))
     monkeypatch.setattr("favlo.smoke_lock.owner_pid", lambda: 4242)
     monkeypatch.setattr("favlo.smoke_lock.alive", lambda pid: pid == 4242)
     created = hold(
         root=tmp_path,
-        pipeline="qwen38-27b",
+        pipeline="qwen38_27b",
         command="file-agent",
         port=1,
         pid=4242,
@@ -179,7 +179,7 @@ def test_hold_leaves_a_lock_this_shell_already_owns(tmp_path: Path, monkeypatch)
 def test_release_when_serve_is_down(tmp_path: Path, capsys) -> None:
     path = tmp_path / "artifacts" / "pipeline-test.lock"
     path.parent.mkdir()
-    body = {"pipeline": "qwen36-35b-a3b", "pid": os.getpid(), "command": "smoke"}
+    body = {"pipeline": "qwen36_35b_a3b", "pid": os.getpid(), "command": "smoke"}
     path.write_text(json.dumps(body))
     code = release(root=tmp_path, port=1, pid=os.getpid())
     text = capsys.readouterr().out
@@ -191,7 +191,7 @@ def test_release_when_serve_is_down(tmp_path: Path, capsys) -> None:
 def test_release_refuses_a_live_holder(tmp_path: Path) -> None:
     path = tmp_path / "artifacts" / "pipeline-test.lock"
     path.parent.mkdir()
-    body = {"pipeline": "qwen36-35b-a3b", "pid": os.getppid(), "command": "smoke"}
+    body = {"pipeline": "qwen36_35b_a3b", "pid": os.getppid(), "command": "smoke"}
     path.write_text(json.dumps(body))
     code = release(root=tmp_path, port=1, pid=os.getpid())
     assert code == 3
@@ -201,7 +201,7 @@ def test_release_refuses_a_live_holder(tmp_path: Path) -> None:
 def test_release_stale_removes_a_dead_pid(tmp_path: Path, capsys) -> None:
     path = tmp_path / "artifacts" / "pipeline-test.lock"
     path.parent.mkdir()
-    body = {"pipeline": "qwen36-35b-a3b", "pid": 2**30, "command": "smoke"}
+    body = {"pipeline": "qwen36_35b_a3b", "pid": 2**30, "command": "smoke"}
     path.write_text(json.dumps(body))
     code = release(root=tmp_path, port=1, pid=os.getpid(), stale=True)
     text = capsys.readouterr().out
@@ -213,7 +213,7 @@ def test_release_stale_removes_a_dead_pid(tmp_path: Path, capsys) -> None:
 def test_run_releases_after_the_child_exits(tmp_path: Path) -> None:
     code = run(
         root=tmp_path,
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         command="smoke",
         argv=[sys.executable, "-c", "raise SystemExit(0)"],
         port=1,
@@ -226,7 +226,7 @@ def test_run_releases_after_the_child_exits(tmp_path: Path) -> None:
 def test_run_releases_after_the_child_fails(tmp_path: Path) -> None:
     code = run(
         root=tmp_path,
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         command="smoke",
         argv=[sys.executable, "-c", "raise SystemExit(7)"],
         port=1,
@@ -243,7 +243,7 @@ def test_run_releases_after_sigint(tmp_path: Path) -> None:
         "from favlo.smoke_lock import run\n"
         "raise SystemExit(run(\n"
         "    root=Path(sys.argv[1]),\n"
-        '    pipeline="qwen36-35b-a3b",\n'
+        '    pipeline="qwen36_35b_a3b",\n'
         '    command="smoke",\n'
         '    argv=["sleep", "30"],\n'
         "    port=1,\n"
@@ -270,7 +270,7 @@ def test_run_releases_after_sigint(tmp_path: Path) -> None:
 def test_acquire_wait_zero_stays_nonblocking(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "artifacts" / "pipeline-test.lock"
     path.parent.mkdir()
-    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": os.getppid(), "command": "smoke"}))
+    path.write_text(json.dumps({"pipeline": "qwen38_27b", "pid": os.getppid(), "command": "smoke"}))
     monkeypatch.setattr("favlo.smoke_lock.repo_root", lambda: tmp_path)
     code = main(
         [
@@ -280,7 +280,7 @@ def test_acquire_wait_zero_stays_nonblocking(tmp_path: Path, monkeypatch) -> Non
             "--wait",
             "0",
             "--pipeline",
-            "qwen36-35b-a3b",
+            "qwen36_35b_a3b",
             "--command",
             "smoke",
         ]
@@ -292,10 +292,10 @@ def test_acquire_wait_zero_stays_nonblocking(tmp_path: Path, monkeypatch) -> Non
 def test_acquire_does_not_steal_a_live_lock(tmp_path: Path) -> None:
     path = tmp_path / "artifacts" / "pipeline-test.lock"
     path.parent.mkdir()
-    path.write_text(json.dumps({"pipeline": "qwen38-27b", "pid": os.getppid(), "command": "smoke"}))
+    path.write_text(json.dumps({"pipeline": "qwen38_27b", "pid": os.getppid(), "command": "smoke"}))
     code = acquire(
         root=tmp_path,
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         command="smoke",
         port=1,
         pid=os.getpid(),
@@ -310,7 +310,7 @@ def test_attach_reuses_a_listener_and_does_not_lock(tmp_path: Path, monkeypatch,
     monkeypatch.setattr("favlo.smoke_lock.unload_if_changed", lambda **_kwargs: False)
     code = attach(
         root=tmp_path,
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         command="coding",
         argv=[sys.executable, "-c", "print('ran')"],
     )
@@ -329,7 +329,7 @@ def test_attach_stops_a_listener_it_started(tmp_path: Path, monkeypatch, capsys)
     monkeypatch.setattr("favlo.daemon.stop_pid", lambda pid: stopped.append(pid))
     code = attach(
         root=tmp_path,
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         command="coding",
         argv=[sys.executable, "-c", "print('ran')"],
     )
@@ -343,7 +343,7 @@ def test_attach_stops_a_listener_it_started(tmp_path: Path, monkeypatch, capsys)
 
 def test_attach_requires_a_command(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("favlo.smoke_lock.repo_root", lambda: tmp_path)
-    code = main(["attach", "--pipeline", "qwen36-35b-a3b", "--command", "coding"])
+    code = main(["attach", "--pipeline", "qwen36_35b_a3b", "--command", "coding"])
     assert code == 2
 
 
@@ -370,12 +370,12 @@ def test_unload_if_changed_closes_a_stale_pipeline(tmp_path: Path, monkeypatch) 
     port = int(server.server_address[1])
     monkeypatch.setattr(
         "favlo.daemon.read_resident_stamp",
-        lambda _port, home=None: {"pipeline": "qwen36-35b-a3b", "started": 1.0},
+        lambda _port, home=None: {"pipeline": "qwen36_35b_a3b", "started": 1.0},
     )
     monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 50.0)
     monkeypatch.setattr("favlo.registry.resolve", lambda *_args, **_kwargs: object())
     try:
-        closed = unload_if_changed(root=tmp_path, pipeline="qwen36-35b-a3b", port=port)
+        closed = unload_if_changed(root=tmp_path, pipeline="qwen36_35b_a3b", port=port)
     finally:
         server.shutdown()
         server.server_close()
@@ -410,7 +410,7 @@ def test_unload_if_changed_uses_the_worker_clock_without_a_stamp(
     monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 50.0)
     monkeypatch.setattr("favlo.registry.resolve", lambda *_args, **_kwargs: object())
     try:
-        closed = unload_if_changed(root=tmp_path, pipeline="qwen36-35b-a3b", port=port)
+        closed = unload_if_changed(root=tmp_path, pipeline="qwen36_35b_a3b", port=port)
     finally:
         server.shutdown()
         server.server_close()
@@ -429,8 +429,8 @@ def test_etime_parses_days_hours_and_minutes() -> None:
 def test_unload_if_changed_keeps_a_current_pipeline(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "favlo.daemon.read_resident_stamp",
-        lambda _port, home=None: {"pipeline": "qwen36-35b-a3b", "started": 50.0},
+        lambda _port, home=None: {"pipeline": "qwen36_35b_a3b", "started": 50.0},
     )
     monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 1.0)
     monkeypatch.setattr("favlo.registry.resolve", lambda *_args, **_kwargs: object())
-    assert unload_if_changed(root=tmp_path, pipeline="qwen36-35b-a3b", port=1) is False
+    assert unload_if_changed(root=tmp_path, pipeline="qwen36_35b_a3b", port=1) is False

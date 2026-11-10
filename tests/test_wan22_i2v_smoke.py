@@ -11,12 +11,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD = ROOT / "models" / "Wan2.2-I2V-A14B-int8"
-NOTE = ROOT / "docs" / "wan22-i2v" / "smoke.json"
-OUT = ROOT / "artifacts" / "wan22-i2v-smoke.mp4"
+NOTE = ROOT / "docs" / "wan22_i2v" / "smoke.json"
+OUT = ROOT / "artifacts" / "wan22_i2v-smoke.mp4"
 
 
 def test_kernels() -> None:
-    from wan22_i2v.commands import kernels
+    from wan22_i2v.metal41.commands import kernels
 
     assert kernels() == 0
 
@@ -29,8 +29,8 @@ def test_shortest_320p_video() -> None:
     if not (RECORD / "manifest.json").is_file():
         pytest.fail("packed record is not present")
     from harness.video_mp4 import write_mp4
-    from wan22_i2v.runtime import Runtime
-    from wan22_i2v.video import avi_meta
+    from wan22_i2v.metal41.runtime import Runtime
+    from wan22_i2v.metal41.video import avi_meta
 
     note = json.loads(NOTE.read_text(encoding="utf-8"))
     frames = int(note["frames"])

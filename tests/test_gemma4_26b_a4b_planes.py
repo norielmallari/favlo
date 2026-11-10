@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 
 from favlo.prefix import PrefixHeader, RegionRef
-from gemma4_26b_a4b.checkpoint import load_tensor, tensor_names
-from gemma4_26b_a4b.geometry import GLOBAL_LAYERS, expected, local_layers
-from gemma4_26b_a4b.planes import (
+from gemma4_26b_a4b.metal41.checkpoint import load_tensor, tensor_names
+from gemma4_26b_a4b.metal41.geometry import GLOBAL_LAYERS, expected, local_layers
+from gemma4_26b_a4b.metal41.planes import (
     align_k,
     expert_bytes,
     expert_planes,
@@ -20,7 +20,7 @@ from gemma4_26b_a4b.planes import (
     restore_matrix,
     scale_stride,
 )
-from gemma4_26b_a4b.prefix import (
+from gemma4_26b_a4b.metal41.prefix import (
     CacheAdapter,
     global_nbytes,
     local_nbytes,
@@ -28,7 +28,7 @@ from gemma4_26b_a4b.prefix import (
     pack_local,
     pack_token_major,
 )
-from gemma4_26b_a4b.promote import promotion_count, select_promoted
+from gemma4_26b_a4b.metal41.promote import promotion_count, select_promoted
 
 
 def test_fp8_roundtrip_and_zero_block() -> None:
@@ -207,7 +207,7 @@ def test_prefix_pack_length_and_exact_file_refusal() -> None:
     assert len(packed_global) == global_nbytes(count)
     header = PrefixHeader(
         path=Path("prefix.bin"),
-        model="gemma4-26b-a4b",
+        model="gemma4_26b_a4b",
         digest=b"\0" * 32,
         tag="half",
         tokens=(1, 2, 3, 4),

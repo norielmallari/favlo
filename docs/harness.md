@@ -163,7 +163,7 @@ A Microsoft Agent Framework agent on the registry default chat model. `--tool` m
 python -m harness.image_attachment
 ```
 
-Posts one chat completion to `qwen38-27b` with `tests/assets/favlo-horse.png`. The user content is a text part, then an `image_url` part whose URL is `data:image/png;base64,` and whose `detail` is `auto`. Thinking is off and temperature is 0. The question does not name the animal. Exit 0 means `prompt_tokens` is at least the merged patch count and the reply names a horse plus two marks that are only in the picture: mane, tail, hoof, chestnut, gallop, or running. A refusal, including a problem with analysis, fails. Uses the listener session. Does not take the machine lock. Not part of `pytest`. `tests/test_image_attachment.py` checks the request and the reply rule without a listener.
+Posts one chat completion to `qwen38_27b` with `tests/assets/favlo-horse.png`. The user content is a text part, then an `image_url` part whose URL is `data:image/png;base64,` and whose `detail` is `auto`. Thinking is off and temperature is 0. The question does not name the animal. Exit 0 means `prompt_tokens` is at least the merged patch count and the reply names a horse plus two marks that are only in the picture: mane, tail, hoof, chestnut, gallop, or running. A refusal, including a problem with analysis, fails. Uses the listener session. Does not take the machine lock. Not part of `pytest`. `tests/test_image_attachment.py` checks the request and the reply rule without a listener.
 
 ### Image persona
 

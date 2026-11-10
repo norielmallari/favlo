@@ -19,7 +19,7 @@ from typing import Any
 from harness.server import close_listener, open_listener
 
 HOST = "127.0.0.1"
-MODEL = "qwen38-27b"
+MODEL = "qwen38_27b"
 HORSE = Path("tests/assets") / "favlo-horse.png"
 QUESTION = "Describe the picture. Name the animal and what it is doing."
 _PATCH = 16

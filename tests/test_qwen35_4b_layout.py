@@ -1,15 +1,15 @@
-"""Layout and sampling card for qwen35-4b. No device."""
+"""Layout and sampling card for qwen35_4b. No device."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35-4b"
+_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35_4b"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qwen35_4b.layout import (  # noqa: E402
+from qwen35_4b.metal41.layout import (  # noqa: E402
     FULL,
     GDN_QKV,
     GDN_STATE_BYTES,
@@ -21,8 +21,8 @@ from qwen35_4b.layout import (  # noqa: E402
     is_full,
     kv_mode,
 )
-from qwen35_4b.mtp import kept_drafts, verify  # noqa: E402
-from qwen35_4b.sampling import DEFAULT_VARIANT, VARIANTS  # noqa: E402
+from qwen35_4b.metal41.mtp import kept_drafts, verify  # noqa: E402
+from qwen35_4b.metal41.sampling import DEFAULT_VARIANT, VARIANTS  # noqa: E402
 
 
 def test_hybrid_layer_pattern() -> None:
@@ -48,7 +48,7 @@ def test_fp8_and_cache_sizes() -> None:
 
 
 def test_vision_pack_list() -> None:
-    from qwen35_4b.convert import _order
+    from qwen35_4b.metal41.convert import _order
 
     rows = _order()
     visual = [row for row in rows if row[1].startswith("visual.")]
@@ -64,7 +64,7 @@ def test_vision_pack_list() -> None:
 
 
 def test_thinking_has_no_2048_cap() -> None:
-    from qwen35_4b.chat import _output_limit
+    from qwen35_4b.metal41.chat import _output_limit
 
     assert _output_limit({}, True, 60, 262144) == 262144 - 60
     assert _output_limit({"max_output_tokens": 32}, True, 60, 262144) == 32
@@ -74,8 +74,8 @@ def test_thinking_has_no_2048_cap() -> None:
 def test_effort_opens_thinking_without_changing_the_card() -> None:
     from types import SimpleNamespace
 
-    from qwen35_4b.chat import _request_effort
-    from qwen35_4b.sampling import mode_card
+    from qwen35_4b.metal41.chat import _request_effort
+    from qwen35_4b.metal41.sampling import mode_card
 
     instruct = SimpleNamespace(
         variant="instruct",
@@ -131,7 +131,7 @@ def test_effort_opens_thinking_without_changing_the_card() -> None:
 
 
 def test_unsupported_effort_steps_up_or_falls_back() -> None:
-    from qwen35_4b.sampling import resolve_effort
+    from qwen35_4b.metal41.sampling import resolve_effort
 
     assert resolve_effort(None) is None
     assert resolve_effort("none") == "none"
@@ -144,8 +144,8 @@ def test_unsupported_effort_steps_up_or_falls_back() -> None:
 
 
 def test_vision_still_packing() -> None:
-    from qwen35_4b.layout import IMAGE_TOKEN
-    from qwen35_4b.vision import expand_image_tokens, rope_positions, smart_size, vision_rotary
+    from qwen35_4b.metal41.layout import IMAGE_TOKEN
+    from qwen35_4b.metal41.vision import expand_image_tokens, rope_positions, smart_size, vision_rotary
 
     assert smart_size(256, 256) == (256, 256)
     assert smart_size(100, 100)[0] % 32 == 0
@@ -162,7 +162,7 @@ def test_vision_still_packing() -> None:
 
 
 def test_historical_reasoning_is_dropped() -> None:
-    from qwen35_4b.chat import _without_historical_reasoning
+    from qwen35_4b.metal41.chat import _without_historical_reasoning
 
     history = _without_historical_reasoning(
         [

@@ -115,11 +115,11 @@ def test_waiting_for_memory_names_the_pipeline(monkeypatch) -> None:
     monkeypatch.setattr("favlo.listener._log", lines.append)
     schedule = Scheduler()
     order: list[str] = []
-    schedule.hold_memory("z-image-turbo")
+    schedule.hold_memory("z_image_turbo")
     worker = threading.Thread(target=_run, args=(schedule, "chat", order))
     worker.start()
     _wait_until(lambda: schedule.waiting("chat") == 1 and lines)
-    assert lines == ["waiting for memory for z-image-turbo"]
+    assert lines == ["waiting for memory for z_image_turbo"]
     schedule.release_memory()
     worker.join(2)
     assert order == ["chat"]

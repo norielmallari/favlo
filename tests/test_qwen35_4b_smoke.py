@@ -1,4 +1,4 @@
-"""Carrot completions for qwen35-4b. Skips when the record is not installed."""
+"""Carrot completions for qwen35_4b. Skips when the record is not installed."""
 
 from __future__ import annotations
 
@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35-4b"
+_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35_4b"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qwen35_4b.chat import STOP, decode_text, encode_chat, split_thinking  # noqa: E402
-from qwen35_4b.commands import CARROT_PROMPT, installed_record  # noqa: E402
-from qwen35_4b.forward import Qwen35Runtime  # noqa: E402
-from qwen35_4b.sampling import VARIANTS  # noqa: E402
+from qwen35_4b.metal41.chat import STOP, decode_text, encode_chat, split_thinking  # noqa: E402
+from qwen35_4b.metal41.commands import CARROT_PROMPT, installed_record  # noqa: E402
+from qwen35_4b.metal41.forward import Qwen35Runtime  # noqa: E402
+from qwen35_4b.metal41.sampling import VARIANTS  # noqa: E402
 
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768

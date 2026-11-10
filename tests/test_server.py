@@ -97,15 +97,6 @@ def _listener_handle_responses(
 commands = SimpleNamespace(handle_responses=_listener_handle_responses)
 
 
-@pytest.fixture(autouse=True)
-def _stub_language_pipeline_scan(monkeypatch: pytest.MonkeyPatch) -> None:
-    """GET /v1/models must not load every registered pipeline module."""
-    monkeypatch.setattr(
-        "favlo.http_app._language_pipelines",
-        lambda: {"qwen36-35b-a3b"},
-    )
-
-
 class _Encoded:
     def __init__(self, ids: list[int]) -> None:
         self.ids = ids
@@ -456,7 +447,7 @@ def test_a_chat_that_leaves_without_a_reply_is_not_a_pipeline_failure(monkeypatc
 
     def opened(*_args, **_kwargs):
         return SimpleNamespace(
-            selection=SimpleNamespace(requested_id="qwen36-35b-a3b"),
+            selection=SimpleNamespace(requested_id="qwen36_35b_a3b"),
             runtime=object(),
             module=object(),
             embed_child=None,
@@ -478,7 +469,7 @@ def test_a_chat_that_leaves_without_a_reply_is_not_a_pipeline_failure(monkeypatc
         {"lock": threading.Lock()},
         "chat",
         "application/json",
-        b'{"model":"qwen36-35b-a3b","messages":[{"role":"user","content":"hi"}]}',
+        b'{"model":"qwen36_35b_a3b","messages":[{"role":"user","content":"hi"}]}',
         reply,
     )
     assert reply.started is False
@@ -491,7 +482,7 @@ def test_a_silent_chat_is_still_a_pipeline_failure(monkeypatch) -> None:
 
     def opened(*_args, **_kwargs):
         return SimpleNamespace(
-            selection=SimpleNamespace(requested_id="qwen36-35b-a3b"),
+            selection=SimpleNamespace(requested_id="qwen36_35b_a3b"),
             runtime=object(),
             module=object(),
             embed_child=None,
@@ -510,7 +501,7 @@ def test_a_silent_chat_is_still_a_pipeline_failure(monkeypatch) -> None:
         {"lock": threading.Lock()},
         "chat",
         "application/json",
-        b'{"model":"qwen36-35b-a3b","messages":[{"role":"user","content":"hi"}]}',
+        b'{"model":"qwen36_35b_a3b","messages":[{"role":"user","content":"hi"}]}',
         reply,
     )
     assert reply.status == 500
@@ -726,7 +717,7 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     args = _args()
     first = SimpleNamespace(
         folder="small",
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         runtime="metal41",
         pipeline_root="pipelines",
         alias=None,
@@ -736,10 +727,10 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     )
     second = SimpleNamespace(
         folder="dense",
-        pipeline="qwen38-27b",
+        pipeline="qwen38_27b",
         runtime="metal41",
         pipeline_root="pipelines",
-        alias="qwen38-27b",
+        alias="qwen38_27b",
         resident_percent=None,
         kv_cache="e4m3",
         path="dense",
@@ -747,12 +738,12 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
     install_runtime(state, args, first)
     install_runtime(state, args, first)
     assert len(opened) == 1
-    assert state["pipeline"] == "qwen36-35b-a3b"
+    assert state["pipeline"] == "qwen36_35b_a3b"
     install_runtime(state, args, second)
     assert opened[0].closed
     assert state["runtime"] is opened[1]
     assert state["record"] == "dense"
-    assert state["pipeline"] == "qwen38-27b"
+    assert state["pipeline"] == "qwen38_27b"
 
 
 def test_a_changed_pipeline_reopens_the_resident_runtime(monkeypatch) -> None:
@@ -772,7 +763,7 @@ def test_a_changed_pipeline_reopens_the_resident_runtime(monkeypatch) -> None:
     state: dict = {"runtime": None, "record": None, "pipeline": None}
     selection = SimpleNamespace(
         folder="small",
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         runtime="metal41",
         pipeline_root="pipelines",
         alias=None,
@@ -804,7 +795,7 @@ def test_an_unchanged_pipeline_keeps_the_resident_runtime(monkeypatch) -> None:
     state: dict = {"runtime": None, "record": None, "pipeline": None}
     selection = SimpleNamespace(
         folder="small",
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         runtime="metal41",
         pipeline_root="pipelines",
         alias=None,
@@ -836,7 +827,7 @@ def _embed_state(resident: _Runtime) -> dict:
     state: dict = {
         "runtime": resident,
         "record": "qwen",
-        "pipeline": "qwen36-35b-a3b",
+        "pipeline": "qwen36_35b_a3b",
         "module": resident,
         "lock": threading.Lock(),
     }
@@ -870,7 +861,7 @@ def test_an_embedding_request_leaves_the_resident_runtime(monkeypatch) -> None:
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
         "favlo.registry.resolve",
-        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+        lambda model, resident=None: _selection("bge-m3-int8", "bge_m3"),
     )
     monkeypatch.setattr(
         "favlo.pipelines.pipeline_module",
@@ -892,7 +883,7 @@ def test_an_embedding_request_leaves_the_resident_runtime(monkeypatch) -> None:
     assert resident.closed is False
     assert state["runtime"] is resident
     assert state["record"] == "qwen"
-    assert state["pipeline"] == "qwen36-35b-a3b"
+    assert state["pipeline"] == "qwen36_35b_a3b"
     assert opened[0].closed is True
 
 
@@ -936,7 +927,7 @@ def test_an_embedding_child_stays_warm_for_the_ttl_window(monkeypatch) -> None:
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
         "favlo.registry.resolve",
-        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+        lambda model, resident=None: _selection("bge-m3-int8", "bge_m3"),
     )
     monkeypatch.setattr(
         "favlo.pipelines.pipeline_module",
@@ -1009,7 +1000,7 @@ def test_a_warm_embedding_child_is_reused_within_ttl(monkeypatch) -> None:
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
         "favlo.registry.resolve",
-        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+        lambda model, resident=None: _selection("bge-m3-int8", "bge_m3"),
     )
     monkeypatch.setattr(
         "favlo.pipelines.pipeline_module",
@@ -1071,7 +1062,7 @@ def test_an_embedding_child_exit_keeps_the_resident_runtime(monkeypatch) -> None
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
         "favlo.registry.resolve",
-        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+        lambda model, resident=None: _selection("bge-m3-int8", "bge_m3"),
     )
     monkeypatch.setattr(
         "favlo.pipelines.pipeline_module",
@@ -1108,7 +1099,7 @@ def test_the_resident_embeddings_model_closes_when_the_request_returns(monkeypat
     resident.handle_embed = handle_embed
     state = _embed_state(resident)
     state["record"] = "bge-m3-int8"
-    state["pipeline"] = "bge-m3"
+    state["pipeline"] = "bge_m3"
     state["module"] = resident
 
     def start(selection, args, schedule=None):
@@ -1118,7 +1109,7 @@ def test_the_resident_embeddings_model_closes_when_the_request_returns(monkeypat
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
         "favlo.registry.resolve",
-        lambda model, resident=None: _selection("bge-m3-int8", "bge-m3"),
+        lambda model, resident=None: _selection("bge-m3-int8", "bge_m3"),
     )
     monkeypatch.setattr(
         "favlo.pipelines.pipeline_module",
@@ -1163,7 +1154,7 @@ def test_an_embedding_request_uses_the_registry_default_when_model_is_omitted(mo
     def resolve(model, resident=None):
         del resident
         seen.append(model)
-        return _selection(model, "bge-m3")
+        return _selection(model, "bge_m3")
 
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr("favlo.registry.resolve", resolve)
@@ -1216,7 +1207,7 @@ def test_an_embedding_request_refuses_a_model_that_does_not_embed(monkeypatch) -
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
         "favlo.registry.resolve",
-        lambda model, resident=None: _selection("qwen", "qwen36-35b-a3b"),
+        lambda model, resident=None: _selection("qwen", "qwen36_35b_a3b"),
     )
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda selection: SimpleNamespace())
     monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
@@ -1251,7 +1242,7 @@ def test_an_image_request_does_not_enter_the_chat_runtime(monkeypatch) -> None:
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
         "favlo.registry.resolve",
-        lambda model, resident=None: _selection("qwen", "qwen36-35b-a3b"),
+        lambda model, resident=None: _selection("qwen", "qwen36_35b_a3b"),
     )
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda selection: SimpleNamespace())
     monkeypatch.setattr("favlo.logs.embeddings_ttl_seconds", lambda settings=None: 0)
@@ -1269,7 +1260,7 @@ def test_an_image_request_does_not_enter_the_chat_runtime(monkeypatch) -> None:
     assert reply.status == 404
     assert resident.closed is False
     assert state["runtime"] is resident
-    assert state["pipeline"] == "qwen36-35b-a3b"
+    assert state["pipeline"] == "qwen36_35b_a3b"
 
 
 def test_an_image_request_opens_the_image_runtime(monkeypatch) -> None:
@@ -1283,7 +1274,7 @@ def test_an_image_request_opens_the_image_runtime(monkeypatch) -> None:
     def handle_image(reply, runtime, body, selection, args, request_state) -> None:
         del body, args, request_state
         assert runtime is opened[0]
-        assert selection.pipeline == "z-image-turbo"
+        assert selection.pipeline == "z_image_turbo"
         reply.json(200, {"data": [{"id": "image_ok"}]})
 
     def start(selection, args, schedule=None):
@@ -1298,7 +1289,7 @@ def test_an_image_request_opens_the_image_runtime(monkeypatch) -> None:
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     monkeypatch.setattr(
         "favlo.registry.resolve",
-        lambda model, resident=None: _selection("z-image-turbo", "z-image-turbo"),
+        lambda model, resident=None: _selection("z_image_turbo", "z_image_turbo"),
     )
     monkeypatch.setattr(
         "favlo.pipelines.pipeline_module",
@@ -1314,12 +1305,12 @@ def test_an_image_request_opens_the_image_runtime(monkeypatch) -> None:
             state,
             "image",
             "application/json",
-            b'{"model": "z-image-turbo", "prompt": "a horse"}',
+            b'{"model": "z_image_turbo", "prompt": "a horse"}',
             reply,
         )
         assert reply.status == 200
         assert resident.closed is True
-        assert state["pipeline"] == "z-image-turbo"
+        assert state["pipeline"] == "z_image_turbo"
         assert state["runtime"] is opened[0]
     finally:
         drop_runtime(state, args)
@@ -1350,9 +1341,9 @@ def test_open_runtime_passes_owner_when_accepted(monkeypatch) -> None:
 
     module = SimpleNamespace(open_runtime=opener)
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda _selection: module)
-    runtime = open_runtime(_selection("record", "z-image-turbo"), None, None)
+    runtime = open_runtime(_selection("record", "z_image_turbo"), None, None)
     assert seen["path"] == "record"
-    assert seen["owner"].startswith("z-image-turbo:")
+    assert seen["owner"].startswith("z_image_turbo:")
     assert runtime._owner == seen["owner"]
 
 
@@ -1366,7 +1357,7 @@ def test_open_runtime_passes_mtp_when_accepted(monkeypatch) -> None:
 
     module = SimpleNamespace(open_runtime=opener)
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda _selection: module)
-    selection = _selection("record", "qwen38-27b")
+    selection = _selection("record", "qwen38_27b")
     open_runtime(selection, None, None)
     assert seen["mtp"] is False
     selection.mtp = True
@@ -1381,7 +1372,7 @@ def test_open_runtime_omits_owner_when_absent(monkeypatch) -> None:
 
     module = SimpleNamespace(open_runtime=opener)
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda _selection: module)
-    runtime = open_runtime(_selection("record", "wan22-i2v"), None, None)
+    runtime = open_runtime(_selection("record", "wan22_i2v"), None, None)
     assert runtime.path == "record"
 
 
@@ -1404,7 +1395,7 @@ def test_a_failed_open_sweeps_spans_from_that_attempt(monkeypatch) -> None:
     state: dict = {"runtime": None, "record": None, "pipeline": None, "module": None}
     try:
         try:
-            install_runtime(state, _args(), _selection("rec", "z-image-turbo"))
+            install_runtime(state, _args(), _selection("rec", "z_image_turbo"))
         except RuntimeError as exc:
             assert str(exc) == "open failed"
         else:
@@ -1439,7 +1430,7 @@ def test_close_sweeps_the_owner_recorded_at_open(monkeypatch) -> None:
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
     state: dict = {"runtime": None, "record": None, "pipeline": None, "module": None}
     try:
-        install_runtime(state, _args(), _selection("rec", "z-image-turbo"))
+        install_runtime(state, _args(), _selection("rec", "z_image_turbo"))
         assert owner in memory.owners()
         drop_runtime(state, _args())
         assert owner not in memory.owners()
@@ -2240,20 +2231,34 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
         json.dumps(
             {
                 "version": 1,
+                "embeddings": "embed-model",
                 "models": {
                     "example-model": {
-                        "pipeline": "z-image-turbo",
+                        "pipeline": "z_image_turbo",
                         "runtime": "metal41",
                         "alias": None,
-                        "variants": {},
+                        "variants": {"generate": {}},
+                        "default_variant": "generate",
                         "context_length": 1536,
                     },
                     "text-model": {
-                        "pipeline": "qwen36-35b-a3b",
+                        "pipeline": "qwen36_35b_a3b",
                         "runtime": "metal41",
                         "alias": None,
-                        "variants": {},
+                        "variants": {
+                            "thinking": {"temperature": 1.0},
+                            "instruct": {"temperature": 0.7},
+                        },
+                        "default_variant": "thinking",
                         "context_length": 131072,
+                    },
+                    "embed-model": {
+                        "pipeline": "bge_m3",
+                        "runtime": "metal41",
+                        "alias": None,
+                        "variants": {"embed": {}},
+                        "default_variant": "embed",
+                        "context_length": 4096,
                     },
                 },
             }
@@ -2282,6 +2287,7 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
             assert status == 404, route
         models_status, _kind, models_raw = _http(port, "GET", "/v1/models")
         one_status, _kind, one_raw = _http(port, "GET", "/v1/models/text-model")
+        embed_status, _kind, embed_raw = _http(port, "GET", "/v1/models/embed-model")
         media_status, _kind, _media_raw = _http(port, "GET", "/v1/models/example-model")
         missing_status, _kind, _missing_raw = _http(port, "GET", "/v1/models/missing-model")
         release_status, _kind, release_raw = _http(
@@ -2292,9 +2298,17 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
         _stop_background(state, thread)
     assert models_status == 200
     rows = json.loads(models_raw)["data"]
-    assert [row["id"] for row in rows] == ["text-model"]
+    assert [row["id"] for row in rows] == [
+        "text-model",
+        "text-model:thinking",
+        "text-model:instruct",
+        "embed-model",
+        "embed-model:embed",
+    ]
     assert one_status == 200
-    assert json.loads(one_raw)["pipeline"] == "qwen36-35b-a3b"
+    assert json.loads(one_raw)["pipeline"] == "qwen36_35b_a3b"
+    assert embed_status == 200
+    assert json.loads(embed_raw)["pipeline"] == "bge_m3"
     assert media_status == 404
     assert missing_status == 404
     assert release_status == 200

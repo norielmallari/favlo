@@ -9,21 +9,21 @@ import numpy as np
 import pytest
 from safetensors.numpy import save_file
 
-from voxcpm2.audio import encode_wav
-from voxcpm2.block import embedding_scale, residual_add, rope_scale, swiglu
-from voxcpm2.checkpoint import summarize, tensor_header
-from voxcpm2.checks import (
+from voxcpm2.metal41.audio import encode_wav
+from voxcpm2.metal41.block import embedding_scale, residual_add, rope_scale, swiglu
+from voxcpm2.metal41.checkpoint import summarize, tensor_header
+from voxcpm2.metal41.checks import (
     attention_matches,
     conv_matches,
     linear_matches,
     rmsnorm_matches,
     rope_matches,
 )
-from voxcpm2.config import load_config
-from voxcpm2.dit import diffusion_schedule, zero_init_steps
-from voxcpm2.fsq import quantize_bound
-from voxcpm2.text import style_line
-from voxcpm2.tokenize import AUDIO_START, LineTokenizer
+from voxcpm2.metal41.config import load_config
+from voxcpm2.metal41.dit import diffusion_schedule, zero_init_steps
+from voxcpm2.metal41.fsq import quantize_bound
+from voxcpm2.metal41.text import style_line
+from voxcpm2.metal41.tokenize import AUDIO_START, LineTokenizer
 
 
 def test_embedding_scale_is_one_when_mup_is_off() -> None:
@@ -152,7 +152,7 @@ def test_line_tokens_start_with_bos_and_end_with_audio() -> None:
 
 
 def test_open_accepts_an_empty_resident_percent(tmp_path: Path) -> None:
-    from voxcpm2.runtime import open_runtime
+    from voxcpm2.metal41.runtime import open_runtime
 
     (tmp_path / "model.safetensors").write_bytes(b"")
     (tmp_path / "config.json").write_text("{", encoding="utf-8")

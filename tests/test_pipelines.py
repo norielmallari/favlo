@@ -86,29 +86,25 @@ def test_close_lets_the_next_generate_open_again() -> None:
 def test_drop_pipeline_modules_reloads_the_next_load(
     tmp_path: Path,
 ) -> None:
-    tree = tmp_path / "pipelines" / "metal41" / "probe"
-    package = tree / "pipeline_reload_probe"
-    package.mkdir(parents=True)
-    (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (tree / "probe.py").write_text(
-        'PIPELINE = "probe"\n'
-        "import sys\n"
-        "from pathlib import Path\n"
-        "_ROOT = Path(__file__).resolve().parent\n"
-        "if str(_ROOT) not in sys.path:\n"
-        "    sys.path.insert(0, str(_ROOT))\n"
-        "import pipeline_reload_probe as probe\n"
-        "VALUE = probe.VALUE\n",
+    model = tmp_path / "pipelines" / "probe"
+    runtime = model / "metal41"
+    runtime.mkdir(parents=True)
+    (model / "__init__.py").write_text("", encoding="utf-8")
+    (runtime / "__init__.py").write_text(
+        'PIPELINE = "probe"\nVALUE = 1\n',
         encoding="utf-8",
     )
     favlo_name = "favlo.cli"
     assert favlo_name in sys.modules
     first = load_pipeline("probe", tmp_path, runtime="metal41")
     assert first.VALUE == 1
-    (package / "__init__.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (runtime / "__init__.py").write_text(
+        'PIPELINE = "probe"\nVALUE = 2\n',
+        encoding="utf-8",
+    )
     stale = load_pipeline("probe", tmp_path, runtime="metal41")
     assert stale.VALUE == 1
-    shutil.rmtree(package / "__pycache__", ignore_errors=True)
+    shutil.rmtree(runtime / "__pycache__", ignore_errors=True)
     importlib.invalidate_caches()
     dropped = drop_pipeline_modules(tmp_path)
     assert dropped >= 1
@@ -116,7 +112,7 @@ def test_drop_pipeline_modules_reloads_the_next_load(
     fresh = load_pipeline("probe", tmp_path, runtime="metal41")
     assert fresh.VALUE == 2
     drop_pipeline_modules(tmp_path)
-    assert "pipeline_reload_probe" not in sys.modules
+    assert "probe.metal41" not in sys.modules
 
 
 def test_a_request_after_unload_does_not_open(monkeypatch) -> None:

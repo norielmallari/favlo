@@ -72,11 +72,10 @@ def chat_encode(selection: Any, *, thinking: bool) -> Callable[[str], int]:
         pipeline_root=getattr(selection, "pipeline_root", None),
         root=repo_root(),
     )
-    entry = str(tree)
-    if entry not in sys.path:
-        sys.path.insert(0, entry)
-    package = str(selection.pipeline).replace("-", "_")
-    module = importlib.import_module(f"{package}.chat")
+    from favlo.cli import ensure_pipelines_path
+
+    ensure_pipelines_path()
+    module = importlib.import_module(f"{selection.pipeline}.{selection.runtime}.chat")
     encode_chat = module.encode_chat
     root = Path(selection.path)
 

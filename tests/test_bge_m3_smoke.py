@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from bge_m3.runtime import Runtime
-from bge_m3.text import HIDDEN
+from bge_m3.metal41.runtime import Runtime
+from bge_m3.metal41.text import HIDDEN
 
 
 def _record() -> Path | None:

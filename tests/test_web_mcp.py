@@ -100,13 +100,13 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
                 "name": "z_image_turbo__generate_image",
                 "description": "Generate.",
                 "schema": {"type": "object"},
-                "pipeline": "z-image-turbo",
+                "pipeline": "z_image_turbo",
             },
             {"name": "echo", "description": "Echo.", "schema": {"type": "object"}},
         ]
     )
     groups = groups_from(catalog)
-    assert groups[0]["id"] == "z-image-turbo"
+    assert groups[0]["id"] == "z_image_turbo"
     assert groups[0]["tools"] == ["z_image_turbo__generate_image"]
     store = Store(tmp_path / "app.db")
     try:
@@ -119,11 +119,11 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
                 "command": "",
                 "url": "http://127.0.0.1:9/mcp",
                 "enabled": True,
-                "groups": [{"id": "z-image-turbo", "enabled": False}],
+                "groups": [{"id": "z_image_turbo", "enabled": False}],
                 "tools": catalog,
             },
         )
-        image = next(group for group in created["groups"] if group["id"] == "z-image-turbo")
+        image = next(group for group in created["groups"] if group["id"] == "z_image_turbo")
         assert image["enabled"] is False
         assert image["tools"] == []
         from web_api.mcp_tools import bundle
@@ -134,7 +134,7 @@ def test_save_keeps_a_disabled_group_and_lists_its_tools(
                     "name": "z_image_turbo__generate_image",
                     "description": "Generate.",
                     "schema": {"type": "object"},
-                    "pipeline": "z-image-turbo",
+                    "pipeline": "z_image_turbo",
                 },
                 {"name": "echo", "description": "Echo.", "schema": {"type": "object"}},
             ]
@@ -290,7 +290,7 @@ def test_mcp_tools_from_two_servers_keep_unique_names(
                 "name": "z_image_turbo__generate_image",
                 "description": "Generate.",
                 "schema": {"type": "object", "properties": {"prompt": {"type": "string"}}},
-                "pipeline": "z-image-turbo",
+                "pipeline": "z_image_turbo",
             }
         ]
 
@@ -365,7 +365,7 @@ def test_any_configured_server_attaches_with_no_instruction_text(
                 "name": "z_image_turbo__generate_image",
                 "description": "Generate.",
                 "schema": {"type": "object"},
-                "pipeline": "z-image-turbo",
+                "pipeline": "z_image_turbo",
             }
         ]
 

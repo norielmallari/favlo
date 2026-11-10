@@ -5,7 +5,7 @@ description: Add one Favlo inference pipeline without editing any other model. U
 
 # Bootstrap a new model
 
-One model is one pipeline. Read [ARCHITECTURE.md](../../../ARCHITECTURE.md) first. Edit only the new write set, plus the two tables that list runtimes.
+One model is one pipeline. Read [ARCHITECTURE.md](../../../ARCHITECTURE.md) first. Edit only the new write set, plus the runtime tables.
 
 ## Write set
 
@@ -13,23 +13,22 @@ Add these, and nothing of another pipeline:
 
 | Piece | Path |
 |---|---|
-| Entry | `pipelines/metal41/<pipeline>/<pipeline>.py` |
-| Package | `pipelines/metal41/<pipeline>/<package>/` where `<package>` is `<pipeline>` with hyphens replaced by underscores |
+| Package | `pipelines/<pipeline>/metal41/` (import as `<pipeline>.metal41`) |
 | Note | `docs/<pipeline>/` |
-| Tests | `tests/` files that import only `<package>` |
+| Tests | `tests/` files that import only `<pipeline>.metal41` |
 
-`<pipeline>` is the flag stem, such as `qwen36-35b-a3b`. The entry assigns `PIPELINE` to that stem. `src/favlo/cli.py` discovers the file by that assignment. Do not edit `cli.py`.
+`<pipeline>` is the flag stem and the model directory, such as `qwen36_35b_a3b`. The runtime package assigns `PIPELINE` to that stem. `src/favlo/cli.py` discovers the package by that assignment. Do not edit `cli.py`.
 
-The entry loads the package by path and does not import another pipeline. The package exports `main` and `open_runtime`. `favlo --<pipeline>` calls `main`. A served language model also exports `handle_responses`. `favlo serve` calls `open_runtime` and `handle_responses` after the registry row names that pipeline. The listener translates a Chat Completions body into that request and translates the Response back. A media pipeline exports `handle_<kind>`. An embedding model exports `handle_embed`.
+The package exports `main` and `open_runtime`. `favlo --<pipeline>` calls `main`. A served language model also exports `handle_responses`. `favlo serve` calls `open_runtime` and `handle_responses` after the registry row names that pipeline. The listener translates a Chat Completions body into that request and translates the Response back. A media pipeline exports `handle_<kind>`. An embedding model exports `handle_embed`.
 
 ## Sampling card
 
-Add `<package>/sampling.py` with no imports from the package. Registration loads it by path.
+Add `pipelines/<pipeline>/metal41/sampling.py` with no imports from the package. Registration loads it by path.
 
 - `VARIANTS`: a non-empty dict. Each name is one token and contains no colon. Each row sets `temperature`, `top_p`, `top_k`, and `presence_penalty`.
 - `DEFAULT_VARIANT`: one of those names.
 
-`add_model` and `register_quantized` copy that module onto the row and store `runtime` `metal41` and `pipeline_root` `pipelines/metal41/<pipeline>`. A row that names another `pipeline_root` loads `{pipeline_root}/<pipeline>.py`. Do not pass a card into the registry. A `:suffix` id is one of those names. A bare id selects no row; this pipeline applies `DEFAULT_VARIANT`, or the row the request selects. Numbers come from this model's card, not from another pipeline's `sampling.py`.
+`add_model` and `register_quantized` copy that module onto the row and store `runtime` `metal41` and `pipeline_root` `pipelines/<pipeline>/metal41`. Do not pass a card into the registry. A `:suffix` id is one of those names. A bare id selects no row; this pipeline applies `DEFAULT_VARIANT`, or the row the request selects. Numbers come from this model's card, not from another pipeline's `sampling.py`.
 
 ## Docs
 
@@ -41,7 +40,7 @@ No personal data: no names, home directories, hostnames, or volume paths. A clai
 
 ## Isolation
 
-Leave every other pipeline's entry, package, shaders, tests, and docs untouched. Do not import another pipeline. A served media pipeline subclasses `MediaPipeline`, sets `kind`, `id_prefix`, and `object_name`, and binds one instance. A served language model inherits `LanguagePipeline`, implements abstract `handle_responses`, and binds `handle_responses` to an instance. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed` to an instance. Read the seam rule before writing that class, and add `pipelines/metal41/<pipeline>/<package>/**` and `docs/<pipeline>/**` to its globs in the same change: [language-pipeline.mdc](../../rules/language-pipeline.mdc) for a language model, [embeddings-pipeline.mdc](../../rules/embeddings-pipeline.mdc) for an embedding model, and [media-pipeline.mdc](../../rules/media-pipeline.mdc) for a media pipeline. Do not add another base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, the console, or the prefix store. A pipeline that keeps a sequence cache imports that store. Load [prefix-caching](../prefix-caching/SKILL.md) before writing the adapter.
+Leave every other pipeline's package, shaders, tests, and docs untouched. Do not import another pipeline. A served media pipeline subclasses `MediaPipeline`, sets `kind`, `id_prefix`, and `object_name`, and binds one instance. A served language model inherits `LanguagePipeline`, implements abstract `handle_responses`, and binds `handle_responses` to an instance. A served embedding model inherits `EmbeddingsPipeline` and binds `handle_embed` to an instance. Read the seam rule before writing that class, and add `pipelines/<pipeline>/metal41/**` and `docs/<pipeline>/**` to its globs in the same change: [language-pipeline.mdc](../../rules/language-pipeline.mdc) for a language model, [embeddings-pipeline.mdc](../../rules/embeddings-pipeline.mdc) for an embedding model, and [media-pipeline.mdc](../../rules/media-pipeline.mdc) for a media pipeline. Do not add another base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, the console, or the prefix store. A pipeline that keeps a sequence cache imports that store. Load [prefix-caching](../prefix-caching/SKILL.md) before writing the adapter.
 
 Re-implement the math from this model's papers, model card, and the vendor documents. Another pipeline's source, tests, comments, and design notes are not a reference. Another application's tree is not a reference.
 
@@ -51,7 +50,7 @@ Prefill, decode, and calibration are Metal shaders. A missing kernel stays missi
 
 Run this package's checks, then load [smoke-testing](../smoke-testing/SKILL.md) and follow it. Stop if one fails. Do not start `favlo serve` yourself, and do not leave another model resident.
 
-1. `uv run pytest` on the tests that import only `<package>`.
+1. `uv run pytest` on the tests that import only `<pipeline>.metal41`.
 2. `uv run favlo --<pipeline> kernels` when this pipeline has that command. It compiles the shader library and runs that package's dispatch checks.
 3. After both have passed, the smoke-testing skill on this model: pipeline smoke, then the file agent, then the coding agent.
 
@@ -62,5 +61,5 @@ Record the printed file-agent series and coding-agent series in this pipeline's 
 - `uv run favlo --<pipeline> --help` lists this pipeline's commands.
 - The pipeline smokes and both agent smokes passed on this model.
 - The runtime table and `docs/README.md` each have one new row.
-- The new package and `docs/<pipeline>/**` are in the globs of the seam rule for this pipeline: [language-pipeline.mdc](../../rules/language-pipeline.mdc), [embeddings-pipeline.mdc](../../rules/embeddings-pipeline.mdc), or [media-pipeline.mdc](../../rules/media-pipeline.mdc).
+- The new package and `docs/<pipeline>/**` are in the globs of the seam rule for this pipeline.
 - `git diff` does not touch another pipeline.

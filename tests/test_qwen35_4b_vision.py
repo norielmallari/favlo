@@ -1,4 +1,4 @@
-"""Vision prompt expansion for qwen35-4b. No device tower."""
+"""Vision prompt expansion for qwen35_4b. No device tower."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35-4b"
+_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35_4b"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qwen35_4b.vision import bind_vision, merged_grid, pack_image  # noqa: E402
+from qwen35_4b.metal41.vision import bind_vision, merged_grid, pack_image  # noqa: E402
 
 
 def test_merged_grid_matches_the_pack() -> None:
@@ -45,7 +45,7 @@ def test_a_covered_image_skips_the_tower(monkeypatch: pytest.MonkeyPatch) -> Non
     def fail(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("tower")
 
-    monkeypatch.setattr("qwen35_4b.vision._vision_row", fail)
+    monkeypatch.setattr("qwen35_4b.metal41.vision._vision_row", fail)
     console = _Log()
     runtime = type("Runtime", (), {})()
     runtime.console = console
@@ -65,7 +65,7 @@ def test_an_image_past_the_hit_is_the_only_one_embedded(monkeypatch: pytest.Monk
         calls.append(blob)
         return np.ones((2, 4), dtype=np.float32), 2, 4
 
-    monkeypatch.setattr("qwen35_4b.vision._vision_row", row)
+    monkeypatch.setattr("qwen35_4b.metal41.vision._vision_row", row)
     console = _Log()
     runtime = type("Runtime", (), {})()
     runtime.console = console

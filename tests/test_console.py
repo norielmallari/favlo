@@ -34,7 +34,7 @@ def _ui(mode: str, *, width: int = 120, color: int = 0) -> tuple[Console, io.Str
     clock = Clock()
     ui = Console(
         mode,
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         stream=stream,
         clock=clock,
         wall=clock,
@@ -58,15 +58,15 @@ def test_open_embed_restores_the_loaded_record_name(monkeypatch) -> None:
     from favlo.pipelines import close_embed, open_embed
 
     ui, _stream, _clock = _ui("pretty")
-    selection = SimpleNamespace(pipeline="bge-m3", alias="bge-m3-int8", folder="bge-m3-int8")
+    selection = SimpleNamespace(pipeline="bge_m3", alias="bge-m3-int8", folder="bge-m3-int8")
     child = SimpleNamespace(counts={}, selection=selection, proxy=None, close=lambda: None)
     monkeypatch.setattr("favlo.pipelines.start_pipeline", lambda *_args, **_kwargs: child)
     args = SimpleNamespace(console_ui=ui)
     opened = open_embed({}, args, selection)
-    assert ui.pipeline == "bge-m3"
+    assert ui.pipeline == "bge_m3"
     assert ui.load_detail == "bge-m3-int8"
     close_embed(opened, args)
-    assert ui.pipeline == "qwen36-35b-a3b"
+    assert ui.pipeline == "qwen36_35b_a3b"
     assert ui.load_detail == ""
 
 
@@ -457,7 +457,7 @@ def test_json_events_are_self_contained() -> None:
     assert "begin" in kinds and "tick" in kinds and "end" in kinds
     for row in rows:
         assert row["v"] == 1
-        assert row["pipeline"] == "qwen36-35b-a3b"
+        assert row["pipeline"] == "qwen36_35b_a3b"
     tick = [row for row in rows if row["type"] == "tick"][-1]
     assert tick["total"] == 1187
     assert tick["unit"] == "tok"
@@ -508,21 +508,21 @@ def _tty_stream() -> io.StringIO:
 
 def test_from_env_forces_plain_for_no_color(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
-    ui = Console.from_env("auto", pipeline="qwen36-35b-a3b", stream=_tty_stream())
+    ui = Console.from_env("auto", pipeline="qwen36_35b_a3b", stream=_tty_stream())
     assert ui.mode == "plain"
 
 
 def test_from_env_forces_plain_for_a_dumb_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("TERM", "dumb")
-    ui = Console.from_env("auto", pipeline="qwen36-35b-a3b", stream=_tty_stream())
+    ui = Console.from_env("auto", pipeline="qwen36_35b_a3b", stream=_tty_stream())
     assert ui.mode == "plain"
 
 
 def test_from_env_is_pretty_on_a_color_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("TERM", "xterm-256color")
-    ui = Console.from_env("auto", pipeline="qwen36-35b-a3b", stream=_tty_stream())
+    ui = Console.from_env("auto", pipeline="qwen36_35b_a3b", stream=_tty_stream())
     assert ui.mode == "pretty"
     assert ui.fold_turns is True
 

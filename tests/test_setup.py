@@ -8,7 +8,7 @@ from favlo.setup import prepare
 
 
 def test_a_registered_row_skips_setup(tmp_path: Path) -> None:
-    save_registry({"version": 1, "models": {"packed": {"pipeline": "qwen36-35b-a3b"}}}, tmp_path)
+    save_registry({"version": 1, "models": {"packed": {"pipeline": "qwen36_35b_a3b"}}}, tmp_path)
     calls: list[list[str]] = []
 
     def _run(command: list[str], cwd: Path, env: dict[str, str]) -> SimpleNamespace:
@@ -47,7 +47,7 @@ def test_a_terminal_with_no_rows_runs_setup(tmp_path: Path) -> None:
     code = prepare(tmp_path, stdin_tty=True, console="pretty", metal=lambda: True, run=_run)
     assert code == 0
     assert calls[0][-2:] == ["--console", "pretty"]
-    assert "--qwen35-4b" in calls[0]
+    assert "--qwen35_4b" in calls[0]
     assert "setup" in calls[0]
 
 

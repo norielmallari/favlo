@@ -103,12 +103,12 @@ def test_console_events_reach_the_daemon_stream() -> None:
 
     child_ui = Console(
         "json",
-        pipeline="wan22-i2v",
+        pipeline="wan22_i2v",
         stream=_ProtocolStream(_Proto()),
         start_thread=False,
     )
     daemon_stream = io.StringIO()
-    daemon = Console("json", pipeline="wan22-i2v", stream=daemon_stream, start_thread=False)
+    daemon = Console("json", pipeline="wan22_i2v", stream=daemon_stream, start_thread=False)
     child = PipelineChild(_selection(), None, console=daemon)
     row = child_ui.begin("sample", total=8, unit="blocks", detail="encode")
     row.done = 3

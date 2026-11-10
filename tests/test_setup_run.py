@@ -12,7 +12,7 @@ from favlo.setup_run import accepted_argv, frees_model, run_setup_command
 
 def _names(root: Path | None = None) -> tuple[str, ...]:
     del root
-    return ("qwen36-35b-a3b", "example-pipeline")
+    return ("qwen36_35b_a3b", "example-pipeline")
 
 
 def test_a_setup_command_runs_in_the_install(
@@ -49,13 +49,13 @@ def test_the_image_setup_commands_are_accepted() -> None:
     from favlo.guides import read_setup
 
     root = repo_root()
-    guide = read_setup("z-image-turbo")
+    guide = read_setup("z_image_turbo")
     commands = (
         "uv sync --extra dev",
-        "uv run favlo --z-image-turbo setup",
-        "uv run favlo --z-image-turbo quantize",
-        "uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors",
-        "uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors "
+        "uv run favlo --z_image_turbo setup",
+        "uv run favlo --z_image_turbo quantize",
+        "uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors",
+        "uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors "
         "--name example-model",
     )
     for command in commands:
@@ -63,9 +63,9 @@ def test_the_image_setup_commands_are_accepted() -> None:
         argv = accepted_argv(command, root)
         if command != "uv sync --extra dev":
             assert frees_model(argv)
-            assert argv[3:5] == ["--z-image-turbo", command.split()[4]]
+            assert argv[3:5] == ["--z_image_turbo", command.split()[4]]
     tokenizer = (
-        "uv run favlo --z-image-turbo quantize --weights models/example-model.safetensors "
+        "uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors "
         "--tokenizer-source models/Z-Image-Turbo"
     )
     assert accepted_argv(tokenizer, root)[-2:] == [
@@ -79,21 +79,21 @@ def test_the_music_setup_commands_are_accepted() -> None:
     from favlo.guides import read_setup
 
     root = repo_root()
-    guide = read_setup("ace-step-15-turbo")
+    guide = read_setup("ace_step_15_turbo")
     commands = (
         "uv sync --extra dev",
-        "uv run favlo --ace-step-15-turbo setup",
-        "uv run favlo --ace-step-15-turbo quantize",
-        "uv run favlo --ace-step-15-turbo delete acestep-v15-xl-turbo-fp8-fp4",
+        "uv run favlo --ace_step_15_turbo setup",
+        "uv run favlo --ace_step_15_turbo quantize",
+        "uv run favlo --ace_step_15_turbo delete acestep-v15-xl-turbo-fp8-fp4",
     )
     for command in commands:
         assert command in guide
         argv = accepted_argv(command, root)
         if command != "uv sync --extra dev":
             assert frees_model(argv)
-            assert argv[3] == "--ace-step-15-turbo"
+            assert argv[3] == "--ace_step_15_turbo"
     packed = (
-        "uv run favlo --ace-step-15-turbo quantize --source models/acestep-v15-xl-turbo "
+        "uv run favlo --ace_step_15_turbo quantize --source models/acestep-v15-xl-turbo "
         "--dest models/acestep-v15-xl-turbo-fp8-fp4"
     )
     assert accepted_argv(packed, root)[-4:] == [
@@ -109,24 +109,24 @@ def test_the_video_setup_commands_are_accepted() -> None:
     from favlo.guides import read_setup
 
     root = repo_root()
-    guide = read_setup("wan22-i2v")
+    guide = read_setup("wan22_i2v")
     commands = (
-        "uv run favlo --wan22-i2v setup",
-        "uv run favlo --wan22-i2v quantize --high models/example-model/high.safetensors "
+        "uv run favlo --wan22_i2v setup",
+        "uv run favlo --wan22_i2v quantize --high models/example-model/high.safetensors "
         "--low models/example-model/low.safetensors",
-        "uv run favlo --wan22-i2v quantize --high models/example-model/high.safetensors "
+        "uv run favlo --wan22_i2v quantize --high models/example-model/high.safetensors "
         "--low models/example-model/low.safetensors --name example-model",
-        "uv run favlo --wan22-i2v quantize --high models/example-model/high.safetensors "
+        "uv run favlo --wan22_i2v quantize --high models/example-model/high.safetensors "
         "--low models/example-model/low.safetensors --name example-model "
         "--high-dir models/example-high --low-dir models/example-low",
-        "uv run favlo --umt5-xxl setup",
-        "uv run favlo --umt5-xxl quantize",
+        "uv run favlo --umt5_xxl setup",
+        "uv run favlo --umt5_xxl quantize",
     )
     for command in commands:
         assert command in guide
         argv = accepted_argv(command, root)
         assert frees_model(argv)
-        assert argv[3] in {"--wan22-i2v", "--umt5-xxl"}
+        assert argv[3] in {"--wan22_i2v", "--umt5_xxl"}
 
 
 def test_the_umt5_setup_commands_are_accepted() -> None:
@@ -134,10 +134,10 @@ def test_the_umt5_setup_commands_are_accepted() -> None:
     from favlo.guides import read_setup
 
     root = repo_root()
-    guide = read_setup("umt5-xxl")
+    guide = read_setup("umt5_xxl")
     commands = (
-        "uv run favlo --umt5-xxl setup",
-        "uv run favlo --umt5-xxl quantize",
+        "uv run favlo --umt5_xxl setup",
+        "uv run favlo --umt5_xxl quantize",
     )
     for command in commands:
         assert command in guide
@@ -151,12 +151,12 @@ def test_the_ti2v_setup_commands_are_accepted() -> None:
     from favlo.guides import read_setup
 
     root = repo_root()
-    guide = read_setup("wan22-ti2v-5b")
+    guide = read_setup("wan22_ti2v_5b")
     commands = (
-        "uv run favlo --umt5-xxl setup",
-        "uv run favlo --umt5-xxl quantize",
-        "uv run favlo --wan22-ti2v-5b setup",
-        "uv run favlo --wan22-ti2v-5b quantize --weights <checkpoint>",
+        "uv run favlo --umt5_xxl setup",
+        "uv run favlo --umt5_xxl quantize",
+        "uv run favlo --wan22_ti2v_5b setup",
+        "uv run favlo --wan22_ti2v_5b quantize --weights <checkpoint>",
     )
     for command in commands:
         assert command in guide
@@ -164,23 +164,23 @@ def test_the_ti2v_setup_commands_are_accepted() -> None:
             continue
         argv = accepted_argv(command, root)
         assert frees_model(argv)
-        assert argv[3] in {"--wan22-ti2v-5b", "--umt5-xxl"}
+        assert argv[3] in {"--wan22_ti2v_5b", "--umt5_xxl"}
 
 
 def test_a_path_and_a_shell_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("favlo.setup_run.pipeline_names", _names)
     with pytest.raises(ValueError, match="not a setup step"):
-        accepted_argv("uv run favlo --qwen36-35b-a3b kernels", tmp_path)
+        accepted_argv("uv run favlo --qwen36_35b_a3b kernels", tmp_path)
     with pytest.raises(ValueError, match="not a setup step"):
-        accepted_argv("uv run favlo --qwen36-35b-a3b setup && rm -rf .", tmp_path)
+        accepted_argv("uv run favlo --qwen36_35b_a3b setup && rm -rf .", tmp_path)
     with pytest.raises(ValueError, match="leaves this install"):
         accepted_argv(
-            "uv run favlo --qwen36-35b-a3b quantize --src ../outside",
+            "uv run favlo --qwen36_35b_a3b quantize --src ../outside",
             tmp_path,
         )
     with pytest.raises(ValueError, match="unknown pipeline"):
         accepted_argv("uv run favlo --missing setup", tmp_path)
-    delete = accepted_argv("favlo --qwen36-35b-a3b delete example-model:instruct", tmp_path)
+    delete = accepted_argv("favlo --qwen36_35b_a3b delete example-model:instruct", tmp_path)
     assert delete[-2:] == ["delete", "example-model:instruct"]
     assert accepted_argv("uv sync --extra dev", tmp_path) == ["uv", "sync", "--extra", "dev"]
     packed = accepted_argv(

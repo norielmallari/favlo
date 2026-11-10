@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.request
 from dataclasses import dataclass
 
@@ -203,6 +204,10 @@ class Log:
         with self._lock:
             self._lines.append(line)
 
+    def clear(self) -> None:
+        with self._lock:
+            self._lines.clear()
+
     def text(self) -> str:
         with self._lock:
             return "".join(self._lines)
@@ -257,6 +262,9 @@ class Server:
             self.log.append(line + "\n")
 
         follow(path, on_line, self.follow_stop, offset=offset)
+        # A rolled favlo.log can re-deliver retained lines from earlier sessions.
+        time.sleep(0.2)
+        self.log.clear()
 
     def restart(self) -> None:
         """Unload the resident model. Keep the listener and the followed log."""

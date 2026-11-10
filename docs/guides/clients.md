@@ -13,7 +13,7 @@ One request runs at a time. A connection that arrives while a request is open wa
 ```bash
 curl http://127.0.0.1:8129/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen35-4b","input":"Hello"}'
+  -d '{"model":"qwen35_4b","input":"Hello"}'
 ```
 
 A streaming client sets `"stream": true`. Each Responses event is one JSON object. The stream ends with `data: [DONE]`. The Chat Completions translation streams a `chat.completion.chunk` and ends the same way.

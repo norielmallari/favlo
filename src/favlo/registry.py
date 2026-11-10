@@ -3,6 +3,8 @@
 A flavor is a packed record directory. When the row stores an alias, that
 alias is the public id for ``GET /v1/models`` and for ``resolve``. The folder
 name is the storage key only. A variant is a sampling suffix on that public id.
+``GET /v1/models`` lists language and embeddings rows from this file only. It
+does not import pipeline packages to classify a row.
 """
 
 from __future__ import annotations
@@ -399,12 +401,37 @@ def model_objects(root: Path | None = None, *, resident: str | None = None) -> l
     return rows
 
 
+def served_model_objects(
+    root: Path | None = None, *, resident: str | None = None
+) -> list[dict[str, Any]]:
+    """Language and embeddings rows for ``GET /v1/models``.
+
+    Classification reads the registry only. Media rows stay off the list.
+    """
+    data = load_registry(root)
+    created = _created(root)
+    rows: list[dict[str, Any]] = []
+    for folder, entry in data["models"].items():
+        if not isinstance(entry, dict):
+            continue
+        if not _is_served_model_entry(data, folder, entry):
+            continue
+        name = _public_id(entry, folder)
+        rows.append(_object(name, folder, None, entry, created, resident))
+        for variant in _variant_names(entry):
+            rows.append(_object(f"{name}:{variant}", folder, variant, entry, created, resident))
+    return rows
+
+
 def one_model(
     model_id: str, root: Path | None = None, *, resident: str | None = None
 ) -> dict[str, Any]:
     selection = resolve(model_id, root=root)
     data = load_registry(root)
     entry = data["models"][selection.folder]
+    if not _is_served_model_entry(data, selection.folder, entry):
+        message = "not found"
+        raise LookupError(message)
     created = _created(root)
     return _object(
         selection.requested_id,
@@ -501,13 +528,13 @@ def _stored_pipeline_root(
     for item in (value, current):
         if isinstance(item, str) and item.strip() and item.strip() != "pipelines":
             return item.strip()
-    return f"pipelines/{runtime}/{pipeline}"
+    return f"pipelines/{pipeline}/{runtime}"
 
 
 def pipeline_root_of(entry: Mapping[str, Any] | None) -> str:
-    """``pipeline_root`` on a row. An omitted value is ``pipelines/<runtime>/<pipeline>``."""
+    """``pipeline_root`` on a row. An omitted value is ``pipelines/<pipeline>/<runtime>``."""
     if not isinstance(entry, Mapping):
-        return "pipelines/metal41/pipeline"
+        return "pipelines/pipeline/metal41"
     pipeline = entry.get("pipeline")
     runtime = entry.get("runtime")
     name = pipeline.strip() if isinstance(pipeline, str) and pipeline.strip() else "pipeline"
@@ -522,6 +549,7 @@ def pipeline_root_of(entry: Mapping[str, Any] | None) -> str:
 
 
 _LANGUAGE_VARIANTS = frozenset({"instruct", "thinking", "high", "low", "none"})
+_EMBEDDINGS_VARIANTS = frozenset({"embed"})
 
 
 def _is_language_model_entry(entry: dict[str, Any]) -> bool:
@@ -529,6 +557,27 @@ def _is_language_model_entry(entry: dict[str, Any]) -> bool:
     if not isinstance(variants, dict):
         return False
     return any(name in variants for name in _LANGUAGE_VARIANTS)
+
+
+def _is_embeddings_model_entry(
+    data: Mapping[str, Any], folder: str, entry: dict[str, Any]
+) -> bool:
+    """True when this row is the embeddings default or stores an ``embed`` variant."""
+    public = _public_id(entry, folder)
+    default = _embeddings_value(dict(data))
+    if default and default in {folder, public}:
+        return True
+    variants = entry.get("variants")
+    if not isinstance(variants, dict):
+        return False
+    return any(name in variants for name in _EMBEDDINGS_VARIANTS)
+
+
+def _is_served_model_entry(
+    data: Mapping[str, Any], folder: str, entry: dict[str, Any]
+) -> bool:
+    """Language and embeddings rows that ``GET /v1/models`` may list."""
+    return _is_language_model_entry(entry) or _is_embeddings_model_entry(data, folder, entry)
 
 
 def _language_variant(entry: dict[str, Any]) -> str:
@@ -712,7 +761,7 @@ def _media_keys(pipeline: str, runtime: str, pipeline_root: str | None) -> list[
 
     try:
         module = load_pipeline(pipeline, runtime=runtime, pipeline_root=pipeline_root)
-    except (FileNotFoundError, ImportError, OSError):
+    except Exception:
         return []
     declare = getattr(module, "mcp_tools", None)
     if not callable(declare):
@@ -747,7 +796,7 @@ def _serves_embed(pipeline: str, runtime: str, pipeline_root: str | None = None)
 
     try:
         module = load_pipeline(pipeline, runtime=runtime, pipeline_root=pipeline_root)
-    except (FileNotFoundError, ImportError, OSError):
+    except Exception:
         return False
     return callable(getattr(module, "handle_embed", None))
 
@@ -973,11 +1022,10 @@ def card_context_length(
     pipeline: str, *, runtime: str, pipeline_root: str | None = None
 ) -> int | None:
     """``CONTEXT_LENGTH`` on the sampling card, when the pipeline defines one."""
-    package = pipeline.replace("-", "_")
     path = _sampling_path(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     if not path.is_file():
         return None
-    spec = importlib.util.spec_from_file_location(f"{package}.sampling_context", path)
+    spec = importlib.util.spec_from_file_location(f"{pipeline}.{runtime}.sampling_context", path)
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
@@ -1055,12 +1103,11 @@ def pipeline_reasoning_effort(
 
 
 def _sampling_module(pipeline: str, *, runtime: str, pipeline_root: str | None = None) -> Any:
-    package = pipeline.replace("-", "_")
     path = _sampling_path(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     if not path.is_file():
-        message = f"{pipeline} has no sampling card at {package}/sampling.py"
+        message = f"{pipeline} has no sampling card at {pipeline}/{runtime}/sampling.py"
         raise ValueError(message)
-    spec = importlib.util.spec_from_file_location(f"{package}.sampling", path)
+    spec = importlib.util.spec_from_file_location(f"{pipeline}.{runtime}.sampling", path)
     if spec is None or spec.loader is None:
         message = f"{pipeline} sampling card could not be loaded"
         raise ValueError(message)
@@ -1143,9 +1190,8 @@ def _resolved_effort(
 def _sampling_path(pipeline: str, *, runtime: str, pipeline_root: str | None) -> Path:
     from favlo.cli import pipeline_tree
 
-    package = pipeline.replace("-", "_")
     directory = pipeline_tree(runtime, pipeline=pipeline, pipeline_root=pipeline_root)
-    return directory / package / "sampling.py"
+    return directory / "sampling.py"
 
 
 def _repo_root() -> Path:

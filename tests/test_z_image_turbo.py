@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from z_image_turbo.chat import ImageRequestError, _fields, handle_image
-from z_image_turbo.formats import (
+from z_image_turbo.metal41.chat import ImageRequestError, _fields, handle_image
+from z_image_turbo.metal41.formats import (
     dequant_fp4,
     pack_fp4,
     pack_int8,
@@ -19,19 +19,19 @@ from z_image_turbo.formats import (
     restore_int8,
     stored_k,
 )
-from z_image_turbo.hold import ImageHold, ImageJob
-from z_image_turbo.png import ZLIB_LEVEL, encode_png, pack_rgb, unpack_rgb, write_png
-from z_image_turbo.progress import (
+from z_image_turbo.metal41.hold import ImageHold, ImageJob
+from z_image_turbo.metal41.png import ZLIB_LEVEL, encode_png, pack_rgb, unpack_rgb, write_png
+from z_image_turbo.metal41.progress import (
     CAPTION_PIECES,
     DECODER_PIECES,
     STEP_PIECES,
     ImageProgress,
     sample_total,
 )
-from z_image_turbo.record import Plane, load, quantize, weight_bytes
-from z_image_turbo.runtime import Runtime, _patchify, _unpatchify, open_runtime
-from z_image_turbo.schedule import sigmas, timestep
-from z_image_turbo.scratch import MAX_EDGE, Scratch, scratch_bytes
+from z_image_turbo.metal41.record import Plane, load, quantize, weight_bytes
+from z_image_turbo.metal41.runtime import Runtime, _patchify, _unpatchify, open_runtime
+from z_image_turbo.metal41.schedule import sigmas, timestep
+from z_image_turbo.metal41.scratch import MAX_EDGE, Scratch, scratch_bytes
 
 from favlo.media_meta import load_media
 from favlo.media_pipeline import MediaPaused
@@ -144,16 +144,16 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
         captured["kwargs"] = {"console": console}
         return "runtime"
 
-    monkeypatch.setattr("z_image_turbo.runtime.Runtime", fake)
-    monkeypatch.setattr("z_image_turbo.runtime.memory.set_max_memory", caps.append)
-    assert open_runtime(Path("record"), owner="z-image-turbo:7", max_memory="16GiB") == "runtime"
-    assert captured["owner"] == "z-image-turbo:7"
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.Runtime", fake)
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.memory.set_max_memory", caps.append)
+    assert open_runtime(Path("record"), owner="z_image_turbo:7", max_memory="16GiB") == "runtime"
+    assert captured["owner"] == "z_image_turbo:7"
     assert "max_memory" not in captured
     assert caps == ["16GiB"]
 
 
 def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
-    owner = "z-image-turbo:7"
+    owner = "z_image_turbo:7"
     held: dict[str, str] = {}
 
     class _Probe(Runtime):
@@ -183,8 +183,8 @@ def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         _Probe(tmp_path)
     minted = held["owner"]
-    assert minted.startswith("z-image-turbo:")
-    assert minted != "z-image-turbo:7"
+    assert minted.startswith("z_image_turbo:")
+    assert minted != "z_image_turbo:7"
 
 
 def test_scratch_shrinks_with_the_image() -> None:
@@ -214,7 +214,7 @@ def test_a_tight_ledger_reserves_the_requested_size(monkeypatch: pytest.MonkeyPa
         scratch.latent_count = 1
         return scratch
 
-    monkeypatch.setattr("z_image_turbo.runtime.Scratch", fake_scratch)
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.Scratch", fake_scratch)
     runtime = Runtime.__new__(Runtime)
     runtime.gpu = object()
     runtime.scratch = None
@@ -235,7 +235,7 @@ def test_a_larger_ledger_grows_scratch_to_the_training_square(
         created["size"] = (width, height)
         return _sized(width, height)
 
-    monkeypatch.setattr("z_image_turbo.runtime.Scratch", fake_scratch)
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.Scratch", fake_scratch)
     runtime = Runtime.__new__(Runtime)
     runtime.gpu = object()
     held = _sized(512, 512)
@@ -712,7 +712,7 @@ def test_a_different_prompt_drops_the_paused_image(tmp_path) -> None:
 def test_close_drops_the_device_buffers() -> None:
     runtime = Runtime.__new__(Runtime)
     runtime._closed = False
-    runtime._owner = "z-image-turbo:test"
+    runtime._owner = "z_image_turbo:test"
     plane = Plane.__new__(Plane)
     plane.data = object()
     plane.scale = object()
@@ -882,8 +882,8 @@ def test_load_opens_a_byte_row(monkeypatch, tmp_path) -> None:
         on_bytes(6)
         return {"w": object()}
 
-    monkeypatch.setattr("z_image_turbo.runtime.weight_bytes", lambda path: 10)
-    monkeypatch.setattr("z_image_turbo.runtime.load", fake_load)
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.weight_bytes", lambda path: 10)
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.load", fake_load)
     runtime = Runtime.__new__(Runtime)
     runtime.console = _bars(store)
     runtime.gpu = object()
@@ -903,8 +903,8 @@ def test_a_failed_load_closes_the_byte_row(monkeypatch, tmp_path) -> None:
         del path, gpu, on_bytes
         raise RuntimeError("missing")
 
-    monkeypatch.setattr("z_image_turbo.runtime.weight_bytes", lambda path: 10)
-    monkeypatch.setattr("z_image_turbo.runtime.load", fake_load)
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.weight_bytes", lambda path: 10)
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.load", fake_load)
     runtime = Runtime.__new__(Runtime)
     runtime.console = _bars(store)
     runtime.gpu = object()
@@ -919,8 +919,8 @@ def test_a_plain_console_keeps_the_load_print(monkeypatch, tmp_path) -> None:
         assert on_bytes is None
         return {}
 
-    monkeypatch.setattr("z_image_turbo.runtime.weight_bytes", lambda path: 10)
-    monkeypatch.setattr("z_image_turbo.runtime.load", fake_load)
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.weight_bytes", lambda path: 10)
+    monkeypatch.setattr("z_image_turbo.metal41.runtime.load", fake_load)
     runtime = Runtime.__new__(Runtime)
     runtime.console = _Plain()
     runtime.gpu = object()
@@ -946,7 +946,7 @@ def test_quantize_accepts_one_safetensors_file(tmp_path: Path) -> None:
     assert body["source"] == str(tokenizer.resolve())
     assert body["tensors"]["layers.0.weight"]["plane"] == "fp4"
     assert body["tensors"]["cap_pad_token"]["plane"] == "f16"
-    assert body["format"] == "z-image-turbo-fp4"
+    assert body["format"] == "z_image_turbo-fp4"
 
 
 def test_quantize_int8_packs_from_the_float_weights(tmp_path: Path) -> None:
@@ -962,7 +962,7 @@ def test_quantize_int8_packs_from_the_float_weights(tmp_path: Path) -> None:
     assert (dest / "tokenizer" / "tokenizer_config.json").read_text() == "config"
     assert (dest / "tokenizer" / "vocab.json").read_text() == "vocab"
     entry = body["tensors"]["layers.0.weight"]
-    assert body["format"] == "z-image-turbo-int8"
+    assert body["format"] == "z_image_turbo-int8"
     assert body["tile_n"] == 128
     assert entry["plane"] == "int8"
     assert entry["padded_n"] == 128
@@ -987,14 +987,14 @@ def test_a_finished_int8_record_gains_a_tokenizer(
         message = "a finished record was packed again"
         raise AssertionError(message)
 
-    monkeypatch.setattr("z_image_turbo.record._shards", _shards)
+    monkeypatch.setattr("z_image_turbo.metal41.record._shards", _shards)
     quantize(weights, dest, tokenizer_source=tokenizer, kind="int8")
     assert (dest / "tokenizer" / "tokenizer.json").read_text() == "tokens"
     assert (dest / "tokenizer" / "vocab.json").read_text() == "vocab"
 
 
 def test_a_packed_tokenizer_is_the_caption_source(tmp_path: Path) -> None:
-    from z_image_turbo.runtime import _source_of
+    from z_image_turbo.metal41.runtime import _source_of
 
     record = tmp_path / "record"
     (record / "tokenizer").mkdir(parents=True)
@@ -1027,7 +1027,7 @@ def test_quantize_accepts_a_directory_of_safetensors(tmp_path: Path) -> None:
 def test_a_custom_safetensors_file_is_its_own_registry_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from z_image_turbo.commands import main
+    from z_image_turbo.metal41.commands import main
 
     def models_dir(root: Path | None = None) -> Path:
         del root
@@ -1035,7 +1035,7 @@ def test_a_custom_safetensors_file_is_its_own_registry_id(
 
     monkeypatch.setattr("favlo.registry.models_dir", models_dir)
     monkeypatch.setattr(
-        "z_image_turbo.source.source_dir",
+        "z_image_turbo.metal41.source.source_dir",
         lambda: tmp_path / "models" / "Z-Image-Turbo",
     )
     weights = tmp_path / "incoming" / "example-model.safetensors"
@@ -1057,7 +1057,7 @@ def test_a_custom_safetensors_file_is_its_own_registry_id(
         (dest / "manifest.json").write_text("{}\n")
         return dest
 
-    monkeypatch.setattr("z_image_turbo.record.quantize", quantize)
+    monkeypatch.setattr("z_image_turbo.metal41.record.quantize", quantize)
     assert main(["quantize"]) == 0
     assert seen["dest"] == tmp_path / "models" / "Z-Image-Turbo-fp4"
     packed = json.loads((tmp_path / "models" / "registry.json").read_text())
@@ -1089,7 +1089,7 @@ def test_a_custom_safetensors_file_is_its_own_registry_id(
 def test_int8_quantize_fills_an_empty_image_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from z_image_turbo.commands import main
+    from z_image_turbo.metal41.commands import main
 
     def models_dir(root: Path | None = None) -> Path:
         del root
@@ -1097,7 +1097,7 @@ def test_int8_quantize_fills_an_empty_image_default(
 
     monkeypatch.setattr("favlo.registry.models_dir", models_dir)
     monkeypatch.setattr(
-        "z_image_turbo.source.source_dir",
+        "z_image_turbo.metal41.source.source_dir",
         lambda: tmp_path / "models" / "Z-Image-Turbo",
     )
 
@@ -1112,7 +1112,7 @@ def test_int8_quantize_fills_an_empty_image_default(
         (dest / "manifest.json").write_text("{}\n")
         return dest
 
-    monkeypatch.setattr("z_image_turbo.record.quantize", quantize)
+    monkeypatch.setattr("z_image_turbo.metal41.record.quantize", quantize)
     assert main(["quantize", "--int8"]) == 0
     registry = json.loads((tmp_path / "models" / "registry.json").read_text())
     assert registry["media"]["image"] == "Z-Image-Turbo-int8"

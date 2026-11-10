@@ -14,17 +14,17 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from qwen36_35b_a3b.chat import (
+from qwen36_35b_a3b.metal41.chat import (
     STOP,
     decode_text,
     encode_chat,
     think_close_ids,
     think_open_id,
 )
-from qwen36_35b_a3b.commands import CARROT_PROMPT
-from qwen36_35b_a3b.forward import Qwen36Runtime
-from qwen36_35b_a3b.sampling import VARIANTS
-from qwen36_35b_a3b.tools import split_thinking
+from qwen36_35b_a3b.metal41.commands import CARROT_PROMPT
+from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
+from qwen36_35b_a3b.metal41.sampling import VARIANTS
+from qwen36_35b_a3b.metal41.tools import split_thinking
 
 _ROOT = Path("models/Qwen3.6-35B-A3B-fp8-e20")
 _INSTRUCT_TOKENS = 384
@@ -126,6 +126,8 @@ def test_carrot_instruct_greedy(carrot_runtime: Qwen36Runtime) -> None:
 
 
 def test_carrot_instruct_greedy_mtp(carrot_runtime: Qwen36Runtime) -> None:
+    if not getattr(carrot_runtime, "_mtp_ready", False):
+        pytest.skip("MTP weights are not packed; run mtp-fp8 on this record")
     text = _complete(
         carrot_runtime,
         thinking=False,

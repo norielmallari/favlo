@@ -1,7 +1,8 @@
 """One ASGI application for chat and MCP.
 
 Uvicorn serves it. A pipeline receives a :class:`favlo.reply.LiveReply` and
-never a socket. ``GET /v1/models`` does not take the request lock. The
+never a socket. ``GET /v1/models`` lists language and embeddings rows from
+the registry and does not take the request lock. The
 pipeline manager admits the GPU: embeddings, then chats, then media. An
 embedding waits until the open chat returns. A chat that has not started
 waits while an embedding is queued or running. A chat preempts media and
@@ -28,7 +29,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 
-from favlo.mcp_server import build_mcp, media_kinds
+from favlo.mcp_server import build_mcp
 from favlo.memory_notes import DIM, EMBED_MODEL
 from favlo.pipelines import (
     admission,
@@ -43,7 +44,7 @@ from favlo.pipelines import (
     open_for,
     release_admission,
 )
-from favlo.registry import load_registry, model_objects, one_model
+from favlo.registry import one_model, served_model_objects
 from favlo.reply import LiveReply
 
 _MAX_BODY = 64 * 1024 * 1024
@@ -374,13 +375,8 @@ def build_app(args: Any, state: dict[str, Any]) -> Any:
     return _QuietCancel(Starlette(routes=routes, lifespan=mcp_app.lifespan))
 
 
-def _language_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    listed = _language_pipelines()
-    return [row for row in rows if row.get("pipeline") in listed]
-
-
 def _models(_request: Request, state: dict[str, Any]) -> Response:
-    rows = _language_rows(model_objects(resident=state.get("record")))
+    rows = served_model_objects(resident=state.get("record"))
     return _json_response({"object": "list", "data": rows})
 
 
@@ -389,8 +385,6 @@ def _one_model(request: Request, state: dict[str, Any]) -> Response:
         row = one_model(request.path_params["model_id"], resident=state.get("record"))
     except LookupError as exc:
         return _error(404, str(exc), "not_found")
-    if row.get("pipeline") not in _language_pipelines():
-        return _error(404, "not found", "not_found")
     return _json_response(row)
 
 
@@ -968,54 +962,6 @@ def _error_message(payload: dict[str, Any]) -> str:
     if isinstance(error, dict) and isinstance(error.get("message"), str):
         return error["message"]
     return "the pipeline failed"
-
-
-def _each_pipeline() -> list[tuple[str, str, Any]]:
-    from favlo.cli import load_pipeline
-
-    data = load_registry()
-    found: list[tuple[str, str, Any]] = []
-    seen: set[str] = set()
-    for folder, entry in data["models"].items():
-        pipeline = entry.get("pipeline")
-        if not isinstance(pipeline, str) or pipeline in seen:
-            continue
-        runtime = entry.get("runtime")
-        if not isinstance(runtime, str) or not runtime:
-            message = f"{folder} has no runtime"
-            raise LookupError(message)
-        try:
-            module = load_pipeline(
-                pipeline,
-                runtime=runtime,
-                pipeline_root=entry.get("pipeline_root")
-                if isinstance(entry.get("pipeline_root"), str)
-                else None,
-            )
-        except (FileNotFoundError, ImportError, OSError):
-            continue
-        seen.add(pipeline)
-        found.append((folder, pipeline, module))
-    return found
-
-
-def _language_pipelines() -> set[str]:
-    """Pipelines that ``GET /v1/models`` lists.
-
-    A media or embeddings handler stays off this list. Those rows are the
-    media MCP tools. A pipeline file that cannot be loaded is omitted.
-    """
-    names: set[str] = set()
-    for _folder, pipeline, module in _each_pipeline():
-        if _is_language_module(module):
-            names.add(pipeline)
-    return names
-
-
-def _is_language_module(module: Any) -> bool:
-    if media_kinds(module) or callable(getattr(module, "handle_embed", None)):
-        return False
-    return callable(getattr(module, "handle_responses", None))
 
 
 async def _pid(request: Request) -> tuple[int, Response | None]:

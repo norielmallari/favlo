@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from gemma4_26b_a4b import atlas as atlas_mod
-from gemma4_26b_a4b.atlas import ExpertAtlas, kv_bytes, kv_mode, layer_slots, plain_cache
+from gemma4_26b_a4b.metal41 import atlas as atlas_mod
+from gemma4_26b_a4b.metal41.atlas import ExpertAtlas, kv_bytes, kv_mode, layer_slots, plain_cache
 
 
 def test_kv_mode_defaults_to_fp8() -> None:

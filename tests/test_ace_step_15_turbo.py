@@ -7,26 +7,26 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ace_step_15_turbo.graph import _boundary_device, generate
-from ace_step_15_turbo.hold import ClipHold
-from ace_step_15_turbo.pack import dequant_fp4, dequant_fp8, pack_fp4, pack_fp8, promote_count, promoted_ids
-from ace_step_15_turbo.pcm import wav_bytes, wav_info
-from ace_step_15_turbo.request import parse_music
-from ace_step_15_turbo.runtime import (
+from ace_step_15_turbo.metal41.graph import _boundary_device, generate
+from ace_step_15_turbo.metal41.hold import ClipHold
+from ace_step_15_turbo.metal41.pack import dequant_fp4, dequant_fp8, pack_fp4, pack_fp8, promote_count, promoted_ids
+from ace_step_15_turbo.metal41.pcm import wav_bytes, wav_info
+from ace_step_15_turbo.metal41.request import parse_music
+from ace_step_15_turbo.metal41.runtime import (
     Runtime,
     decoder_bytes,
     handle_music,
     open_runtime,
     step_scratch_bytes,
 )
-from ace_step_15_turbo.schedule import (
+from ace_step_15_turbo.metal41.schedule import (
     HOP,
     MAX_SECONDS,
     condition_text,
     latent_frames,
     timestep_schedule,
 )
-from ace_step_15_turbo.tiles import dependency, plan, tile_frames
+from ace_step_15_turbo.metal41.tiles import dependency, plan, tile_frames
 from favlo.media_pipeline import MediaPaused
 from favlo.music import music_dir, store_wav
 
@@ -46,21 +46,21 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
         captured["max_memory"] = max_memory
         return "runtime"
 
-    monkeypatch.setattr("ace_step_15_turbo.runtime.Runtime", fake)
+    monkeypatch.setattr("ace_step_15_turbo.metal41.runtime.Runtime", fake)
     assert open_runtime(
         Path("record"),
         kv_cache="e4m3",
         console=None,
         resident_percent=None,
-        owner="ace-step-15-turbo:7",
+        owner="ace_step_15_turbo:7",
         max_memory="16GiB",
     ) == "runtime"
-    assert captured["owner"] == "ace-step-15-turbo:7"
+    assert captured["owner"] == "ace_step_15_turbo:7"
     assert captured["max_memory"] == "16GiB"
 
 
 def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
-    owner = "ace-step-15-turbo:7"
+    owner = "ace_step_15_turbo:7"
     held: dict[str, str] = {}
 
     class _Probe(Runtime):
@@ -90,8 +90,8 @@ def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         _Probe(tmp_path)
     minted = held["owner"]
-    assert minted.startswith("ace-step-15-turbo:")
-    assert minted != "ace-step-15-turbo:7"
+    assert minted.startswith("ace_step_15_turbo:")
+    assert minted != "ace_step_15_turbo:7"
 
 
 def test_step_scratch_grows_with_the_duration() -> None:
@@ -378,6 +378,12 @@ class _Reply:
 
 
 class _Pausing:
+    def ensure_open(self, request) -> None:
+        del request
+
+    def close(self) -> None:
+        return None
+
     def __init__(self, state: dict) -> None:
         self.state = state
         self.gpu = self
@@ -530,7 +536,7 @@ def test_delete_removes_the_packed_model_when_the_checkout_is_gone(
 ) -> None:
     import json
 
-    from ace_step_15_turbo.commands import main
+    from ace_step_15_turbo.metal41.commands import main
     from favlo.registry import register_quantized
 
     def models_dir(root: Path | None = None) -> Path:
@@ -555,7 +561,7 @@ def test_delete_removes_the_packed_model_when_the_checkout_is_gone(
         source=checkout,
         alias=None,
         directory=packed,
-        pipeline="ace-step-15-turbo",
+        pipeline="ace_step_15_turbo",
         runtime="metal41",
     )
     register_quantized(
@@ -563,7 +569,7 @@ def test_delete_removes_the_packed_model_when_the_checkout_is_gone(
         source=outside,
         alias=None,
         directory=kept,
-        pipeline="ace-step-15-turbo",
+        pipeline="ace_step_15_turbo",
         runtime="metal41",
     )
     register_quantized(
@@ -571,7 +577,7 @@ def test_delete_removes_the_packed_model_when_the_checkout_is_gone(
         source=outside,
         alias=None,
         directory=other,
-        pipeline="qwen38-27b",
+        pipeline="qwen38_27b",
         runtime="metal41",
     )
     removed = main(["delete", "acestep-v15-xl-turbo-fp8-fp4:default"])

@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 from AppKit import NSBitmapImageRep, NSColor, NSGIFFileType, NSJPEGFileType
 
-from qwen36_35b_a3b.chat import encode_text
-from qwen36_35b_a3b.vision import (
+from qwen36_35b_a3b.metal41.chat import encode_text
+from qwen36_35b_a3b.metal41.vision import (
     MIN_PIXELS,
     _image_bytes,
     _pixel_bounds,
@@ -174,7 +174,7 @@ def test_a_covered_image_skips_the_tower(monkeypatch: pytest.MonkeyPatch) -> Non
     def fail(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("tower")
 
-    monkeypatch.setattr("qwen36_35b_a3b.vision._vision_row", fail)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.vision._vision_row", fail)
     notes: list[str] = []
     runtime = type("Runtime", (), {})()
     runtime._status = notes.append
@@ -195,7 +195,7 @@ def test_an_image_past_the_hit_is_the_only_one_embedded(monkeypatch: pytest.Monk
         calls.append(blob)
         return np.ones((2, 4), dtype=np.float32), 2, 4
 
-    monkeypatch.setattr("qwen36_35b_a3b.vision._vision_row", row)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.vision._vision_row", row)
     notes: list[str] = []
     runtime = type("Runtime", (), {})()
     runtime._status = notes.append

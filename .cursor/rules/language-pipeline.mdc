@@ -1,12 +1,12 @@
 ---
 description: How a served language model implements LanguagePipeline. Generation is Responses only. Chat Completions is a listener wrapper over that path, not a pipeline handler. The response chain rebuilds a store-true transcript before handle_responses. The pipeline encodes that body and does not read store or previous_response_id. NumPy stays off the hot serving path. A prompt up to the configured maximum is accepted. The context working set sizes from the serve ledger, with no private cap. Streaming is a queue off the GPU thread. CLI progress stores the listener console, emits prompt/cache notes, begins load/prefill/decode, and ticks progress.done on each load read, prefill chunk/layer, and kept decode token. Writes stay off the hot path. Weights load from SSD into one device buffer. A GPU test uses smoke_lock run. The language-pipeline harness waits and does not take the lock.
-globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/metal41/qwen36-35b-a3b/qwen36_35b_a3b/**,pipelines/metal41/qwen38-27b/qwen38_27b/**,pipelines/metal41/gemma4-26b-a4b/gemma4_26b_a4b/**,pipelines/parked/qwen38_flash_next/**,pipelines/parked/qwen38-flash-next.py,pipelines/parked/spark_x26_1_7b/**,pipelines/parked/spark-x26-1-7b.py,pipelines/metal41/qwen35-4b/qwen35_4b/**,pipelines/metal41/qwen35-4b/qwen35-4b.py,docs/qwen36-35b-a3b/**,docs/qwen38-27b/**,docs/parked/qwen38-flash-next/**,docs/gemma4-26b-a4b/**,docs/parked/spark-x26-1-7b/**,docs/qwen35-4b/**
+globs: src/favlo/pipeline.py,src/favlo/language_pipeline.py,harness/language_pipeline.py,tests/test_language_pipeline.py,pipelines/qwen36_35b_a3b/metal41/**,pipelines/qwen38_27b/metal41/**,pipelines/gemma4_26b_a4b/metal41/**,pipelines/qwen35_4b/metal41/**,docs/qwen36_35b_a3b/**,docs/qwen38_27b/**,docs/gemma4_26b_a4b/**,docs/qwen35_4b/**
 alwaysApply: false
 ---
 
 # Language pipelines
 
-A served language model inherits `LanguagePipeline` in `src/favlo/language_pipeline.py`. That class extends `Pipeline`. A media pipeline does not inherit it. A failed pipeline does not. The class is the disconnect shell around one response. It does not encode a prompt, sample a token, or parse a tool call.
+A served language model inherits `LanguagePipeline` in `src/favlo/language_pipeline.py`. That class extends `Pipeline`. A media pipeline does not inherit it. The class is the disconnect shell around one response. It does not encode a prompt, sample a token, or parse a tool call.
 
 One concrete class per package: `class Pipeline(LanguagePipeline)`. Implement abstract `handle_responses`. That method reads a Responses body and writes a Response, including its sampler and its stream. Bind `handle_responses = Pipeline()`. The daemon calls that instance, which runs the disconnect shell and then the subclass method. Do not keep a `_Hooks` middle class or a package `handle_chat`. `RequestClosed` subclasses `ClientClosed`.
 
@@ -76,7 +76,7 @@ When the prompt fits the maximum and does not fit the current working set, grow 
 self._owner = owner or f"{stem}:{id(self)}"
 ```
 
-`stem` is the flag stem (`qwen36-35b-a3b`). Every `allocate` and `upload` in that opening uses that string. `sweep` matches the whole string. `close` sweeps it in `finally`, including when `open` fails after a span exists. A missing record raises `FileNotFoundError` before `Gpu()`. The listener passes `mint_owner(stem)` when the signature includes `owner`, records `runtime._owner`, and sweeps that opening after `close`.
+`stem` is the flag stem (`qwen36_35b_a3b`). Every `allocate` and `upload` in that opening uses that string. `sweep` matches the whole string. `close` sweeps it in `finally`, including when `open` fails after a span exists. A missing record raises `FileNotFoundError` before `Gpu()`. The listener passes `mint_owner(stem)` when the signature includes `owner`, records `runtime._owner`, and sweeps that opening after `close`.
 
 The serve process keeps the ledger. This process allocates its own Metal buffers. `allocate`, `zeros`, `release`, and `sweep` report the owner and the byte counts on the worker pipe. Do not open that pipe. `budget()` asks the serve process and waits. The answer is reclaimable pages plus this daemon's live, pending, and returning bytes, including every child. `memory.set_max_memory` caps that answer. `room()` is `max(0, budget() - live - pending)`. Read those two. Do not parse `--max-memory`, and do not keep `_memory_cap` or a private `parse_memory`. An in-process `complete` calls `memory.set_max_memory` before the first `budget()`.
 

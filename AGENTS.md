@@ -43,7 +43,7 @@ The open product in this repository is the listener, the web app, and the web AP
 
 Edit one runtime. Leave every other runtime's files untouched. The write set and the runtime table are in [ARCHITECTURE.md](ARCHITECTURE.md). Do not edit `src/favlo/cli.py` to register a runtime. Do not edit another pipeline's package, shaders, tests, or docs. A served media pipeline subclasses `MediaPipeline` and sets `kind`, `id_prefix`, and `object_name`. A language-model pipeline does not. Do not add a kernel that branches on the pipeline. A new abstract method on `MediaPipeline` updates every media subclass in that same change.
 
-Adding a model adds `pipelines/metal41/<pipeline>/`, the entry file and package inside it, a `docs/<pipeline>/` note, and one row in the runtime table. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring a pipeline to the shared prefix store.
+Adding a model adds `pipelines/<pipeline>/metal41/`, the runtime package, a `docs/<pipeline>/` note, and one row in the runtime table. Load [bootstrap-new-model](.cursor/skills/bootstrap-new-model/SKILL.md) before creating one. Load [prefix-caching](.cursor/skills/prefix-caching/SKILL.md) before wiring a pipeline to the shared prefix store.
 
 The listener runs one request. A language-model pipeline does not fuse a whole layer. An image, video, music, or voice pipeline may place several kernels of one generation in one command buffer and may fuse those kernels. The Neural Engine may run a module. A missing Metal kernel stays missing. It is not replaced by a host GEMV, a CPU matmul, or any other stand-in forward.
 
@@ -70,8 +70,8 @@ A harness change updates [docs/harness.md](docs/harness.md) in the same change. 
 The coding agent is `uv run python -m harness.coding --model <id>`. Pass `--vision` when that pipeline embeds an image (`embed_image` in its `vision.py`). The still is `tests/assets/favlo-horse.png`. When `sampling.py` lists both `thinking` and `instruct`, run it twice, thinking first. `--thinking on` uses the thinking card. `--thinking off` uses the instruct card. One variant runs once. `--store off` is the default. `--store on` sends `store` true. That one value is the ledger and the contract. Exit 0 on each run is the pass.
 
 ```text
-uv run python -m harness.coding --model qwen36-35b-a3b --vision --thinking on
-uv run python -m harness.coding --model qwen36-35b-a3b --vision --thinking off
+uv run python -m harness.coding --model qwen36_35b_a3b --vision --thinking on
+uv run python -m harness.coding --model qwen36_35b_a3b --vision --thinking off
 ```
 
 A needle run, a coding-agent run, or a synthetic-prompt run that prints a prefill sum and a decode sum is a measured rate. The synthetic prompt also prints an end-to-end rate, the sum of those two clocks. Load [research-claims](.cursor/skills/research-claims/SKILL.md) in that same turn and file the row when [RESEARCH.md](RESEARCH.md) does not already hold that plane, MTP setting, length, depth, mode, and card. Asking to run the harness is enough.
@@ -90,7 +90,7 @@ A chat debug uses the Favlo horse only. That is the seeded agent named Favlo, on
 
 Write algorithms from public research documents: papers, published specifications, and vendor hardware documentation. Do not open another application's tree and port its implementation. That covers local checkouts of inference runtimes and of corpus builders. Do not launch another application's environment.
 
-A pipeline's calibration strings are data, not an algorithm. Treat `qwen36-35b-a3b` as the default language model; its as-built note is [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md).
+A pipeline's calibration strings are data, not an algorithm. Treat `qwen36_35b_a3b` as the default language model; its as-built note is [docs/qwen36_35b_a3b/README.md](docs/qwen36_35b_a3b/README.md).
 
 Do not invent routing hits, calibration energies, or hidden-state errors. A measurement belongs in that pipeline's note.
 
@@ -102,7 +102,7 @@ A pipeline change updates that pipeline's `docs/<pipeline>/` note in the same ch
 
 ## Commits
 
-Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): imperative summary` on the subject line. Common types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `chore`, `build`, `ci`. Scope is optional; prefer a short pipeline id such as `qwen36-35b-a3b` or `shared` when the change is localized.
+Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): imperative summary` on the subject line. Common types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `chore`, `build`, `ci`. Scope is optional; prefer a short pipeline id such as `qwen36_35b_a3b` or `shared` when the change is localized.
 
 ```text
 feat(qwen36-35b-a3b): wire Responses store to the shared prefix session

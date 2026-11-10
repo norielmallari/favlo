@@ -7,18 +7,22 @@ from favlo.cli import main, pipeline_names
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_a_pipeline_entry_is_the_file_that_names_itself(tmp_path: Path) -> None:
-    tree = tmp_path / "pipelines" / "metal41" / "demo-model"
-    tree.mkdir(parents=True)
-    (tree / "demo-model.py").write_text('PIPELINE = "demo-model"\n', encoding="utf-8")
-    (tree / "notes.py").write_text("PIPELINE = 'other'\n", encoding="utf-8")
-    assert pipeline_names(tmp_path) == ("demo-model",)
+def test_a_pipeline_package_names_itself(tmp_path: Path) -> None:
+    model = tmp_path / "pipelines" / "demo_model"
+    runtime = model / "metal41"
+    runtime.mkdir(parents=True)
+    (model / "__init__.py").write_text("", encoding="utf-8")
+    (runtime / "__init__.py").write_text('PIPELINE = "demo_model"\n', encoding="utf-8")
+    (runtime / "notes.py").write_text("PIPELINE = 'other'\n", encoding="utf-8")
+    assert pipeline_names(tmp_path) == ("demo_model",)
 
 
 def test_a_registry_pipeline_root_is_discovered(tmp_path: Path) -> None:
-    tree = tmp_path / "outside"
-    tree.mkdir(parents=True)
-    (tree / "demo-model.py").write_text('PIPELINE = "demo-model"\n', encoding="utf-8")
+    model = tmp_path / "outside" / "demo_model"
+    runtime = model / "metal41"
+    runtime.mkdir(parents=True)
+    (model / "__init__.py").write_text("", encoding="utf-8")
+    (runtime / "__init__.py").write_text('PIPELINE = "demo_model"\n', encoding="utf-8")
     models = tmp_path / "models"
     models.mkdir()
     (models / "registry.json").write_text(
@@ -27,16 +31,16 @@ def test_a_registry_pipeline_root_is_discovered(tmp_path: Path) -> None:
                 "version": 1,
                 "models": {
                     "demo": {
-                        "pipeline": "demo-model",
+                        "pipeline": "demo_model",
                         "runtime": "metal41",
-                        "pipeline_root": "outside",
+                        "pipeline_root": "outside/demo_model/metal41",
                     }
                 },
             }
         ),
         encoding="utf-8",
     )
-    assert pipeline_names(tmp_path) == ("demo-model",)
+    assert pipeline_names(tmp_path) == ("demo_model",)
 
 
 def test_media_exits_when_serve_is_down(capsys) -> None:
@@ -60,14 +64,14 @@ def test_media_exits_when_serve_is_down(capsys) -> None:
 def test_help_lists_the_model_flag(capsys) -> None:
     assert main(["--help"]) == 0
     captured = capsys.readouterr()
-    assert "--qwen38-27b" in captured.out
-    assert "--qwen36-35b-a3b" in captured.out
+    assert "--qwen38_27b" in captured.out
+    assert "--qwen36_35b_a3b" in captured.out
 
 
 def test_missing_flag_is_an_error(capsys) -> None:
     assert main([]) == 2
     captured = capsys.readouterr()
-    assert "--qwen36-35b-a3b" in captured.err
+    assert "--qwen36_35b_a3b" in captured.err
 
 
 def test_unknown_model_is_an_error(capsys) -> None:
@@ -90,7 +94,7 @@ def test_serve_loads_the_pipeline_file(monkeypatch, capsys) -> None:
         kept.append(entry)
     monkeypatch.setattr(sys, "path", kept)
     for name in list(sys.modules):
-        if name == "qwen36_35b_a3b" or name.startswith("qwen36_35b_a3b."):
+        if name == "qwen36_35b_a3b" or name.startswith("qwen36_35b_a3b.metal41."):
             monkeypatch.delitem(sys.modules, name, raising=False)
     assert main(["serve", "--help"]) == 0
     captured = capsys.readouterr()
@@ -105,13 +109,13 @@ def test_serve_is_a_process_command(capsys) -> None:
     assert "--spark-x26-1-7b" not in captured.out
 
 
-def test_pipeline_help_comes_from_the_hyphenated_file(capsys) -> None:
-    assert main(["--qwen36-35b-a3b", "--help"]) == 0
+def test_pipeline_help_comes_from_the_package(capsys) -> None:
+    assert main(["--qwen36_35b_a3b", "--help"]) == 0
     captured = capsys.readouterr()
     assert "setup" in captured.out
     assert "quantize" in captured.out
     assert "kernels" in captured.out
-    assert main(["--qwen38-27b", "--help"]) == 0
+    assert main(["--qwen38_27b", "--help"]) == 0
     captured = capsys.readouterr()
     assert "download" in captured.out
     assert "quantize" in captured.out
@@ -123,16 +127,16 @@ def test_media_uses_the_registry_default_when_model_is_omitted(monkeypatch) -> N
 
     registry = {
         "models": {
-            "first": {"pipeline": "z-image-turbo"},
-            "chosen": {"pipeline": "z-image-turbo", "alias": "served"},
-            "other": {"pipeline": "z-image-base"},
+            "first": {"pipeline": "z_image_turbo"},
+            "chosen": {"pipeline": "z_image_turbo", "alias": "served"},
+            "other": {"pipeline": "z_image_base"},
         },
         "media": {"image": "chosen"},
     }
     monkeypatch.setattr("favlo.registry.load_registry", lambda root=None: registry)
-    assert _default_model("z-image-turbo", "image") == "served"
+    assert _default_model("z_image_turbo", "image") == "served"
     registry["media"]["image"] = "other"
-    assert _default_model("z-image-turbo", "image") == "first"
+    assert _default_model("z_image_turbo", "image") == "first"
 
 
 def test_media_body_keeps_numbers() -> None:
@@ -141,7 +145,7 @@ def test_media_body_keeps_numbers() -> None:
     body = _body(
         ["guidance=3.5", "steps=28", "shift=6", "cfg_normalization=false", "size=1024x1024"],
         "Z-Image-int8",
-        "z-image-base",
+        "z_image_base",
         "image",
     )
     assert body["guidance"] == 3.5

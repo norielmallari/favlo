@@ -37,7 +37,6 @@ from favlo.images import image_path, load_image
 from favlo.json_model import dumps_for_model
 from favlo.local_uri import file_uri, is_file_uri, materialize
 from favlo.media_catalog import (
-    CatalogError,
     PipelineRecord,
     ToolSpec,
     build_catalog,
@@ -330,13 +329,10 @@ def mount_plugins(mcp: FastMCP, dispatch: Any, state: dict[str, Any]) -> None:
                 mcp._local_provider.remove_tool(str(name))
             except KeyError:
                 continue
-    try:
-        catalog = build_catalog(
-            description_max=TOOL_DESCRIPTION_MAX_CHARS,
-            param_max=TOOL_PARAM_DESCRIPTION_MAX_CHARS,
-        )
-    except CatalogError:
-        raise
+    catalog = build_catalog(
+        description_max=TOOL_DESCRIPTION_MAX_CHARS,
+        param_max=TOOL_PARAM_DESCRIPTION_MAX_CHARS,
+    )
     names: list[str] = []
     for name, record, spec in catalog.published():
         mcp.add_tool(CatalogTool(name, spec, record, dispatch, state))

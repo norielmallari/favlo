@@ -11,14 +11,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD = ROOT / "models" / "Z-Image-Turbo-fp4"
-NOTE = ROOT / "docs" / "z-image-turbo" / "smoke.json"
+NOTE = ROOT / "docs" / "z_image_turbo" / "smoke.json"
 PROMPT = "a red cube on a white table"
 SEED = 0
 SIZES = ((512, 512), (1024, 1024))
 
 
 def test_kernels() -> None:
-    from z_image_turbo.commands import kernels
+    from z_image_turbo.metal41.commands import kernels
 
     assert kernels() == 0
 
@@ -30,7 +30,7 @@ def test_kernels() -> None:
 def test_generate_matches_the_recorded_latent() -> None:
     if not (RECORD / "manifest.json").is_file():
         pytest.skip("packed record is not present")
-    from z_image_turbo.runtime import Runtime
+    from z_image_turbo.metal41.runtime import Runtime
 
     runtime = Runtime(RECORD)
     digests: dict[tuple[int, int], str] = {}

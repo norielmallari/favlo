@@ -11,13 +11,13 @@ from tests.test_server import _QueueMedia, _Runtime, _serve_background, _stop_ba
 
 
 def test_published_name_prefixes_the_pipeline() -> None:
-    assert published_name("z-image-turbo", "generate_image") == "z_image_turbo__generate_image"
+    assert published_name("z_image_turbo", "generate_image") == "z_image_turbo__generate_image"
     assert published_name("", "z_image_turbo__generate_image") == "z_image_turbo__generate_image"
 
 
 def test_smoke_runs_follow_the_pipeline_note() -> None:
     root = Path(__file__).resolve().parents[1]
-    note = smoke_note(root, "z-image-turbo")
+    note = smoke_note(root, "z_image_turbo")
     runs = smoke_runs(note, None)
     assert len(runs) == 1
     assert "quality" not in runs[0]
@@ -38,7 +38,7 @@ async def _registered(tmp_path: Path) -> None:
     state["image_home"] = tmp_path
     state["module"] = _QueueMedia(tmp_path)
     port = int(state["server"].server_address[1])
-    name = published_name("z-image-turbo", "generate_image")
+    name = published_name("z_image_turbo", "generate_image")
     png: list[bytes] = []
     try:
         async with image_mcp(port, [name], png) as mcp:

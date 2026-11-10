@@ -7,10 +7,10 @@ import json
 import wave
 from pathlib import Path
 
-from ace_step_15_turbo.schedule import MIN_SECONDS
-from wan22_i2v.schedule import frames_from_duration as i2v_frames
-from wan22_ti2v_5b.request import list_resolutions
-from wan22_ti2v_5b.schedule import frames_from_duration as ti2v_frames
+from ace_step_15_turbo.metal41.schedule import MIN_SECONDS
+from wan22_i2v.metal41.schedule import frames_from_duration as i2v_frames
+from wan22_ti2v_5b.metal41.request import list_resolutions
+from wan22_ti2v_5b.metal41.schedule import frames_from_duration as ti2v_frames
 
 import pytest
 
@@ -46,7 +46,7 @@ def test_ti2v_duration_is_five_frames_at_the_served_size() -> None:
 
 
 def test_music_smoke_is_the_shortest_clip() -> None:
-    note = json.loads(Path("docs/ace-step-15-turbo/smoke.json").read_text(encoding="utf-8"))
+    note = json.loads(Path("docs/ace_step_15_turbo/smoke.json").read_text(encoding="utf-8"))
     assert float(note["seconds"]) == MIN_SECONDS
     assert (MUSIC_RATE, MUSIC_CHANNELS) == (48000, 2)
 

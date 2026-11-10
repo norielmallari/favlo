@@ -7,14 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from favlo.media_catalog import CatalogError, build_catalog, publish
+from favlo.media_catalog import build_catalog, publish
 
 
-def test_publish_turns_hyphens_into_underscores() -> None:
-    assert publish("z-image-turbo", "generate_image") == "z_image_turbo__generate_image"
+def test_publish_uses_the_pipeline_id() -> None:
+    assert publish("z_image_turbo", "generate_image") == "z_image_turbo__generate_image"
 
 
-def test_a_missing_entry_fails_the_catalog(tmp_path: Path) -> None:
+def test_a_broken_pipeline_is_skipped_so_serve_keeps_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     models = tmp_path / "models"
     models.mkdir()
     (models / "registry.json").write_text(
@@ -22,19 +24,77 @@ def test_a_missing_entry_fails_the_catalog(tmp_path: Path) -> None:
             {
                 "version": 1,
                 "models": {
-                    "missing-model": {
-                        "pipeline": "missing-pipeline",
+                    "broken-model": {
+                        "pipeline": "broken_pipe",
                         "runtime": "metal41",
                         "alias": None,
-                        "variants": {},
-                    }
+                        "variants": {"generate": {}},
+                    },
+                    "still-model": {
+                        "pipeline": "still_pipe",
+                        "runtime": "metal41",
+                        "alias": None,
+                        "variants": {"generate": {}},
+                    },
                 },
             }
         ),
         encoding="utf-8",
     )
-    with pytest.raises(CatalogError, match="did not import"):
-        build_catalog(tmp_path)
+
+    def load(name: str, root=None, *, runtime=None, pipeline_root=None):
+        del root, runtime, pipeline_root
+        if name == "broken_pipe":
+            raise SyntaxError("from __future__ imports must occur at the beginning of the file")
+        from types import SimpleNamespace
+
+        from favlo.media_pipeline import MediaPipeline
+
+        class _Handle(MediaPipeline):
+            kind = "image"
+            id_prefix = "image"
+            object_name = "image"
+
+            def parse(self, body):
+                del body
+                raise NotImplementedError
+
+            def generate(self, request, stop, hold):
+                del request, stop, hold
+                raise NotImplementedError
+
+            def pack(self, request, result):
+                del request, result
+                raise NotImplementedError
+
+        handle = _Handle()
+
+        def mcp_tools():
+            return [
+                {
+                    "name": "generate_image",
+                    "description": "One still.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "Caption."},
+                        },
+                        "required": ["prompt"],
+                    },
+                    "task": True,
+                    "handler": "handle_image",
+                    "result": "image",
+                }
+            ]
+
+        return SimpleNamespace(mcp_tools=mcp_tools, handle_image=handle)
+
+    monkeypatch.setattr("favlo.cli.load_pipeline", load)
+    catalog = build_catalog(tmp_path)
+    names = [name for name, _record, _spec in catalog.published()]
+    assert names == ["still_pipe__generate_image"]
+    err = capsys.readouterr().err
+    assert "broken-model did not import (SyntaxError" in err
 
 
 def test_registered_media_tools_publish_without_a_device() -> None:

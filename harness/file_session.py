@@ -422,6 +422,10 @@ class Log:
         with self._lock:
             self._lines.append(line)
 
+    def clear(self) -> None:
+        with self._lock:
+            self._lines.clear()
+
     def text(self) -> str:
         with self._lock:
             return "".join(self._lines)
@@ -459,7 +463,14 @@ class Server:
     owned: bool = False
 
 
-def _wait_requests(log: Log, previous: int, server: Server) -> list[RequestRate]:
+def _model_requests(log: Log, model: str) -> list[RequestRate]:
+    """Parse request rates for ``model`` only. Other pipelines on the shared log stay out."""
+    return parse_requests(pipeline_log(log.text(), model_stem(model)))
+
+
+def _wait_requests(
+    log: Log, previous: int, server: Server, *, model: str
+) -> list[RequestRate]:
     from favlo.daemon import alive
 
     deadline = time.monotonic() + 1800
@@ -469,7 +480,7 @@ def _wait_requests(log: Log, previous: int, server: Server) -> list[RequestRate]
         if server.pid > 0 and not alive(server.pid):
             message = "server exited\n" + log.text()[-4000:]
             raise RuntimeError(message)
-        requests = parse_requests(log.text())
+        requests = _model_requests(log, model)
         count = len(requests)
         complete = count > previous and requests[-1].decode != ""
         if count != last:
@@ -478,7 +489,7 @@ def _wait_requests(log: Log, previous: int, server: Server) -> list[RequestRate]
         elif complete and stable_at is not None and time.monotonic() - stable_at >= 0.3:
             return requests
         time.sleep(0.05)
-    requests = parse_requests(log.text())
+    requests = _model_requests(log, model)
     if len(requests) > previous and requests[-1].decode != "":
         return requests
     message = "server log did not record the request\n" + log.text()[-2000:]
@@ -588,11 +599,11 @@ async def run_file_agent(
             rel = path.relative_to(package).as_posix()
             task["path"] = rel
             print(f"turn {turn + 1} read {SHARED_PACKAGE.as_posix()}/{rel}", flush=True)
-            before_requests = len(parse_requests(log.text()))
+            before_requests = len(_model_requests(log, model))
             stream = agent.run(read_prompt(rel), stream=True, session=session)
             async for update in stream:
                 printer.take(update)
-            requests = _wait_requests(log, before_requests, server)
+            requests = _wait_requests(log, before_requests, server, model=model)
             for row, request in enumerate(requests[seen:], start=seen + 1):
                 print(format_request(row, request), flush=True)
             seen = len(requests)
@@ -703,6 +714,10 @@ def main(argv: list[str] | None = None) -> int:
     mtp = None if args.mtp is None else args.mtp == "on"
     try:
         server = _spawn(log, stem, args.max_memory, args.port or 8129)
+        # A rolled serve log can re-deliver retained lines from earlier sessions.
+        # Drop anything the follower already pushed before this agent run starts.
+        time.sleep(0.2)
+        log.clear()
         if args.mtp is not None:
             print(f"mtp {args.mtp} depth {args.mtp_depth}", flush=True)
         result = asyncio.run(

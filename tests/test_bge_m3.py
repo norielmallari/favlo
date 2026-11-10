@@ -7,10 +7,10 @@ from pathlib import Path
 
 import numpy as np
 
-from bge_m3.pack import pack_int8, restore_int8
-from bge_m3.passages import passages
-from bge_m3.quantize import _COSINE_MIN, _finished
-from bge_m3.text import (
+from bge_m3.metal41.pack import pack_int8, restore_int8
+from bge_m3.metal41.passages import passages
+from bge_m3.metal41.quantize import _COSINE_MIN, _finished
+from bge_m3.metal41.text import (
     BUCKETS,
     HIDDEN,
     PAD_ID,

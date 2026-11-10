@@ -5,7 +5,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from qwen36_35b_a3b.fetch import download, list_files, remaining_download, shortfall
+from qwen36_35b_a3b.metal41.fetch import download, list_files, remaining_download, shortfall
 
 
 class _Hub(BaseHTTPRequestHandler):

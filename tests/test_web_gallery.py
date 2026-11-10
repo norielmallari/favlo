@@ -1289,7 +1289,7 @@ def test_gallery_creation_captions_before_the_greeting(client: TestClient, tmp_p
     monkeypatch.setattr("web_api.gallery_embed._embed", lambda _text: [0.0] * 1024)
 
     def vision_model(workspace_id=None):
-        return ("qwen36-35b-a3b:thinking", "http://127.0.0.1:9")
+        return ("qwen36_35b_a3b:thinking", "http://127.0.0.1:9")
 
     client.app.state.store.gallery_vision_model = vision_model
     channel_id = client.get("/channels").json()["channels"][0]["id"]
@@ -1316,7 +1316,7 @@ def test_gallery_creation_captions_before_the_greeting(client: TestClient, tmp_p
             break
         time.sleep(0.05)
     assert row["provisioning_state"] == "provisioned"
-    assert calls == ["qwen36-35b-a3b:thinking"]
+    assert calls == ["qwen36_35b_a3b:thinking"]
     side = json.loads((root / ".favlo_metadata" / "a.png.json").read_text())
     assert side["description"] == "A painted horse in a field."
     snap = client.get(f"/sessions/{body['session_id']}").json()

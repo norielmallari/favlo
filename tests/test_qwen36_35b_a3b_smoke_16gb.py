@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from favlo.memory import memory
-from qwen36_35b_a3b.forward import Qwen36Runtime
+from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
 
 _CAP = "16GiB"
 _BYTES = 16 << 30

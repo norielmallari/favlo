@@ -12,15 +12,17 @@ from favlo.registry import (
     list_unregistered,
     load_registry,
     model_objects,
+    one_model,
     refuse_conflicting_destination,
     register_quantized,
     resolve,
     save_registry,
+    served_model_objects,
     set_alias,
     set_model_mtp,
 )
 
-PIPELINE = "qwen36-35b-a3b"
+PIPELINE = "qwen36_35b_a3b"
 
 
 def _record(root, name: str) -> None:
@@ -188,24 +190,24 @@ def test_a_second_pipeline_is_listed_without_a_default(tmp_path) -> None:
     dense = "Qwen3.8-27B-fp4"
     _record(tmp_path, small)
     _record(tmp_path, dense)
-    add_model(small, alias="qwen36-35b-a3b", root=tmp_path, pipeline="qwen36-35b-a3b", runtime="metal41")
-    add_model(dense, alias="qwen38-27b", root=tmp_path, pipeline="qwen38-27b", runtime="metal41")
+    add_model(small, alias="qwen36_35b_a3b", root=tmp_path, pipeline="qwen36_35b_a3b", runtime="metal41")
+    add_model(dense, alias="qwen38_27b", root=tmp_path, pipeline="qwen38_27b", runtime="metal41")
     data = load_registry(tmp_path)
-    assert data["default"] == "qwen36-35b-a3b:instruct"
-    assert resolve("qwen36-35b-a3b", root=tmp_path).folder == small
-    assert resolve("qwen36-35b-a3b", root=tmp_path).pipeline == "qwen36-35b-a3b"
-    selected = resolve("qwen38-27b", root=tmp_path)
+    assert data["default"] == "qwen36_35b_a3b:instruct"
+    assert resolve("qwen36_35b_a3b", root=tmp_path).folder == small
+    assert resolve("qwen36_35b_a3b", root=tmp_path).pipeline == "qwen36_35b_a3b"
+    selected = resolve("qwen38_27b", root=tmp_path)
     assert selected.folder == dense
-    assert selected.pipeline == "qwen38-27b"
+    assert selected.pipeline == "qwen38_27b"
     ids = [row["id"] for row in model_objects(tmp_path)]
-    assert "qwen36-35b-a3b" in ids
-    assert "qwen38-27b" in ids
-    assert "qwen38-27b:thinking" in ids
+    assert "qwen36_35b_a3b" in ids
+    assert "qwen38_27b" in ids
+    assert "qwen38_27b:thinking" in ids
     assert small not in ids
     assert dense not in ids
     listing = format_listing(tmp_path)
-    assert "pipeline qwen38-27b" in listing
-    assert "pipeline qwen36-35b-a3b" in listing
+    assert "pipeline qwen38_27b" in listing
+    assert "pipeline qwen36_35b_a3b" in listing
 
 
 def test_unregistered_complete_directory_is_listed(tmp_path) -> None:
@@ -266,9 +268,9 @@ def test_qwen36_registration_uses_that_pipeline_card(tmp_path) -> None:
     _record(tmp_path, "a3b")
     add_model(
         "a3b",
-        alias="qwen36-35b-a3b",
+        alias="qwen36_35b_a3b",
         root=tmp_path,
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         runtime="metal41",
     )
     entry = load_registry(tmp_path)["models"]["a3b"]
@@ -279,14 +281,14 @@ def test_qwen36_registration_uses_that_pipeline_card(tmp_path) -> None:
     assert entry["variants"]["instruct"]["temperature"] == 0.7
     assert entry["variants"]["instruct"]["presence_penalty"] == 1.5
     assert entry["variants"]["instruct"]["reasoning_effort"] == "none"
-    bare = resolve("qwen36-35b-a3b", root=tmp_path)
+    bare = resolve("qwen36_35b_a3b", root=tmp_path)
     assert bare.sampling is None
     assert bare.variant is None
     assert bare.default_variant == "thinking"
     assert bare.reasoning_effort == "high"
     assert bare.variants is not None
     assert bare.variants["thinking"]["presence_penalty"] == 1.5
-    forced = resolve("qwen36-35b-a3b:instruct", root=tmp_path)
+    forced = resolve("qwen36_35b_a3b:instruct", root=tmp_path)
     assert forced.variant == "instruct"
     assert forced.sampling is not None
     assert forced.sampling["temperature"] == 0.7
@@ -502,4 +504,64 @@ def test_a_stored_embeddings_default_is_kept(tmp_path, monkeypatch) -> None:
         root,
     )
     assert registry.embeddings_default(root) == "vec-b"
+
+
+def test_served_models_list_language_and_embeddings_from_registry_only(
+    tmp_path, monkeypatch
+) -> None:
+    def refuse_load(*_args, **_kwargs):
+        raise AssertionError("served listing must not import a pipeline")
+
+    monkeypatch.setattr("favlo.cli.load_pipeline", refuse_load)
+    (tmp_path / "models").mkdir()
+    save_registry(
+        {
+            "version": 1,
+            "embeddings": "vec-pack",
+            "models": {
+                "chat-pack": {
+                    "pipeline": "chat_pipe",
+                    "runtime": "metal41",
+                    "alias": "chat",
+                    "variants": {
+                        "thinking": {"temperature": 1.0},
+                        "instruct": {"temperature": 0.7},
+                    },
+                    "default_variant": "thinking",
+                    "context_length": 8192,
+                },
+                "vec-pack": {
+                    "pipeline": "embed_pipe",
+                    "runtime": "metal41",
+                    "alias": None,
+                    "variants": {"embed": {}},
+                    "default_variant": "embed",
+                    "context_length": 4096,
+                },
+                "still-pack": {
+                    "pipeline": "image_pipe",
+                    "runtime": "metal41",
+                    "alias": None,
+                    "variants": {"generate": {}},
+                    "default_variant": "generate",
+                    "context_length": 512,
+                },
+            },
+        },
+        tmp_path,
+    )
+    all_ids = [row["id"] for row in model_objects(tmp_path)]
+    assert "still-pack" in all_ids
+    served = served_model_objects(tmp_path)
+    assert [row["id"] for row in served] == [
+        "chat",
+        "chat:thinking",
+        "chat:instruct",
+        "vec-pack",
+        "vec-pack:embed",
+    ]
+    assert one_model("chat:instruct", root=tmp_path)["pipeline"] == "chat_pipe"
+    assert one_model("vec-pack", root=tmp_path)["pipeline"] == "embed_pipe"
+    with pytest.raises(LookupError, match="not found"):
+        one_model("still-pack", root=tmp_path)
 

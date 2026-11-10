@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from qwen36_35b_a3b.atlas import atlas_slots
-from qwen36_35b_a3b.cache import (
+from qwen36_35b_a3b.metal41.atlas import atlas_slots
+from qwen36_35b_a3b.metal41.cache import (
     cache_bytes,
     fit_positions,
     kv_buffer_bytes,
@@ -20,8 +20,8 @@ from qwen36_35b_a3b.cache import (
     max_position,
     repack_plane,
 )
-from qwen36_35b_a3b.checks import run_checks
-from qwen36_35b_a3b.formats import (
+from qwen36_35b_a3b.metal41.checks import run_checks
+from qwen36_35b_a3b.metal41.formats import (
     EXPERT_FP8,
     EXPERT_IMAGE,
     dequant_fp4,
@@ -35,13 +35,13 @@ from qwen36_35b_a3b.formats import (
     quantize_fp4,
     quantize_fp8,
 )
-from qwen36_35b_a3b.forward import (
+from qwen36_35b_a3b.metal41.forward import (
     ThinkBudget,
     _sample,
     decode_steps,
     limit_keeps_piece,
 )
-from qwen36_35b_a3b.tools import (
+from qwen36_35b_a3b.metal41.tools import (
     StreamText,
     completion_fields,
     function_has_parameters,
@@ -51,7 +51,7 @@ from qwen36_35b_a3b.tools import (
 
 
 def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    from qwen36_35b_a3b.runtime import open_runtime
+    from qwen36_35b_a3b.metal41.runtime import open_runtime
 
     captured: dict[str, object] = {}
 
@@ -60,16 +60,16 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
         captured.update(kwargs)
         return "runtime"
 
-    monkeypatch.setattr("qwen36_35b_a3b.runtime.Qwen36Runtime", fake)
-    assert open_runtime(Path("record"), owner="qwen36-35b-a3b:7") == "runtime"
-    assert captured["owner"] == "qwen36-35b-a3b:7"
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.runtime.Qwen36Runtime", fake)
+    assert open_runtime(Path("record"), owner="qwen36_35b_a3b:7") == "runtime"
+    assert captured["owner"] == "qwen36_35b_a3b:7"
     assert "max_memory" not in captured
 
 
 def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
-    from qwen36_35b_a3b.forward import Qwen36Runtime
+    from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
 
-    owner = "qwen36-35b-a3b:7"
+    owner = "qwen36_35b_a3b:7"
     held: dict[str, str] = {}
 
     class _Probe(Qwen36Runtime):
@@ -86,7 +86,7 @@ def test_a_missing_record_keeps_the_passed_owner(tmp_path: Path) -> None:
 
 
 def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
-    from qwen36_35b_a3b.forward import Qwen36Runtime
+    from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
 
     held: dict[str, str] = {}
 
@@ -101,13 +101,13 @@ def test_a_missing_record_mints_an_owner(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         _Probe(tmp_path)
     minted = held["owner"]
-    assert minted.startswith("qwen36-35b-a3b:")
-    assert minted != "qwen36-35b-a3b:7"
+    assert minted.startswith("qwen36_35b_a3b:")
+    assert minted != "qwen36_35b_a3b:7"
 
 
 def test_partial_grid_matches_the_span_launch() -> None:
-    from qwen36_35b_a3b.forward import _MERGE_THREADS, _PARTIAL_GROUPS, _PARTIAL_THREADS
-    from qwen36_35b_a3b.span import (
+    from qwen36_35b_a3b.metal41.forward import _MERGE_THREADS, _PARTIAL_GROUPS, _PARTIAL_THREADS
+    from qwen36_35b_a3b.metal41.span import (
         _MERGE_THREADS as span_merge,
         _PARTIAL_GROUPS as span_groups,
         _PARTIAL_THREADS as span_threads,
@@ -131,9 +131,9 @@ def test_fp4_tie_picks_the_even_code() -> None:
 
 
 def test_default_pack_leaves_out_mtp_experts() -> None:
-    from qwen36_35b_a3b.convert import LANGUAGE_EXPERTS
-    from qwen36_35b_a3b.fetch import record_bytes
-    from qwen36_35b_a3b.formats import EXPERT_FP8, EXPERT_IMAGE, promote_count
+    from qwen36_35b_a3b.metal41.convert import LANGUAGE_EXPERTS
+    from qwen36_35b_a3b.metal41.fetch import record_bytes
+    from qwen36_35b_a3b.metal41.formats import EXPERT_FP8, EXPERT_IMAGE, promote_count
 
     language = promote_count(20, LANGUAGE_EXPERTS)
     experts = language * EXPERT_FP8 + (LANGUAGE_EXPERTS - language) * EXPERT_IMAGE
@@ -163,8 +163,8 @@ def test_firing_promote_ranks_by_total_hits(tmp_path: Path) -> None:
 
     import numpy as np
 
-    from qwen36_35b_a3b.convert import _promoted_sets_firing
-    from qwen36_35b_a3b.firing import EXPERTS, LAYERS, flat_hit_scores
+    from qwen36_35b_a3b.metal41.convert import _promoted_sets_firing
+    from qwen36_35b_a3b.metal41.firing import EXPERTS, LAYERS, flat_hit_scores
 
     db = tmp_path / "firing.sqlite"
     with sqlite3.connect(db) as con:
@@ -204,7 +204,7 @@ def test_firing_promote_ranks_by_total_hits(tmp_path: Path) -> None:
 
 
 def test_load_row_opens_when_the_console_shows_bars() -> None:
-    from qwen36_35b_a3b.forward import Qwen36Runtime
+    from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
 
     begun: list[dict[str, object]] = []
 
@@ -232,7 +232,7 @@ def test_load_row_opens_when_the_console_shows_bars() -> None:
 
 
 def test_an_omitted_completion_cap_is_the_context_room() -> None:
-    from qwen36_35b_a3b.chat import completion_limit, requested_limit
+    from qwen36_35b_a3b.metal41.chat import completion_limit, requested_limit
 
     assert requested_limit({}) is None
     assert requested_limit({"max_tokens": None, "max_completion_tokens": 16}) == 16
@@ -263,7 +263,7 @@ def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
     root = _chat_root()
     if root is None:
         pytest.skip("chat template is not installed")
-    from qwen36_35b_a3b.chat import encode_chat, encode_text
+    from qwen36_35b_a3b.metal41.chat import encode_chat, encode_text
 
     user = "Call read_file with path qwen38_flash_next/runtime.py."
     tools = [
@@ -300,7 +300,7 @@ def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
 
 
 def test_close_drops_device_buffers_before_another_pipeline() -> None:
-    from qwen36_35b_a3b.forward import Qwen36Runtime
+    from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
 
     class _Atlas:
         def __init__(self) -> None:
@@ -361,7 +361,7 @@ def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
     root = _chat_root()
     if root is None:
         pytest.skip("chat template is not installed")
-    from qwen36_35b_a3b.chat import encode_chat
+    from qwen36_35b_a3b.metal41.chat import encode_chat
 
     tools = [
         {
@@ -410,7 +410,7 @@ def test_a_passed_reasoning_effort_is_not_rendered(tmp_path: Path) -> None:
         "{{ messages[0].content }}",
         encoding="utf-8",
     )
-    from qwen36_35b_a3b.chat import decode_text, encode_chat
+    from qwen36_35b_a3b.metal41.chat import decode_text, encode_chat
 
     messages = [{"role": "user", "content": "Hello"}]
     plain = decode_text(tmp_path, encode_chat(tmp_path, messages, None, True))
@@ -548,7 +548,7 @@ def test_expert_offsets_place_an_fp8_image_on_a_128_byte_boundary() -> None:
 
 
 def test_a_repeated_image_reuses_the_vision_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    from qwen36_35b_a3b import vision
+    from qwen36_35b_a3b.metal41 import vision
 
     calls: list[bytes] = []
 
@@ -558,6 +558,8 @@ def test_a_repeated_image_reuses_the_vision_rows(monkeypatch: pytest.MonkeyPatch
         return np.ones((4, 8), dtype=np.float32), 4, 4
 
     monkeypatch.setattr(vision, "embed_image", embed)
+    monkeypatch.setattr(vision, "_load_vision_disk", lambda _key: None)
+    monkeypatch.setattr(vision, "_store_vision_disk", lambda *_args, **_kwargs: None)
     vision._ROW_CACHE.clear()
     runtime = SimpleNamespace(root="example-model")
     first = vision._vision_row(runtime, b"png", min_pixels=1, max_pixels=2)
@@ -569,7 +571,7 @@ def test_a_repeated_image_reuses_the_vision_rows(monkeypatch: pytest.MonkeyPatch
 
 
 def test_stream_delta_holds_a_partial_character() -> None:
-    from qwen36_35b_a3b.chat import _stream_delta
+    from qwen36_35b_a3b.metal41.chat import _stream_delta
 
     piece, shown = _stream_delta("hello\ufffd", "", final=False)
     assert piece == "hello"
@@ -580,7 +582,7 @@ def test_stream_delta_holds_a_partial_character() -> None:
 
 
 def test_completion_usage_uses_the_phase_clocks() -> None:
-    from qwen36_35b_a3b.chat import _usage
+    from qwen36_35b_a3b.metal41.chat import _usage
 
     runtime = SimpleNamespace(
         _context_limit=131072,
@@ -610,7 +612,7 @@ def test_a_zero_clock_prints_a_zero_rate() -> None:
 
 def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
     from favlo.reply import MemoryReply
-    from qwen36_35b_a3b.chat import _stream
+    from qwen36_35b_a3b.metal41.chat import _stream
 
     class _Runtime:
         _hit_limit = False
@@ -632,7 +634,7 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
             self._output_ids = ids
             return ids
 
-    reply = MemoryReply("qwen36-35b-a3b")
+    reply = MemoryReply("qwen36_35b_a3b")
     _stream(reply, _Runtime(), [9, 9, 9], [], False, 8, 0.0, 1.0, 1, 0.0, True, [], None)
     assert reply.sent == [b"data: [DONE]\n\n"]
     seen: list[tuple[str, object]] = []
@@ -685,7 +687,7 @@ def test_a_tool_call_before_the_close_ends_the_trace() -> None:
 
 def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
     from favlo.reply import MemoryReply
-    from qwen36_35b_a3b.chat import _stream
+    from qwen36_35b_a3b.metal41.chat import _stream
 
     call = "<tool_call>\n<function=read_file>\n</function>\n</tool_call>"
 
@@ -709,25 +711,24 @@ def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
             self._output_ids = ids
             return ids
 
-    reply = MemoryReply("qwen36-35b-a3b")
+    reply = MemoryReply("qwen36_35b_a3b")
     _stream(reply, _Runtime(), [9], [], False, 8, 0.0, 1.0, 1, 0.0, False, [], None)
     content = []
     names = []
-    finish = None
+    finished = False
     for payload in reply.events:
-        choices = payload["choices"]
-        if not choices:
-            continue
-        delta = choices[0]["delta"]
-        if delta.get("content"):
-            content.append(delta["content"])
-        for call_delta in delta.get("tool_calls") or []:
-            names.append(call_delta["function"]["name"])
-        if choices[0].get("finish_reason"):
-            finish = choices[0]["finish_reason"]
+        kind = payload.get("type")
+        if kind == "response.output_text.delta":
+            content.append(str(payload.get("delta") or ""))
+        if kind == "response.output_item.done":
+            item = payload.get("item") or {}
+            if item.get("type") == "function_call":
+                names.append(str(item.get("name") or ""))
+        if kind == "response.completed":
+            finished = True
     assert "".join(content) == "Look here\n"
     assert names == ["read_file"]
-    assert finish == "tool_calls"
+    assert finished
     assert "<tool_call>" not in "".join(content)
 
 
@@ -736,7 +737,7 @@ def _qwen36_record() -> Path | None:
 
     root = models_dir()
     for folder, entry in load_registry()["models"].items():
-        if entry.get("pipeline") != "qwen36-35b-a3b":
+        if entry.get("pipeline") != "qwen36_35b_a3b":
             continue
         path = root / folder
         if (path / "tokenizer.json").is_file() and (path / "chat_template.jinja").is_file():
@@ -884,13 +885,13 @@ def test_empty_function_has_no_parameters() -> None:
 
 
 def test_a_named_folder_is_the_registry_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from qwen36_35b_a3b.commands import main
+    from qwen36_35b_a3b.metal41.commands import main
 
     def models_dir(root: Path | None = None) -> Path:
         del root
         return tmp_path / "models"
 
-    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.models_dir", models_dir)
     monkeypatch.setattr("favlo.registry.models_dir", models_dir)
     monkeypatch.setenv("FAVLO_SKIP_PLATE", "1")
 
@@ -906,7 +907,7 @@ def test_a_named_folder_is_the_registry_id(tmp_path: Path, monkeypatch: pytest.M
         (dest / "config.json").write_text("{}\n")
         on_progress(2, 2, "config.json")
 
-    def quantize(src: Path, output: Path, on_bytes=None, expert_fp8: float = 20) -> Path:
+    def quantize(src: Path, output: Path, on_bytes=None, expert_fp8: float = 20, **_kwargs) -> Path:
         del src
         seen["expert_fp8"] = expert_fp8
         output.mkdir(parents=True, exist_ok=True)
@@ -916,10 +917,10 @@ def test_a_named_folder_is_the_registry_id(tmp_path: Path, monkeypatch: pytest.M
         return output
 
     seen: dict[str, object] = {}
-    monkeypatch.setattr("qwen36_35b_a3b.commands.list_files", list_files)
-    monkeypatch.setattr("qwen36_35b_a3b.commands.download", download)
-    monkeypatch.setattr("qwen36_35b_a3b.commands.quantize", quantize)
-    monkeypatch.setattr("qwen36_35b_a3b.commands.shortfall", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.list_files", list_files)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.download", download)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.quantize", quantize)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.shortfall", lambda *_args, **_kwargs: None)
     code = main(
         [
             "setup",
@@ -942,7 +943,7 @@ def test_a_named_folder_is_the_registry_id(tmp_path: Path, monkeypatch: pytest.M
     registry = json.loads((tmp_path / "models" / "registry.json").read_text())
     row = registry["models"]["example-model"]
     assert row["alias"] is None
-    assert row["pipeline"] == "qwen36-35b-a3b"
+    assert row["pipeline"] == "qwen36_35b_a3b"
     from favlo.registry import resolve
 
     selection = resolve("example-model:instruct")
@@ -954,13 +955,13 @@ def test_a_named_folder_is_the_registry_id(tmp_path: Path, monkeypatch: pytest.M
 def test_an_omitted_name_appends_the_quant_format(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from qwen36_35b_a3b.commands import _checkout_name, _folder_name, _packed_dir, _repo_id, main
+    from qwen36_35b_a3b.metal41.commands import _checkout_name, _folder_name, _packed_dir, _repo_id, main
 
     def models_dir(root: Path | None = None) -> Path:
         del root
         return tmp_path / "models"
 
-    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.models_dir", models_dir)
     monkeypatch.setattr("favlo.registry.models_dir", models_dir)
     monkeypatch.setenv("FAVLO_SKIP_PLATE", "1")
     _src, output, alias = _packed_dir("example-org/example-model", None, 20)
@@ -970,7 +971,7 @@ def test_an_omitted_name_appends_the_quant_format(
     assert output.name == "example-model-fp4"
     _src, official, alias = _packed_dir("Qwen/Qwen3.6-35B-A3B", None, 20)
     assert official.name == "Qwen3.6-35B-A3B-fp8-e20"
-    assert alias == "qwen36-35b-a3b"
+    assert alias == "qwen36_35b_a3b"
     assert _repo_id("example-org/example-model") == "example-org/example-model"
     assert (
         _repo_id("https://huggingface.co/example-org/example-model/tree/main")
@@ -992,7 +993,7 @@ def test_an_omitted_name_appends_the_quant_format(
 
     seen: dict[str, object] = {}
 
-    def quantize(src: Path, output: Path, on_bytes=None, expert_fp8: float = 20) -> Path:
+    def quantize(src: Path, output: Path, on_bytes=None, expert_fp8: float = 20, **_kwargs) -> Path:
         del src
         seen["expert_fp8"] = expert_fp8
         seen["output"] = output.name
@@ -1003,17 +1004,17 @@ def test_an_omitted_name_appends_the_quant_format(
         return output
 
     monkeypatch.setattr(
-        "qwen36_35b_a3b.commands.list_files", lambda **_kwargs: [("config.json", 2)]
+        "qwen36_35b_a3b.metal41.commands.list_files", lambda **_kwargs: [("config.json", 2)]
     )
     monkeypatch.setattr(
-        "qwen36_35b_a3b.commands.download",
+        "qwen36_35b_a3b.metal41.commands.download",
         lambda dest, files, on_progress, **_kwargs: (
             dest.mkdir(parents=True, exist_ok=True),
             on_progress(2, 2, "config.json"),
         ),
     )
-    monkeypatch.setattr("qwen36_35b_a3b.commands.quantize", quantize)
-    monkeypatch.setattr("qwen36_35b_a3b.commands.shortfall", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.quantize", quantize)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.shortfall", lambda *_args, **_kwargs: None)
     code = main(
         ["setup", "--repo", "example-org/example-model", "--expert-fp8", "0", "--console", "plain"]
     )
@@ -1025,25 +1026,25 @@ def test_an_omitted_name_appends_the_quant_format(
 
 
 def test_keep_bf16_leaves_the_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from qwen36_35b_a3b.commands import main
+    from qwen36_35b_a3b.metal41.commands import main
 
     def models_dir(root: Path | None = None) -> Path:
         del root
         return tmp_path / "models"
 
-    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.models_dir", models_dir)
     monkeypatch.setattr("favlo.registry.models_dir", models_dir)
     checkout = tmp_path / "models" / "example-org--example-model-bf16"
     checkout.mkdir(parents=True)
     (checkout / "config.json").write_text("{}\n")
 
-    def quantize(src: Path, output: Path, expert_fp8: float = 20) -> Path:
+    def quantize(src: Path, output: Path, expert_fp8: float = 20, **_kwargs) -> Path:
         del src, expert_fp8
         output.mkdir(parents=True, exist_ok=True)
         (output / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
         return output
 
-    monkeypatch.setattr("qwen36_35b_a3b.commands.quantize", quantize)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.quantize", quantize)
     kept = main(
         ["quantize", "--src", str(checkout), "--name", "example-kept", "--keep-bf16"]
     )
@@ -1061,16 +1062,16 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
 ) -> None:
     from favlo.prefix import checkpoint_digest
     from favlo.registry import register_quantized
-    from qwen36_35b_a3b.commands import main
+    from qwen36_35b_a3b.metal41.commands import main
 
     def models_dir(root: Path | None = None) -> Path:
         del root
         return tmp_path / "models"
 
     prefix_root = tmp_path / "prefix"
-    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.models_dir", models_dir)
     monkeypatch.setattr("favlo.registry.models_dir", models_dir)
-    monkeypatch.setattr("qwen36_35b_a3b.commands.default_prefix_dir", lambda: prefix_root)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.default_prefix_dir", lambda: prefix_root)
     packed = tmp_path / "models" / "example-model-fp8-e20"
     packed.mkdir(parents=True)
     (packed / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
@@ -1087,7 +1088,7 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
         source=checkout,
         alias="example-alias",
         directory=packed,
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         runtime="metal41",
     )
     register_quantized(
@@ -1095,11 +1096,11 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
         source=outside,
         alias=None,
         directory=kept,
-        pipeline="qwen36-35b-a3b",
+        pipeline="qwen36_35b_a3b",
         runtime="metal41",
     )
     digest = checkpoint_digest(packed).hex()
-    partition = prefix_root / "qwen36-35b-a3b" / digest
+    partition = prefix_root / "qwen36_35b_a3b" / digest
     partition.mkdir(parents=True)
     (partition / "cache.bin").write_bytes(b"x")
     assert main(["delete", "example-alias:instruct"]) == 0
@@ -1117,24 +1118,24 @@ def test_delete_removes_the_record_the_checkout_and_the_prefix(
 
 
 def test_quantize_name_is_the_registry_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from qwen36_35b_a3b.commands import main
+    from qwen36_35b_a3b.metal41.commands import main
 
     def models_dir(root: Path | None = None) -> Path:
         del root
         return tmp_path / "models"
 
-    monkeypatch.setattr("qwen36_35b_a3b.commands.models_dir", models_dir)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.models_dir", models_dir)
     monkeypatch.setattr("favlo.registry.models_dir", models_dir)
     src = tmp_path / "checkout"
     src.mkdir()
 
-    def quantize(src: Path, output: Path, expert_fp8: float = 20) -> Path:
+    def quantize(src: Path, output: Path, expert_fp8: float = 20, **_kwargs) -> Path:
         del src, expert_fp8
         output.mkdir(parents=True, exist_ok=True)
         (output / "manifest.json").write_text(json.dumps({"complete": True}) + "\n")
         return output
 
-    monkeypatch.setattr("qwen36_35b_a3b.commands.quantize", quantize)
+    monkeypatch.setattr("qwen36_35b_a3b.metal41.commands.quantize", quantize)
     code = main(["quantize", "--src", str(src), "--name", "example-model", "--expert-fp8", "0"])
     assert code == 0
     registry = json.loads((tmp_path / "models" / "registry.json").read_text())
@@ -1143,7 +1144,7 @@ def test_quantize_name_is_the_registry_id(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_quantize_accepts_a_budget_from_zero_to_one_hundred() -> None:
-    from qwen36_35b_a3b.commands import _expert_budget, main
+    from qwen36_35b_a3b.metal41.commands import _expert_budget, main
 
     assert _expert_budget("0") == 0.0
     assert _expert_budget("20") == 20.0
@@ -1156,7 +1157,7 @@ def test_quantize_accepts_a_budget_from_zero_to_one_hundred() -> None:
 
 
 def test_record_name_uses_the_expert_percentage() -> None:
-    from qwen36_35b_a3b.convert import record_name
+    from qwen36_35b_a3b.metal41.convert import record_name
 
     plain = Path("models/Example-Model")
     assert record_name(plain) == "Example-Model-fp4"
@@ -1170,7 +1171,7 @@ def test_record_name_uses_the_expert_percentage() -> None:
 
 
 def test_a_widths_file_of_fours_keeps_the_fp4_stride(tmp_path: Path) -> None:
-    from qwen36_35b_a3b.atlas import EXPERTS, LAYERS, read_expert_layout
+    from qwen36_35b_a3b.metal41.atlas import EXPERTS, LAYERS, read_expert_layout
 
     folder = tmp_path / "experts"
     folder.mkdir()
@@ -1182,7 +1183,7 @@ def test_a_widths_file_of_fours_keeps_the_fp4_stride(tmp_path: Path) -> None:
 
 
 def test_an_fp8_width_needs_the_layer_file(tmp_path: Path) -> None:
-    from qwen36_35b_a3b.atlas import EXPERTS, LAYERS, read_expert_layout
+    from qwen36_35b_a3b.metal41.atlas import EXPERTS, LAYERS, read_expert_layout
 
     folder = tmp_path / "experts"
     folder.mkdir()
@@ -1194,7 +1195,7 @@ def test_an_fp8_width_needs_the_layer_file(tmp_path: Path) -> None:
 
 
 def test_s3_accounts_an_image_by_its_own_length() -> None:
-    from qwen36_35b_a3b.atlas import S3Fifo
+    from qwen36_35b_a3b.metal41.atlas import S3Fifo
 
     fifo = S3Fifo(1000, 100)
     fifo.insert((0, 1), 300)
@@ -1204,7 +1205,7 @@ def test_s3_accounts_an_image_by_its_own_length() -> None:
 
 
 def test_byte_arena_reuses_a_freed_image() -> None:
-    from qwen36_35b_a3b.atlas import ByteArena
+    from qwen36_35b_a3b.metal41.atlas import ByteArena
 
     arena = ByteArena(4096)
     first = arena.alloc(100)
@@ -1216,7 +1217,7 @@ def test_byte_arena_reuses_a_freed_image() -> None:
 
 
 def test_s3_evicts_a_one_hit_before_a_reused_expert() -> None:
-    from qwen36_35b_a3b.atlas import S3Fifo
+    from qwen36_35b_a3b.metal41.atlas import S3Fifo
 
     span = 100
     fifo = S3Fifo(span * 10, span)
@@ -1288,7 +1289,7 @@ def test_a_tight_budget_keeps_context_by_shrinking_the_atlas() -> None:
 
 
 def test_penalty_updates_keep_one_delta_per_token() -> None:
-    from qwen36_35b_a3b.forward import penalty_updates
+    from qwen36_35b_a3b.metal41.forward import penalty_updates
 
     ids, deltas = penalty_updates(1.5, {4, 9}, {9}, 0.5, {4: 2})
     assert ids == [4, 9] or set(ids) == {4, 9}
@@ -1299,7 +1300,7 @@ def test_penalty_updates_keep_one_delta_per_token() -> None:
 
 
 def test_a_prefill_chunk_splits_experts_that_do_not_fit() -> None:
-    from qwen36_35b_a3b.prefill import masked_expert_passes
+    from qwen36_35b_a3b.metal41.prefill import masked_expert_passes
 
     ids = np.arange(10, dtype=np.uint32)
     assert masked_expert_passes(ids, 10) is None
@@ -1353,7 +1354,7 @@ def test_kv_widths_and_atlas_budget() -> None:
 
 
 def test_preserve_thinking_defaults_on_and_the_request_wins() -> None:
-    from qwen36_35b_a3b.chat import preserve_thinking
+    from qwen36_35b_a3b.metal41.chat import preserve_thinking
 
     assert preserve_thinking({}, {}) is True
     assert preserve_thinking({}, {"preserve_thinking": True}) is True
@@ -1426,7 +1427,7 @@ def test_historical_reasoning_follows_the_preserve_setting() -> None:
     root = _chat_root()
     if root is None:
         pytest.skip("chat template is not installed")
-    from qwen36_35b_a3b.chat import decode_text, encode_chat
+    from qwen36_35b_a3b.metal41.chat import decode_text, encode_chat
 
     history = [
         {"role": "user", "content": "First question"},
@@ -1457,7 +1458,7 @@ def test_historical_reasoning_follows_the_preserve_setting() -> None:
 
 
 def test_unsupported_effort_steps_up_or_falls_back() -> None:
-    from qwen36_35b_a3b.sampling import resolve_effort
+    from qwen36_35b_a3b.metal41.sampling import resolve_effort
 
     assert resolve_effort(None) is None
     assert resolve_effort("none") == "none"
@@ -1472,8 +1473,8 @@ def test_unsupported_effort_steps_up_or_falls_back() -> None:
 def test_effort_opens_thinking_without_changing_the_card() -> None:
     from types import SimpleNamespace
 
-    from qwen36_35b_a3b.chat import _request_effort
-    from qwen36_35b_a3b.sampling import mode_card
+    from qwen36_35b_a3b.metal41.chat import _request_effort
+    from qwen36_35b_a3b.metal41.sampling import mode_card
 
     instruct = SimpleNamespace(
         variant="instruct",
@@ -1507,8 +1508,8 @@ def test_effort_opens_thinking_without_changing_the_card() -> None:
 def test_omitted_sampling_uses_the_pipeline_card() -> None:
     from types import SimpleNamespace
 
-    from qwen36_35b_a3b.chat import _presence, _sampling
-    from qwen36_35b_a3b.sampling import mode_card
+    from qwen36_35b_a3b.metal41.chat import _presence, _sampling
+    from qwen36_35b_a3b.metal41.sampling import mode_card
 
     thinking, card = mode_card(None, None)
     assert thinking is True
@@ -1556,7 +1557,7 @@ def test_kernels_match_the_host_formulas() -> None:
 def test_mtp_partial_top_matches_the_full_distribution() -> None:
     import numpy as np
 
-    from qwen36_35b_a3b.speculate import candidate_probs, merge_top
+    from qwen36_35b_a3b.metal41.speculate import candidate_probs, merge_top
 
     scores = np.arange(5000, dtype=np.float32)
     scores[10] = 10000
@@ -1588,7 +1589,7 @@ def test_mtp_partial_top_matches_the_full_distribution() -> None:
 def test_mtp_temperature_zero_is_the_argmax() -> None:
     import numpy as np
 
-    from qwen36_35b_a3b.speculate import candidate_probs, keep_draft
+    from qwen36_35b_a3b.metal41.speculate import candidate_probs, keep_draft
 
     scores = np.asarray([0.2, 3.0, 1.0], dtype=np.float32)
     idx, probs = candidate_probs(scores, 0.0, 0.95, 20)
@@ -1607,7 +1608,7 @@ def test_mtp_temperature_zero_is_the_argmax() -> None:
 def test_mtp_equal_distributions_keep_the_draft() -> None:
     import numpy as np
 
-    from qwen36_35b_a3b.speculate import keep_draft
+    from qwen36_35b_a3b.metal41.speculate import keep_draft
 
     idx = np.asarray([4, 9], dtype=np.int64)
     probs = np.asarray([0.25, 0.75], dtype=np.float64)
@@ -1616,7 +1617,7 @@ def test_mtp_equal_distributions_keep_the_draft() -> None:
 
 
 def test_mtp_draft_window_stops_at_a_stop_id() -> None:
-    from qwen36_35b_a3b.speculate import draft_window
+    from qwen36_35b_a3b.metal41.speculate import draft_window
 
     feeds, expected = draft_window(7, [8, 9, 10], {9}, 3)
     assert feeds == [7, 8]
@@ -1630,7 +1631,7 @@ def test_mtp_draft_window_stops_at_a_stop_id() -> None:
 
 
 def test_resident_mtp_base_is_the_dense_suffix() -> None:
-    from qwen36_35b_a3b.forward import Qwen36Runtime, _resident_mtp_base
+    from qwen36_35b_a3b.metal41.forward import Qwen36Runtime, _resident_mtp_base
 
     tensors = {
         "lm_head.weight": {"file": "resident.bin", "offset": 0},
@@ -1657,8 +1658,8 @@ def test_resident_mtp_base_is_the_dense_suffix() -> None:
 
 def test_a_prompt_past_the_opening_cache_fits_the_served_window() -> None:
     from favlo.responses import RequestError
-    from qwen36_35b_a3b.cache import DEFAULT_CONTEXT_LENGTH
-    from qwen36_35b_a3b.chat import _fit_prompt
+    from qwen36_35b_a3b.metal41.cache import DEFAULT_CONTEXT_LENGTH
+    from qwen36_35b_a3b.metal41.chat import _fit_prompt
 
     runtime = SimpleNamespace(max_pos=2048, _context_limit=DEFAULT_CONTEXT_LENGTH)
     prompt = [1] * 3000
@@ -1671,7 +1672,7 @@ def test_a_prompt_past_the_opening_cache_fits_the_served_window() -> None:
 def test_mtp_flag_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    from qwen36_35b_a3b.chat import _mtp_depth, _mtp_flag
+    from qwen36_35b_a3b.metal41.chat import _mtp_depth, _mtp_flag
 
     body = {"temperature": 0.7, "presence_penalty": 1.5, "enable_thinking": False}
     assert _mtp_flag(body) is False

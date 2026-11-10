@@ -1,6 +1,6 @@
 ---
 description: How a served embedding model implements EmbeddingsPipeline. Passage length sizes from the serve ledger, with no private cap. The embeddings harness waits and does not take the lock. A GPU test uses smoke_lock run.
-globs: src/favlo/embeddings_pipeline.py,src/favlo/pipeline.py,pipelines/metal41/bge-m3/bge_m3/**,docs/bge-m3/**,harness/language_pipeline.py,harness/embeddings_agent.py
+globs: src/favlo/embeddings_pipeline.py,src/favlo/pipeline.py,pipelines/bge_m3/metal41/**,docs/bge_m3/**,harness/language_pipeline.py,harness/embeddings_agent.py
 alwaysApply: false
 ---
 
@@ -28,7 +28,7 @@ Right: `embed` returns `(vector, tokens)` and the class writes `usage.prompt_tok
 self._owner = owner or f"{stem}:{id(self)}"
 ```
 
-`stem` is the flag stem (`bge-m3`). Every `allocate` and `upload` in that opening uses that string. `sweep` matches the whole string. `close` sweeps it in `finally`, including when `open` fails after a span exists. A missing record raises `FileNotFoundError` before `Gpu()`. The listener passes `mint_owner(stem)` when the signature includes `owner`, records `runtime._owner`, and sweeps that opening after `close`.
+`stem` is the flag stem (`bge_m3`). Every `allocate` and `upload` in that opening uses that string. `sweep` matches the whole string. `close` sweeps it in `finally`, including when `open` fails after a span exists. A missing record raises `FileNotFoundError` before `Gpu()`. The listener passes `mint_owner(stem)` when the signature includes `owner`, records `runtime._owner`, and sweeps that opening after `close`.
 
 The serve process keeps the ledger. This process allocates its own Metal buffers. `allocate`, `zeros`, `release`, and `sweep` report the owner and the byte counts on the worker pipe. Do not open that pipe. `budget()` asks the serve process and waits. The answer is reclaimable pages plus this daemon's live, pending, and returning bytes, including every child. `memory.set_max_memory` caps that answer. `room()` is `max(0, budget() - live - pending)`. Read those two. Do not parse `--max-memory`, and do not keep a private cap. An in-process command calls `memory.set_max_memory` before the first `budget()`.
 

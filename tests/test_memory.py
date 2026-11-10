@@ -185,9 +185,9 @@ def test_confirm_released_times_out_while_the_pages_stay_wired(monkeypatch: Any)
 
 
 def test_mint_owner_is_the_stem_and_a_counter() -> None:
-    first = mint_owner("z-image-turbo")
-    second = mint_owner("z-image-turbo")
-    assert first.startswith("z-image-turbo:")
+    first = mint_owner("z_image_turbo")
+    second = mint_owner("z_image_turbo")
+    assert first.startswith("z_image_turbo:")
     assert first != second
 
 

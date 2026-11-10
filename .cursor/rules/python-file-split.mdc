@@ -8,7 +8,7 @@ alwaysApply: false
 
 Split a module when it has more than one job, or when a section is data the rest of the file only reads. Line count is not the trigger. PEP 8 sets no file-length limit. Related classes and functions stay in one module.
 
-A package name is an identifier. A hyphenated pipeline entry stays a path-loaded file. The package beside it uses underscores. `qwen38-flash-next.py` loads `qwen38_flash_next`.
+A package name is an identifier. Layout is `pipelines/<model>/<runtime>/`. Import that package as `{model}.{runtime}`. The model id, the directory name, and the CLI flag stem are the same underscore token.
 
 ## How to cut
 
@@ -16,9 +16,9 @@ A package name is an identifier. A hyphenated pipeline entry stays a path-loaded
 - If two modules need each other, the cut is wrong. Move the shared names into a third module, or leave the pieces together.
 - Keep one class in one file. Do not break a class into mixins to shorten a file.
 - Move large source strings, such as Metal shaders, into files the module reads as text. Compile them the same way as before.
-- Re-export the names callers already use from the package `__init__.py`. A path-loaded entry exposes those names, including `main`.
+- Re-export the names callers already use from the package `__init__.py`, including `main` and `PIPELINE`.
 - Use a regular package with `__init__.py`. A namespace package is for one name split across distributions.
-- A new model is a new directory `pipelines/metal41/<pipeline>/`, an entry file in it, a package beside that file, and a `PIPELINE` assignment. It does not edit another pipeline. A served media pipeline inherits `MediaPipeline`. A served language model inherits `LanguagePipeline`. A served embedding model inherits `EmbeddingsPipeline`. A failed pipeline inherits none of them. A kernel does not branch on the pipeline.
+- A new model is `pipelines/<pipeline>/metal41/` (and later other runtimes), with `PIPELINE` equal to `<pipeline>`, plus `docs/<pipeline>/`. It does not edit another pipeline. A served media pipeline inherits `MediaPipeline`. A served language model inherits `LanguagePipeline`. A served embedding model inherits `EmbeddingsPipeline`. A kernel does not branch on the pipeline.
 - Update that pipeline's `docs/<pipeline>/` note in the same change that moves one of its modules. Update root ARCHITECTURE.md only when the process contract or the runtime table changes.
 
 ## Examples
@@ -27,6 +27,6 @@ Wrong: split `Qwen38Runtime` into `gdn.py`, `qsa.py`, and `moe.py` that import e
 
 Right: leave the forward in `runtime.py`. Put packing in `formats.py`, which the runtime imports and which does not import the runtime.
 
-Wrong: name the package `qwen38-flash-next/` and import it.
+Wrong: a hyphenated entry file beside an underscore package, loaded by path.
 
-Right: keep `qwen38-flash-next.py` as the entry. Put the modules in `qwen38_flash_next/`, and read `shaders/act.metal` as text.
+Right: `pipelines/qwen36_35b_a3b/metal41/` is the package. `import qwen36_35b_a3b.metal41` loads it. Read `shaders/act.metal` as text.

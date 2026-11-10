@@ -26,29 +26,20 @@ Note topics are `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_
 
 | Pipeline | Kind | `begin` | `count` | `end` | `note` | `format_rate` |
 |---|---|---|---|---|---|---|
-| `qwen36-35b-a3b` | language | `load` bytes, `prefill` tok, `decode` tok. Commands: `download` bytes, `quantize` bytes | load, prefill, decode, and those command rows | yes | `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `mtp_depth`, `mtp`, `context` | prefill, decode |
-| `qwen38-27b` | language | `load` bytes, `prefill` tok, `decode` tok. Command: `download` bytes | load, prefill, decode, and the download row | yes | `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `mtp_depth`, `mtp`, `context` | prefill, decode |
-| `gemma4-26b-a4b` | language | `load` bytes, `prefill` tok, `decode` tok | load, prefill, decode | yes | `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `context` | prefill, decode |
-| `qwen35-4b` | language | `load` bytes, `prefill` tok, `decode` tok. Command: `quantize` files | load, prefill, decode, and the quantize row | yes | `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `mtp_depth`, `mtp` | prefill, decode |
-| `z-image-turbo` | image | `load` bytes, `sample` layers | load, sample | yes | no | no |
-| `wan22-i2v` | video | `load` files, `sample` layers, `sample` blocks, `decode` blocks | the open stage row | yes | no | no |
-| `ace-step-15-turbo` | music | no | no | no | no | no |
+| `qwen36_35b_a3b` | language | `load` bytes, `prefill` tok, `decode` tok. Commands: `download` bytes, `quantize` bytes | load, prefill, decode, and those command rows | yes | `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `mtp_depth`, `mtp`, `context` | prefill, decode |
+| `qwen38_27b` | language | `load` bytes, `prefill` tok, `decode` tok. Command: `download` bytes | load, prefill, decode, and the download row | yes | `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `mtp_depth`, `mtp`, `context` | prefill, decode |
+| `gemma4_26b_a4b` | language | `load` bytes, `prefill` tok, `decode` tok | load, prefill, decode | yes | `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `context` | prefill, decode |
+| `qwen35_4b` | language | `load` bytes, `prefill` tok, `decode` tok. Command: `quantize` files | load, prefill, decode, and the quantize row | yes | `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_failed`, `mtp_depth`, `mtp` | prefill, decode |
+| `z_image_turbo` | image | `load` bytes, `sample` layers | load, sample | yes | no | no |
+| `wan22_i2v` | video | `load` files, `sample` layers, `sample` blocks, `decode` blocks | the open stage row | yes | no | no |
+| `ace_step_15_turbo` | music | no | no | no | no | no |
 | `voxcpm2` | voice | no | no | no | no | no |
-| `bge-m3` | embeddings | no | no | no | no | no |
-| `umt5-xxl` | text encoder | no | no | no | no | no |
-| `wan22-ti2v-5b` | video | no | no | no | no | no |
+| `bge_m3` | embeddings | no | no | no | no | no |
+| `umt5_xxl` | text encoder | no | no | no | no | no |
+| `wan22_ti2v_5b` | video | no | no | no | no | no |
 
-`wan22-i2v` stage names on a `sample` or `decode` row are `compile`, `text`, `encode`, `high`, `low`, and `decode`. The job percent written onto the clip stays on the job dict. It is not a console count.
+`wan22_i2v` stage names on a `sample` or `decode` row are `compile`, `text`, `encode`, `high`, `low`, and `decode`. The job percent written onto the clip stays on the job dict. It is not a console count.
 
-`ace-step-15-turbo` increments a job percent in its own object. That object is not `begin` or `count`. `voxcpm2` keeps the console and does not call it. `bge-m3`, `umt5-xxl`, and `wan22-ti2v-5b` drop the console argument.
+`ace_step_15_turbo` increments a job percent in its own object. That object is not `begin` or `count`. `voxcpm2` keeps the console and does not call it. `bge_m3`, `umt5_xxl`, and `wan22_ti2v_5b` drop the console argument.
 
 An open-ended language `decode` passes `total` 0. The row is a count, not a fraction of the request cap.
-
-## Failed
-
-These pipelines open rows with `begin` and `end`. Their counts are still a write of the row's `done` field. They do not call `count`.
-
-| Pipeline | `begin` | `count` | `end` | `note` | `format_rate` |
-|---|---|---|---|---|---|
-| `ternary-bonsai-2` | `load` bytes, `prefill` tok, `decode` tok | no | yes | no | prefill, decode |
-| `zonos2` | no | no | no | no | no |

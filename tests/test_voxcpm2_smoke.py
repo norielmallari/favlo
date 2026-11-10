@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from voxcpm2.audio import encode_wav
-from voxcpm2.runtime import open_runtime
+from voxcpm2.metal41.audio import encode_wav
+from voxcpm2.metal41.runtime import open_runtime
 
 _CHECKOUT = Path("models/openbmb/VoxCPM2")
 

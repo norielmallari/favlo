@@ -7,14 +7,14 @@ import json
 import pytest
 
 from favlo.responses import chat_to_responses, template_messages
-from gemma4_26b_a4b.chat import (
+from gemma4_26b_a4b.metal41.chat import (
     _stop_strings,
     completion_fields,
     cut_stop,
     render_chat,
     reply_text,
 )
-from gemma4_26b_a4b.tools import StreamText, parse_tool_calls
+from gemma4_26b_a4b.metal41.tools import StreamText, parse_tool_calls
 
 
 def test_gemma_tool_call_quotes() -> None:
@@ -363,7 +363,7 @@ def test_a_stop_string_is_left_out_of_the_reply() -> None:
 
 
 def test_unsupported_effort_steps_up_or_falls_back() -> None:
-    from gemma4_26b_a4b.sampling import resolve_effort
+    from gemma4_26b_a4b.metal41.sampling import resolve_effort
 
     assert resolve_effort(None) is None
     assert resolve_effort("minimal") == "minimal"
@@ -378,8 +378,8 @@ def test_unsupported_effort_steps_up_or_falls_back() -> None:
 def test_effort_opens_thinking_without_changing_the_card() -> None:
     from types import SimpleNamespace
 
-    from gemma4_26b_a4b.chat import _request_effort
-    from gemma4_26b_a4b.sampling import VARIANTS, mode_card
+    from gemma4_26b_a4b.metal41.chat import _request_effort
+    from gemma4_26b_a4b.metal41.sampling import VARIANTS, mode_card
 
     instruct = SimpleNamespace(
         variant="instruct",

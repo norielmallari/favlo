@@ -25,31 +25,31 @@ _MODULE = "def collect(before, after):\n    return after - before\n"
 
 def test_pipeline_log_drops_other_models() -> None:
     text = """\
-request open qwen38-27b
+request open qwen38_27b
 prompt tokens 17
 cache miss
 prefill 1.00 tok/s (17 tok in 17.00s)
 decode 1.00 tok/s (1 tok in 1.00s)
-request closed qwen38-27b
-request open qwen35-4b
+request closed qwen38_27b
+request open qwen35_4b
 prompt tokens 40
 cache miss
 prefill 2.00 tok/s (40 tok in 20.00s)
 decode 2.00 tok/s (2 tok in 1.00s)
-request closed qwen35-4b
+request closed qwen35_4b
 decode 3.00 tok/s (3 tok in 1.00s)
-request open qwen38-27b
+request open qwen38_27b
 prompt tokens 9
 cache miss
 """
-    kept = parse_requests(pipeline_log(text, "qwen35-4b"))
+    kept = parse_requests(pipeline_log(text, "qwen35_4b"))
     assert len(kept) == 1
     assert kept[0].prompt_tokens == 40
     assert kept[0].decode_tokens == 3
 
 
 def test_thinking_card_id() -> None:
-    assert card_model_id("qwen38-27b", thinking=True) == "qwen38-27b:thinking"
+    assert card_model_id("qwen38_27b", thinking=True) == "qwen38_27b:thinking"
 
 
 def test_prefix_problems_require_a_disk_load() -> None:
@@ -210,13 +210,13 @@ def test_thinking_body_omits_sampling_fields() -> None:
 
 
 def test_mtp_defaults_off() -> None:
-    args = argument_parser().parse_args(["--model", "qwen36-35b-a3b"])
+    args = argument_parser().parse_args(["--model", "qwen36_35b_a3b"])
     assert args.mtp == "off"
     assert args.mtp_depth == 3
     assert args.vision is False
     assert args.thinking == "on"
     assert args.store == "off"
-    instruct = argument_parser().parse_args(["--model", "qwen36-35b-a3b", "--thinking", "off"])
+    instruct = argument_parser().parse_args(["--model", "qwen36_35b_a3b", "--thinking", "off"])
     assert instruct.thinking == "off"
 
 

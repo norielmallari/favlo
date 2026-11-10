@@ -1,14 +1,12 @@
-"""Select one pipeline file and run it.
+"""Discover pipeline packages and run them.
 
-A model flag is the filename without ``.py``. ``--<pipeline>`` loads
-``<pipeline>.py`` by path, and that file loads the model's package.
-The hyphenated file is not an import.
+Layout is ``pipelines/<model>/<runtime>/``. The model id is the CLI flag
+stem. Loading imports ``{model}.{runtime}``.
 """
 
 from __future__ import annotations
 
-import ast
-import importlib.util
+import importlib
 import os
 import sys
 import threading
@@ -33,7 +31,7 @@ def repo_root() -> Path:
 
 
 def resolve_pipeline_root(pipeline_root: str, *, root: Path | None = None) -> Path:
-    """One pipeline's directory. A relative value resolves against the checkout."""
+    """One runtime package directory. A relative value resolves against the checkout."""
     text = pipeline_root.strip()
     if not text:
         message = "pipeline_root is empty"
@@ -51,14 +49,28 @@ def pipeline_tree(
     pipeline_root: str | None = None,
     root: Path | None = None,
 ) -> Path:
-    """The pipeline directory. It contains ``<pipeline>.py`` and the package."""
+    """The runtime package directory for one model."""
     if runtime not in RUNTIMES:
         message = f"unknown runtime: {runtime}"
         raise ValueError(message)
     text = pipeline_root.strip() if isinstance(pipeline_root, str) else ""
     if not text or text == "pipelines":
-        text = f"pipelines/{runtime}/{pipeline}"
+        text = f"pipelines/{pipeline}/{runtime}"
     return resolve_pipeline_root(text, root=root)
+
+
+def _ensure_import_root(path: Path) -> None:
+    """Put the parent of the model package on ``sys.path``."""
+    text = str(path.resolve())
+    if text not in sys.path:
+        sys.path.insert(0, text)
+
+
+def ensure_pipelines_path(*, root: Path | None = None) -> Path:
+    """Checkout ``pipelines/`` on ``sys.path`` once."""
+    path = (root or repo_root()) / "pipelines"
+    _ensure_import_root(path)
+    return path
 
 
 def _registry_pipeline_roots(root: Path | None = None) -> tuple[str, ...]:
@@ -82,38 +94,65 @@ def _registry_pipeline_roots(root: Path | None = None) -> tuple[str, ...]:
     return tuple(names)
 
 
-def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
-    """Entry stems under every pipeline root.
-
-    A new runtime is a new file. Discovering it does not edit this module.
-    Two files with the same ``PIPELINE`` stem are an error.
-    """
-    return tuple(sorted(pipeline_entries(root)))
-
-
-def pipeline_entries(root: Path | None = None) -> dict[str, Path]:
-    """Stem to entry file. A duplicate stem raises ``ValueError``."""
-    base = root or repo_root()
-    found: dict[str, Path] = {}
-
-    def consider(path: Path) -> None:
-        stem = _pipeline_stem(path)
-        if stem is None:
-            return
-        previous = found.get(stem)
-        if previous is not None and previous.resolve() != path.resolve():
-            message = f"duplicate pipeline {stem}: {previous} and {path}"
-            raise ValueError(message)
-        found[stem] = path
-
-    for runtime in RUNTIMES:
-        tree = base / "pipelines" / runtime
-        if not tree.is_dir():
+def _read_pipeline_constant(init: Path) -> str | None:
+    try:
+        text = init.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("PIPELINE"):
             continue
-        for child in sorted(path for path in tree.iterdir() if path.is_dir()):
-            entry = child / f"{child.name}.py"
-            if entry.is_file():
-                consider(entry)
+        if "=" not in stripped:
+            continue
+        _, _, rhs = stripped.partition("=")
+        value = rhs.strip().strip("\"'")
+        if value:
+            return value
+    return None
+
+
+def _consider_runtime(
+    found: dict[str, dict[str, Path]],
+    *,
+    model: str,
+    runtime: str,
+    directory: Path,
+) -> None:
+    init = directory / "__init__.py"
+    if not init.is_file():
+        return
+    pipeline = _read_pipeline_constant(init)
+    if pipeline != model:
+        return
+    runtimes = found.setdefault(model, {})
+    previous = runtimes.get(runtime)
+    if previous is not None and previous.resolve() != directory.resolve():
+        message = f"duplicate pipeline {model}.{runtime}: {previous} and {directory}"
+        raise ValueError(message)
+    runtimes[runtime] = directory
+
+
+def pipeline_runtimes(root: Path | None = None) -> dict[str, dict[str, Path]]:
+    """Model id to runtime name to package directory."""
+    base = root or repo_root()
+    found: dict[str, dict[str, Path]] = {}
+    tree = base / "pipelines"
+    if tree.is_dir():
+        for model_dir in sorted(path for path in tree.iterdir() if path.is_dir()):
+            if model_dir.name.startswith(".") or model_dir.name == "__pycache__":
+                continue
+            if not (model_dir / "__init__.py").is_file():
+                continue
+            for runtime in RUNTIMES:
+                runtime_dir = model_dir / runtime
+                if runtime_dir.is_dir():
+                    _consider_runtime(
+                        found,
+                        model=model_dir.name,
+                        runtime=runtime,
+                        directory=runtime_dir,
+                    )
     for stored in _registry_pipeline_roots(root):
         if stored == "pipelines":
             continue
@@ -121,27 +160,45 @@ def pipeline_entries(root: Path | None = None) -> dict[str, Path]:
             directory = resolve_pipeline_root(stored, root=base)
         except ValueError:
             continue
-        if not directory.is_dir():
+        if not directory.is_dir() or not (directory / "__init__.py").is_file():
             continue
-        for path in sorted(directory.glob("*.py")):
-            consider(path)
+        runtime = directory.name
+        if runtime not in RUNTIMES:
+            continue
+        model = directory.parent.name
+        _ensure_import_root(directory.parent.parent)
+        _consider_runtime(found, model=model, runtime=runtime, directory=directory)
     return found
 
 
-def _pipeline_stem(path: Path) -> str | None:
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):
-        return None
-    for node in tree.body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target = node.targets[0]
-        if not isinstance(target, ast.Name) or target.id != "PIPELINE":
-            continue
-        if isinstance(node.value, ast.Constant) and node.value.value == path.stem:
-            return path.stem
-    return None
+def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
+    """Discovered model ids (CLI flag stems)."""
+    return tuple(sorted(pipeline_runtimes(root)))
+
+
+def pipeline_entries(root: Path | None = None) -> dict[str, Path]:
+    """Model id to a representative runtime package directory (preferred metal41)."""
+    found: dict[str, Path] = {}
+    for model, runtimes in pipeline_runtimes(root).items():
+        if "metal41" in runtimes:
+            found[model] = runtimes["metal41"]
+        else:
+            found[model] = runtimes[sorted(runtimes)[0]]
+    return found
+
+
+def default_runtime(name: str, root: Path | None = None) -> str:
+    """Sole runtime for a model, else ``metal41`` when present."""
+    runtimes = pipeline_runtimes(root).get(name) or {}
+    if not runtimes:
+        message = f"pipeline is missing: {name}"
+        raise FileNotFoundError(message)
+    if "metal41" in runtimes:
+        return "metal41"
+    if len(runtimes) == 1:
+        return next(iter(runtimes))
+    message = f"pipeline {name} has multiple runtimes; pass runtime explicitly"
+    raise ValueError(message)
 
 
 def _help(names: Sequence[str]) -> str:
@@ -168,38 +225,51 @@ def load_pipeline(
     runtime: str | None = None,
     pipeline_root: str | None = None,
 ) -> ModuleType:
-    if runtime is None:
-        path = pipeline_entries(root).get(name)
-        if path is None:
-            message = f"pipeline file is missing: {name}"
+    base = root or repo_root()
+    ensure_pipelines_path(root=base)
+    if pipeline_root:
+        directory = resolve_pipeline_root(pipeline_root, root=base)
+        if directory.name in RUNTIMES:
+            model_dir = directory.parent
+            chosen = runtime or directory.name
+            if chosen != directory.name:
+                directory = model_dir / chosen
+        else:
+            # Older rows may store the model directory; prefer an explicit runtime.
+            model_dir = directory
+            chosen = runtime or default_runtime(name, root=base)
+            directory = model_dir / chosen
+        if not (directory / "__init__.py").is_file():
+            message = f"pipeline file is missing: {directory}"
             raise FileNotFoundError(message)
+        _ensure_import_root(model_dir.parent)
+        module_name = f"{model_dir.name}.{directory.name}"
     else:
-        path = pipeline_tree(
-            runtime, pipeline=name, pipeline_root=pipeline_root, root=root
-        ) / f"{name}.py"
-        if not path.is_file():
-            message = f"pipeline file is missing: {path}"
+        chosen = runtime or default_runtime(name, root=base)
+        runtimes = pipeline_runtimes(root=base).get(name) or {}
+        if chosen not in runtimes:
+            message = f"pipeline file is missing: {name}.{chosen}"
             raise FileNotFoundError(message)
+        module_name = f"{name}.{chosen}"
     with _IMPORTS:
-        spec = importlib.util.spec_from_file_location(f"{name.replace('-', '_')}_pipeline", path)
-        if spec is None or spec.loader is None:
-            message = f"cannot load pipeline file: {path}"
-            raise ImportError(message)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+        try:
+            return importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            message = f"pipeline file is missing: {module_name}"
+            raise FileNotFoundError(message) from exc
 
 
 def pipeline_roots(root: Path | None = None) -> tuple[Path, ...]:
-    """Directories that hold a discovered pipeline entry and its package."""
+    """Directories that hold a discovered runtime package."""
     found: list[Path] = []
     seen: set[Path] = set()
-    for path in pipeline_entries(root).values():
-        directory = path.parent.resolve()
-        if directory in seen:
-            continue
-        seen.add(directory)
-        found.append(directory)
+    for runtimes in pipeline_runtimes(root).values():
+        for directory in runtimes.values():
+            resolved = directory.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            found.append(resolved)
     return tuple(found)
 
 
@@ -210,10 +280,17 @@ def drop_pipeline_modules(root: Path | None = None) -> int:
     """
     with _IMPORTS:
         roots = pipeline_roots(root)
+        model_roots = {
+            path.parent.resolve() for path in roots
+        }
         names = [
             name
             for name, module in list(sys.modules.items())
-            if module is not None and _module_under(module, roots)
+            if module is not None
+            and (
+                _module_under(module, roots)
+                or _module_under(module, tuple(model_roots))
+            )
         ]
         for name in names:
             sys.modules.pop(name, None)
@@ -287,7 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         module = load_pipeline(name)
         entry = pipeline_main(module)
-    except (FileNotFoundError, ImportError, TypeError) as exc:
+    except (FileNotFoundError, ImportError, TypeError, ValueError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
     return int(entry(args[1:]))

@@ -159,7 +159,7 @@ def _stream(
     *,
     presence: float,
     window: int,
-    model: str = "qwen36-35b-a3b",
+    model: str = "qwen36_35b_a3b",
 ) -> tuple[str, str, bool]:
     """Print reasoning, then the reply. Returns both and whether reasoning led."""
     body = json.dumps(
@@ -235,7 +235,7 @@ def run(
     *,
     presence: float = 0.0,
     window: int = 20,
-    model: str = "qwen36-35b-a3b",
+    model: str = "qwen36_35b_a3b",
 ) -> list[str]:
     """Two turns. Problems are returned; the caller prints them."""
     system = persona()

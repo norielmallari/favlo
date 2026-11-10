@@ -15,93 +15,87 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [synthetic-matmul2d.md](synthetic-matmul2d.md) | Synthetic `matmul2d` dtype rates |
 | [synthetic-decode.md](synthetic-decode.md) | Synthetic one-token GEMV and `matmul2d` rates |
 | [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |
-| [qwen38-27b/README.md](qwen38-27b/README.md) | Qwen3.8-27B pipeline contract |
-| [qwen38-27b/SETUP.md](qwen38-27b/SETUP.md) | Qwen3.8-27B download, pack, and first chat |
-| [failed/ternary-bonsai-2/README.md](failed/ternary-bonsai-2/README.md) | Failed Ternary Bonsai 2 pipeline |
-| [qwen38-27b/research/ffn-fp8-budget.md](qwen38-27b/research/ffn-fp8-budget.md) | Qwen3.8-27B feed-forward fp8 budget measurement |
-| [qwen38-27b/research/span-draft.md](qwen38-27b/research/span-draft.md) | Qwen3.8-27B two-token draft measurement |
-| [qwen38-27b/research/kernel-ceilings.md](qwen38-27b/research/kernel-ceilings.md) | Qwen3.8-27B isolated projection sum |
-| [qwen38-27b/research/mtp-window.md](qwen38-27b/research/mtp-window.md) | Qwen3.8-27B MTP verify window |
-| [qwen38-27b/research/recorded-forward.md](qwen38-27b/research/recorded-forward.md) | Qwen3.8-27B recorded prefill and decode sums |
-| [qwen38-27b/research/mixed-agent-forward.md](qwen38-27b/research/mixed-agent-forward.md) | Qwen3.8-27B mixed-record agent forward |
-| [qwen38-27b/research/int8-prefill.md](qwen38-27b/research/int8-prefill.md) | Qwen3.8-27B int8 prefill recorded rates |
-| [qwen38-27b/research/needle-page.md](qwen38-27b/research/needle-page.md) | Qwen3.8-27B page needle at 65536 and 131072 on half and fp8 keys and values |
-| [qwen38-27b/research/needle-retrieve.md](qwen38-27b/research/needle-retrieve.md) | Qwen3.8-27B retrieve needle on fp8 keys and values |
-| [qwen38-27b/research/coding-agent.md](qwen38-27b/research/coding-agent.md) | Qwen3.8-27B coding agent on fp8 keys and values |
-| [qwen38-27b/research/coding-agent-half.md](qwen38-27b/research/coding-agent-half.md) | Qwen3.8-27B coding agent on half keys and values |
-| [qwen38-27b/research/synthetic-prompt.md](qwen38-27b/research/synthetic-prompt.md) | Qwen3.8-27B cold 512-token and 10000-token prompts |
-| [qwen38-27b/research/synthetic-prompt-mtp.md](qwen38-27b/research/synthetic-prompt-mtp.md) | Qwen3.8-27B cold synthetic prompts with MTP on |
-| [qwen36-35b-a3b/README.md](qwen36-35b-a3b/README.md) | Qwen3.6-35B-A3B pipeline contract |
-| [qwen36-35b-a3b/SETUP.md](qwen36-35b-a3b/SETUP.md) | Qwen3.6-35B-A3B download, pack, and first chat |
-| [qwen36-35b-a3b/research/fp16-peak-restore.md](qwen36-35b-a3b/research/fp16-peak-restore.md) | Qwen3.6-35B-A3B float16 peak-restore bound |
-| [qwen36-35b-a3b/research/kernel-ceilings.md](qwen36-35b-a3b/research/kernel-ceilings.md) | Qwen3.6-35B-A3B isolated dispatch sum |
-| [qwen36-35b-a3b/research/recorded-forward.md](qwen36-35b-a3b/research/recorded-forward.md) | Qwen3.6-35B-A3B recorded prefill and decode sums |
-| [qwen36-35b-a3b/research/needle-retrieve.md](qwen36-35b-a3b/research/needle-retrieve.md) | Qwen3.6-35B-A3B retrieve needle on fp8 keys and values |
-| [qwen36-35b-a3b/research/needle-page.md](qwen36-35b-a3b/research/needle-page.md) | Qwen3.6-35B-A3B page needle on half keys and values |
-| [qwen36-35b-a3b/research/coding-agent.md](qwen36-35b-a3b/research/coding-agent.md) | Qwen3.6-35B-A3B coding agent on fp8 keys and values |
-| [qwen36-35b-a3b/research/coding-agent-half.md](qwen36-35b-a3b/research/coding-agent-half.md) | Qwen3.6-35B-A3B coding agent on half keys and values |
-| [qwen36-35b-a3b/research/synthetic-prompt.md](qwen36-35b-a3b/research/synthetic-prompt.md) | Qwen3.6-35B-A3B cold 512-token and 10000-token prompts |
-| [qwen36-35b-a3b/performance.md](qwen36-35b-a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |
-| [gemma4-26b-a4b/README.md](gemma4-26b-a4b/README.md) | Gemma 4 26B-A4B pipeline contract |
-| [gemma4-26b-a4b/SETUP.md](gemma4-26b-a4b/SETUP.md) | Gemma 4 26B-A4B pack and first chat |
-| [qwen35-4b/README.md](qwen35-4b/README.md) | Qwen3.5-4B language pipeline |
-| [qwen35-4b/references.md](qwen35-4b/references.md) | Papers and specifications for the Qwen3.5-4B pipeline |
-| [qwen35-4b/SETUP.md](qwen35-4b/SETUP.md) | Qwen3.5-4B download and pack |
-| [qwen35-4b/ceilings.md](qwen35-4b/ceilings.md) | Qwen3.5-4B kernel ceilings |
-| [qwen35-4b/research/int8-prefill.md](qwen35-4b/research/int8-prefill.md) | Qwen3.5-4B int8 prefill recorded rates |
-| [qwen35-4b/research/kernel-ceilings.md](qwen35-4b/research/kernel-ceilings.md) | Qwen3.5-4B isolated dispatch sum |
-| [qwen35-4b/research/recorded-forward.md](qwen35-4b/research/recorded-forward.md) | Qwen3.5-4B recorded prefill and decode runs |
-| [qwen35-4b/research/needle-page.md](qwen35-4b/research/needle-page.md) | Qwen3.5-4B page needle on fp8 keys and values |
-| [qwen35-4b/research/coding-agent.md](qwen35-4b/research/coding-agent.md) | Qwen3.5-4B vision coding agent on fp8 keys and values |
-| [qwen35-4b/research/coding-agent-mtp.md](qwen35-4b/research/coding-agent-mtp.md) | Qwen3.5-4B vision coding agent with MTP on |
-| [qwen35-4b/research/synthetic-prompt.md](qwen35-4b/research/synthetic-prompt.md) | Qwen3.5-4B cold 512-token and 10000-token prompts |
-| [parked/qwen38-flash-next/architecture.md](parked/qwen38-flash-next/architecture.md) | Parked Qwen3.8-Flash-Next pipeline |
-| [parked/spark-x26-1-7b/README.md](parked/spark-x26-1-7b/README.md) | Parked Spark-X2.6-1.7B pipeline |
-| [parked/spark-x26-1-7b/references.md](parked/spark-x26-1-7b/references.md) | Papers and specifications for the Spark pipeline |
-| [parked/spark-x26-1-7b/ceilings.md](parked/spark-x26-1-7b/ceilings.md) | Spark-X2.6-1.7B kernel ceilings |
-| [parked/spark-x26-1-7b/research/kernel-ceilings.md](parked/spark-x26-1-7b/research/kernel-ceilings.md) | Spark-X2.6-1.7B isolated dispatch sum |
-| [parked/spark-x26-1-7b/research/recorded-forward.md](parked/spark-x26-1-7b/research/recorded-forward.md) | Spark-X2.6-1.7B recorded prefill and decode runs |
-| [gemma4-26b-a4b/ceilings.md](gemma4-26b-a4b/ceilings.md) | Gemma 4 26B-A4B kernel and bandwidth ceilings |
-| [gemma4-26b-a4b/references.md](gemma4-26b-a4b/references.md) | Papers and specifications for the Gemma 4 pipeline |
-| [gemma4-26b-a4b/research/kernel-ceilings.md](gemma4-26b-a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B packed kernel ceiling |
-| [gemma4-26b-a4b/research/recorded-forward.md](gemma4-26b-a4b/research/recorded-forward.md) | Gemma 4 26B-A4B recorded prefill and decode runs |
-| [gemma4-26b-a4b/research/coding-agent.md](gemma4-26b-a4b/research/coding-agent.md) | Gemma 4 26B-A4B vision coding-agent rates |
-| [gemma4-26b-a4b/research/coding-text.md](gemma4-26b-a4b/research/coding-text.md) | Gemma 4 26B-A4B text coding-agent rate |
-| [gemma4-26b-a4b/research/needle-page.md](gemma4-26b-a4b/research/needle-page.md) | Gemma 4 26B-A4B page-needle rate |
-| [gemma4-26b-a4b/research/synthetic-prompt.md](gemma4-26b-a4b/research/synthetic-prompt.md) | Gemma 4 26B-A4B cold 512-token and 10000-token prompts |
-| [gemma4-26b-a4b/benchmarks.md](gemma4-26b-a4b/benchmarks.md) | Gemma 4 26B-A4B harness scores against `serve` |
-| [qwen38-27b/benchmarks.md](qwen38-27b/benchmarks.md) | Harness scores against `serve` |
-| [qwen36-35b-a3b/benchmarks.md](qwen36-35b-a3b/benchmarks.md) | Harness scores against `serve` |
+| [qwen38-27b/README.md](qwen38_27b/README.md) | Qwen3.8-27B pipeline contract |
+| [qwen38-27b/SETUP.md](qwen38_27b/SETUP.md) | Qwen3.8-27B download, pack, and first chat |
+| [qwen38-27b/research/ffn-fp8-budget.md](qwen38_27b/research/ffn-fp8-budget.md) | Qwen3.8-27B feed-forward fp8 budget measurement |
+| [qwen38-27b/research/span-draft.md](qwen38_27b/research/span-draft.md) | Qwen3.8-27B two-token draft measurement |
+| [qwen38-27b/research/kernel-ceilings.md](qwen38_27b/research/kernel-ceilings.md) | Qwen3.8-27B isolated projection sum |
+| [qwen38-27b/research/mtp-window.md](qwen38_27b/research/mtp-window.md) | Qwen3.8-27B MTP verify window |
+| [qwen38-27b/research/recorded-forward.md](qwen38_27b/research/recorded-forward.md) | Qwen3.8-27B recorded prefill and decode sums |
+| [qwen38-27b/research/mixed-agent-forward.md](qwen38_27b/research/mixed-agent-forward.md) | Qwen3.8-27B mixed-record agent forward |
+| [qwen38-27b/research/int8-prefill.md](qwen38_27b/research/int8-prefill.md) | Qwen3.8-27B int8 prefill recorded rates |
+| [qwen38-27b/research/needle-page.md](qwen38_27b/research/needle-page.md) | Qwen3.8-27B page needle at 65536 and 131072 on half and fp8 keys and values |
+| [qwen38-27b/research/needle-retrieve.md](qwen38_27b/research/needle-retrieve.md) | Qwen3.8-27B retrieve needle on fp8 keys and values |
+| [qwen38-27b/research/coding-agent.md](qwen38_27b/research/coding-agent.md) | Qwen3.8-27B coding agent on fp8 keys and values |
+| [qwen38-27b/research/coding-agent-half.md](qwen38_27b/research/coding-agent-half.md) | Qwen3.8-27B coding agent on half keys and values |
+| [qwen38-27b/research/synthetic-prompt.md](qwen38_27b/research/synthetic-prompt.md) | Qwen3.8-27B cold 512-token and 10000-token prompts |
+| [qwen38-27b/research/synthetic-prompt-mtp.md](qwen38_27b/research/synthetic-prompt-mtp.md) | Qwen3.8-27B cold synthetic prompts with MTP on |
+| [qwen36-35b-a3b/README.md](qwen36_35b_a3b/README.md) | Qwen3.6-35B-A3B pipeline contract |
+| [qwen36-35b-a3b/SETUP.md](qwen36_35b_a3b/SETUP.md) | Qwen3.6-35B-A3B download, pack, and first chat |
+| [qwen36-35b-a3b/research/fp16-peak-restore.md](qwen36_35b_a3b/research/fp16-peak-restore.md) | Qwen3.6-35B-A3B float16 peak-restore bound |
+| [qwen36-35b-a3b/research/kernel-ceilings.md](qwen36_35b_a3b/research/kernel-ceilings.md) | Qwen3.6-35B-A3B isolated dispatch sum |
+| [qwen36-35b-a3b/research/recorded-forward.md](qwen36_35b_a3b/research/recorded-forward.md) | Qwen3.6-35B-A3B recorded prefill and decode sums |
+| [qwen36-35b-a3b/research/needle-retrieve.md](qwen36_35b_a3b/research/needle-retrieve.md) | Qwen3.6-35B-A3B retrieve needle on fp8 keys and values |
+| [qwen36-35b-a3b/research/needle-page.md](qwen36_35b_a3b/research/needle-page.md) | Qwen3.6-35B-A3B page needle on half keys and values |
+| [qwen36-35b-a3b/research/coding-agent.md](qwen36_35b_a3b/research/coding-agent.md) | Qwen3.6-35B-A3B coding agent on fp8 keys and values |
+| [qwen36-35b-a3b/research/coding-agent-half.md](qwen36_35b_a3b/research/coding-agent-half.md) | Qwen3.6-35B-A3B coding agent on half keys and values |
+| [qwen36-35b-a3b/research/synthetic-prompt.md](qwen36_35b_a3b/research/synthetic-prompt.md) | Qwen3.6-35B-A3B cold 512-token and 10000-token prompts |
+| [qwen36-35b-a3b/performance.md](qwen36_35b_a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |
+| [gemma4-26b-a4b/README.md](gemma4_26b_a4b/README.md) | Gemma 4 26B-A4B pipeline contract |
+| [gemma4-26b-a4b/SETUP.md](gemma4_26b_a4b/SETUP.md) | Gemma 4 26B-A4B pack and first chat |
+| [qwen35-4b/README.md](qwen35_4b/README.md) | Qwen3.5-4B language pipeline |
+| [qwen35-4b/references.md](qwen35_4b/references.md) | Papers and specifications for the Qwen3.5-4B pipeline |
+| [qwen35-4b/SETUP.md](qwen35_4b/SETUP.md) | Qwen3.5-4B download and pack |
+| [qwen35-4b/ceilings.md](qwen35_4b/ceilings.md) | Qwen3.5-4B kernel ceilings |
+| [qwen35-4b/research/int8-prefill.md](qwen35_4b/research/int8-prefill.md) | Qwen3.5-4B int8 prefill recorded rates |
+| [qwen35-4b/research/kernel-ceilings.md](qwen35_4b/research/kernel-ceilings.md) | Qwen3.5-4B isolated dispatch sum |
+| [qwen35-4b/research/recorded-forward.md](qwen35_4b/research/recorded-forward.md) | Qwen3.5-4B recorded prefill and decode runs |
+| [qwen35-4b/research/needle-page.md](qwen35_4b/research/needle-page.md) | Qwen3.5-4B page needle on fp8 keys and values |
+| [qwen35-4b/research/coding-agent.md](qwen35_4b/research/coding-agent.md) | Qwen3.5-4B vision coding agent on fp8 keys and values |
+| [qwen35-4b/research/coding-agent-mtp.md](qwen35_4b/research/coding-agent-mtp.md) | Qwen3.5-4B vision coding agent with MTP on |
+| [qwen35-4b/research/synthetic-prompt.md](qwen35_4b/research/synthetic-prompt.md) | Qwen3.5-4B cold 512-token and 10000-token prompts |
+| [gemma4-26b-a4b/ceilings.md](gemma4_26b_a4b/ceilings.md) | Gemma 4 26B-A4B kernel and bandwidth ceilings |
+| [gemma4-26b-a4b/references.md](gemma4_26b_a4b/references.md) | Papers and specifications for the Gemma 4 pipeline |
+| [gemma4-26b-a4b/research/kernel-ceilings.md](gemma4_26b_a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B packed kernel ceiling |
+| [gemma4-26b-a4b/research/recorded-forward.md](gemma4_26b_a4b/research/recorded-forward.md) | Gemma 4 26B-A4B recorded prefill and decode runs |
+| [gemma4-26b-a4b/research/coding-agent.md](gemma4_26b_a4b/research/coding-agent.md) | Gemma 4 26B-A4B vision coding-agent rates |
+| [gemma4-26b-a4b/research/coding-text.md](gemma4_26b_a4b/research/coding-text.md) | Gemma 4 26B-A4B text coding-agent rate |
+| [gemma4-26b-a4b/research/needle-page.md](gemma4_26b_a4b/research/needle-page.md) | Gemma 4 26B-A4B page-needle rate |
+| [gemma4-26b-a4b/research/synthetic-prompt.md](gemma4_26b_a4b/research/synthetic-prompt.md) | Gemma 4 26B-A4B cold 512-token and 10000-token prompts |
+| [gemma4-26b-a4b/benchmarks.md](gemma4_26b_a4b/benchmarks.md) | Gemma 4 26B-A4B harness scores against `serve` |
+| [qwen38-27b/benchmarks.md](qwen38_27b/benchmarks.md) | Harness scores against `serve` |
+| [qwen36-35b-a3b/benchmarks.md](qwen36_35b_a3b/benchmarks.md) | Harness scores against `serve` |
 | [z-image/README.md](z-image/README.md) | Shared Z-Image forward used by Turbo and the base checkpoint |
-| [z-image-turbo/README.md](z-image-turbo/README.md) | Z-Image-Turbo pipeline contract |
-| [z-image-turbo/SETUP.md](z-image-turbo/SETUP.md) | Z-Image-Turbo download, pack, and first image |
-| [z-image-base/README.md](z-image-base/README.md) | Z-Image pipeline contract |
-| [z-image-base/SETUP.md](z-image-base/SETUP.md) | Z-Image download, pack, and first image |
-| [wan22-i2v/README.md](wan22-i2v/README.md) | Wan 2.2 I2V pipeline contract |
-| [wan22-i2v/SETUP.md](wan22-i2v/SETUP.md) | Wan 2.2 I2V download, pack, and first clip |
-| [wan22-ti2v-5b/README.md](wan22-ti2v-5b/README.md) | Wan 2.2 TI2V-5B pipeline contract |
-| [wan22-ti2v-5b/SETUP.md](wan22-ti2v-5b/SETUP.md) | Wan 2.2 TI2V-5B download, pack, and first clip |
-| [umt5-xxl/README.md](umt5-xxl/README.md) | Shared umT5-XXL int8 pack |
-| [umt5-xxl/SETUP.md](umt5-xxl/SETUP.md) | umT5-XXL download and pack |
-| [wan22-ti2v-5b/ceilings.md](wan22-ti2v-5b/ceilings.md) | Wan 2.2 TI2V-5B kernel ceilings |
-| [ace-step-15-turbo/README.md](ace-step-15-turbo/README.md) | ACE-Step 1.5 XL Turbo pipeline contract |
-| [ace-step-15-turbo/SETUP.md](ace-step-15-turbo/SETUP.md) | ACE-Step download, pack, and first clip |
-| [failed/zonos2/README.md](failed/zonos2/README.md) | Failed ZONOS2 pipeline |
-| [failed/zonos2/references.md](failed/zonos2/references.md) | Papers and specifications for the ZONOS2 pipeline |
-| [bge-m3/README.md](bge-m3/README.md) | BGE-M3 pipeline contract |
-| [bge-m3/references.md](bge-m3/references.md) | Papers and specifications for the BGE-M3 pipeline |
-| [bge-m3/failed/failed.md](bge-m3/failed/failed.md) | Failed BGE-M3 Neural Engine window above 512 |
+| [z-image-turbo/README.md](z_image_turbo/README.md) | Z-Image-Turbo pipeline contract |
+| [z-image-turbo/SETUP.md](z_image_turbo/SETUP.md) | Z-Image-Turbo download, pack, and first image |
+| [z-image-base/README.md](z_image_base/README.md) | Z-Image pipeline contract |
+| [z-image-base/SETUP.md](z_image_base/SETUP.md) | Z-Image download, pack, and first image |
+| [wan22-i2v/README.md](wan22_i2v/README.md) | Wan 2.2 I2V pipeline contract |
+| [wan22-i2v/SETUP.md](wan22_i2v/SETUP.md) | Wan 2.2 I2V download, pack, and first clip |
+| [wan22-ti2v-5b/README.md](wan22_ti2v_5b/README.md) | Wan 2.2 TI2V-5B pipeline contract |
+| [wan22-ti2v-5b/SETUP.md](wan22_ti2v_5b/SETUP.md) | Wan 2.2 TI2V-5B download, pack, and first clip |
+| [umt5-xxl/README.md](umt5_xxl/README.md) | Shared umT5-XXL int8 pack |
+| [umt5-xxl/SETUP.md](umt5_xxl/SETUP.md) | umT5-XXL download and pack |
+| [wan22-ti2v-5b/ceilings.md](wan22_ti2v_5b/ceilings.md) | Wan 2.2 TI2V-5B kernel ceilings |
+| [ace-step-15-turbo/README.md](ace_step_15_turbo/README.md) | ACE-Step 1.5 XL Turbo pipeline contract |
+| [ace-step-15-turbo/SETUP.md](ace_step_15_turbo/SETUP.md) | ACE-Step download, pack, and first clip |
+| [bge-m3/README.md](bge_m3/README.md) | BGE-M3 pipeline contract |
+| [bge-m3/references.md](bge_m3/references.md) | Papers and specifications for the BGE-M3 pipeline |
+| [bge_m3/failed/failed.md](bge_m3/failed/failed.md) | Failed BGE-M3 Neural Engine window above 512 |
 | [voxcpm2/README.md](voxcpm2/README.md) | VoxCPM2 pipeline contract |
 | [voxcpm2/references.md](voxcpm2/references.md) | Papers and specifications for the VoxCPM2 pipeline |
-| [ace-step-15-turbo/research/dit-mlp-fp4-error.md](ace-step-15-turbo/research/dit-mlp-fp4-error.md) | ACE-Step XL Turbo DiT MLP fp4 error ranking |
-| [failed/zonos2/research/moe-fp4-error.md](failed/zonos2/research/moe-fp4-error.md) | ZONOS2 MoE fp4 error ranking |
-| [wan22-i2v/research/clip-ceiling.md](wan22-i2v/research/clip-ceiling.md) | Wan 2.2 I2V 9-frame kernel sum |
-| [wan22-i2v/research/block-fp4-error.md](wan22-i2v/research/block-fp4-error.md) | Wan 2.2 I2V fp8 block ranking |
-| [wan22-i2v/research/int8-weight-error.md](wan22-i2v/research/int8-weight-error.md) | Wan 2.2 I2V int8 weight error |
-| [wan22-ti2v-5b/research/int8-weight-error.md](wan22-ti2v-5b/research/int8-weight-error.md) | Wan 2.2 TI2V-5B int8 weight error |
-| [wan22-ti2v-5b/research/clip-ceiling.md](wan22-ti2v-5b/research/clip-ceiling.md) | Wan 2.2 TI2V-5B 9-frame kernel sum and printed clips |
-| [z-image-turbo/research/generation-ceiling.md](z-image-turbo/research/generation-ceiling.md) | Z-Image-Turbo 1280 generation sum |
-| [z-image-base/research/generation-time.md](z-image-base/research/generation-time.md) | Z-Image base 512 and 1024 generation times |
-| [bge-m3/research/recorded-encode.md](bge-m3/research/recorded-encode.md) | BGE-M3 warm encode times |
+| [ace-step-15-turbo/research/dit-mlp-fp4-error.md](ace_step_15_turbo/research/dit-mlp-fp4-error.md) | ACE-Step XL Turbo DiT MLP fp4 error ranking |
+| [wan22-i2v/research/clip-ceiling.md](wan22_i2v/research/clip-ceiling.md) | Wan 2.2 I2V 9-frame kernel sum |
+| [wan22-i2v/research/block-fp4-error.md](wan22_i2v/research/block-fp4-error.md) | Wan 2.2 I2V fp8 block ranking |
+| [wan22-i2v/research/int8-weight-error.md](wan22_i2v/research/int8-weight-error.md) | Wan 2.2 I2V int8 weight error |
+| [wan22-ti2v-5b/research/int8-weight-error.md](wan22_ti2v_5b/research/int8-weight-error.md) | Wan 2.2 TI2V-5B int8 weight error |
+| [wan22-ti2v-5b/research/clip-ceiling.md](wan22_ti2v_5b/research/clip-ceiling.md) | Wan 2.2 TI2V-5B 9-frame kernel sum and printed clips |
+| [z-image-turbo/research/generation-ceiling.md](z_image_turbo/research/generation-ceiling.md) | Z-Image-Turbo 1280 generation sum |
+| [z-image-base/research/generation-time.md](z_image_base/research/generation-time.md) | Z-Image base 512 and 1024 generation times |
+| [bge-m3/research/recorded-encode.md](bge_m3/research/recorded-encode.md) | BGE-M3 warm encode times |
 
 Do not commit plan or option-comparison notes here. A measured research remainder lives at `docs/<pipeline>/research/<slug>.md` and does not change the serving note until that behavior ships.
+
+| [research/history/zonos2/moe-fp4-error.md](research/history/zonos2/moe-fp4-error.md) | Historical ZONOS2 MoE fp4 error (pipeline only in git history) |
+| [research/history/spark_x26_1_7b/kernel-ceilings.md](research/history/spark_x26_1_7b/kernel-ceilings.md) | Historical Spark kernel ceilings (pipeline only in git history) |
+| [research/history/spark_x26_1_7b/recorded-forward.md](research/history/spark_x26_1_7b/recorded-forward.md) | Historical Spark recorded forward (pipeline only in git history) |

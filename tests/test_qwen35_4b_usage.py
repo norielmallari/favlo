@@ -8,13 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35-4b"
+_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35_4b"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qwen35_4b.chat import _usage  # noqa: E402
-from qwen35_4b.forward import Qwen35Runtime  # noqa: E402
-from qwen35_4b.sampling import CONTEXT_LENGTH  # noqa: E402
+from qwen35_4b.metal41.chat import _usage  # noqa: E402
+from qwen35_4b.metal41.forward import Qwen35Runtime  # noqa: E402
+from qwen35_4b.metal41.sampling import CONTEXT_LENGTH  # noqa: E402
 
 
 def test_usage_reports_timings_and_context_length() -> None:
@@ -125,7 +125,7 @@ def test_generate_clock_ends_prefill_at_the_first_sample(monkeypatch: pytest.Mon
     runtime._check = lambda: None
     runtime._store_prefix = lambda: None
     runtime._reset_state = lambda: None
-    monkeypatch.setattr("qwen35_4b.forward.time.perf_counter", now)
+    monkeypatch.setattr("qwen35_4b.metal41.forward.time.perf_counter", now)
 
     def on_token(_token: int) -> None:
         clock["t"] += 0.5

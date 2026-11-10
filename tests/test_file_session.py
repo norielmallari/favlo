@@ -79,8 +79,8 @@ decode 8.56 tok/s (42 tok in 4.91s)
 
 
 def test_model_stem_drops_a_variant_suffix() -> None:
-    assert model_stem("qwen38-27b") == "qwen38-27b"
-    assert model_stem("qwen38-27b:thinking") == "qwen38-27b"
+    assert model_stem("qwen38_27b") == "qwen38_27b"
+    assert model_stem("qwen38_27b:thinking") == "qwen38_27b"
 
 
 def test_source_files_read_shared_package_largest_first(tmp_path: Path) -> None:
@@ -109,8 +109,8 @@ def test_source_files_read_shared_package_largest_first(tmp_path: Path) -> None:
 def test_instruct_model_pins_the_instruct_card() -> None:
     from harness.file_session import instruct_model
 
-    assert instruct_model("qwen36-35b-a3b") == "qwen36-35b-a3b:instruct"
-    assert instruct_model("qwen36-35b-a3b:thinking") == "qwen36-35b-a3b:instruct"
+    assert instruct_model("qwen36_35b_a3b") == "qwen36_35b_a3b:instruct"
+    assert instruct_model("qwen36_35b_a3b:thinking") == "qwen36_35b_a3b:instruct"
 
 
 def test_parse_requests_and_prefix_extension() -> None:

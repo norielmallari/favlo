@@ -5,8 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
-from qwen36_35b_a3b import firing
-from qwen36_35b_a3b.firing import (
+from qwen36_35b_a3b.metal41 import firing
+from qwen36_35b_a3b.metal41.firing import (
     FiringStore,
     RouteScratch,
     finish_request,

@@ -4,7 +4,7 @@ Public documents this process is built from. A pipeline's papers live in that pi
 
 ## Qwen3.8-27B
 
-Qwen Team. *Qwen3.8-27B.* Model card. [Hugging Face](https://huggingface.co/Qwen/Qwen3.8-27B). The 64-layer 3:1 mix of Gated DeltaNet and full attention, 24 query heads over 4 key/value heads, head size 256, and the 262,144-token context. The as-built note is [docs/qwen38-27b/README.md](docs/qwen38-27b/README.md).
+Qwen Team. *Qwen3.8-27B.* Model card. [Hugging Face](https://huggingface.co/Qwen/Qwen3.8-27B). The 64-layer 3:1 mix of Gated DeltaNet and full attention, 24 query heads over 4 key/value heads, head size 256, and the 262,144-token context. The as-built note is [docs/qwen38_27b/README.md](docs/qwen38_27b/README.md).
 
 Qwen Team. *On the Design of Qwen3.8-Next Architecture: Evaluation, Efficiency, and Training Stability.* Alibaba Group, August 2026. [arXiv:2608.30320](https://arxiv.org/abs/2608.30320). Equations (9) and (10) for the Gated DeltaNet gate.
 
@@ -32,7 +32,7 @@ OpenAI. *Text generation.* [Advanced usage](https://developers.openai.com/api/do
 
 ## Qwen3.6-35B-A3B
 
-Qwen Team. *Qwen3.6-35B-A3B.* Model card, April 2026. [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). The 40-layer 3:1 mix, 256 routed experts plus one shared expert, the sampling card, and the 262,144-token default RoPE. The YaRN factor-4 extension in that card is not enabled. The as-built note is [docs/qwen36-35b-a3b/README.md](docs/qwen36-35b-a3b/README.md).
+Qwen Team. *Qwen3.6-35B-A3B.* Model card, April 2026. [Hugging Face](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). The 40-layer 3:1 mix, 256 routed experts plus one shared expert, the sampling card, and the 262,144-token default RoPE. The YaRN factor-4 extension in that card is not enabled. The as-built note is [docs/qwen36_35b_a3b/README.md](docs/qwen36_35b_a3b/README.md).
 
 Qwen Team. *On the Design of Qwen3.8-Next Architecture: Evaluation, Efficiency, and Training Stability.* Alibaba Group, August 2026. [arXiv:2608.30320](https://arxiv.org/abs/2608.30320).
 

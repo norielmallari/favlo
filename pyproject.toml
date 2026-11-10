@@ -61,7 +61,7 @@ package = true
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests", "pipelines/metal41", "pipelines/parked", "web-api"]
+src = ["src", "tests", "pipelines", "web-api"]
 extend-exclude = ["harness/benchmarks/vendor"]
 
 [tool.ruff.lint]
@@ -69,4 +69,4 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".", "src", "pipelines/metal41"]
+pythonpath = [".", "src", "pipelines"]

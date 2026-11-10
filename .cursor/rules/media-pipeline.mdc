@@ -1,6 +1,6 @@
 ---
 description: How a served media pipeline implements MediaPipeline, and when to extend and run the preemption harness. Scratch sizes from the serve ledger, with no private cap. The request keeps its resolution, frame count, and duration. The preemption harness waits and does not take the lock. A GPU test uses smoke_lock run.
-globs: src/favlo/media_pipeline.py,src/favlo/media_catalog.py,src/favlo/pipeline_worker.py,src/favlo/pipelines.py,src/favlo/mcp_server.py,harness/media_pipeline.py,harness/mcp_media.py,tests/test_media_pipeline.py,tests/test_media_pipeline_harness.py,tests/test_media_catalog.py,pipelines/**,docs/harness.md,docs/z-image/**,docs/z-image-turbo/**,docs/z-image-base/**
+globs: src/favlo/media_pipeline.py,src/favlo/media_catalog.py,src/favlo/pipeline_worker.py,src/favlo/pipelines.py,src/favlo/mcp_server.py,harness/media_pipeline.py,harness/mcp_media.py,tests/test_media_pipeline.py,tests/test_media_pipeline_harness.py,tests/test_media_catalog.py,pipelines/**,docs/harness.md,docs/z_image/**,docs/z_image_turbo/**,docs/z_image_base/**
 alwaysApply: false
 ---
 

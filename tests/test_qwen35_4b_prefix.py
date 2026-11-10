@@ -1,16 +1,16 @@
-"""Prefix pack/unpack for qwen35-4b. Host only; no device."""
+"""Prefix pack/unpack for qwen35_4b. Host only; no device."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35-4b"
+_ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35_4b"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qwen35_4b.layout import BLOCK, HEAD_DIM, KV_HEADS  # noqa: E402
-from qwen35_4b.prefix import pack_plane, unpack_plane  # noqa: E402
+from qwen35_4b.metal41.layout import BLOCK, HEAD_DIM, KV_HEADS  # noqa: E402
+from qwen35_4b.metal41.prefix import pack_plane, unpack_plane  # noqa: E402
 
 
 def test_half_plane_round_trip() -> None:

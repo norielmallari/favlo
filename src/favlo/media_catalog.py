@@ -2,11 +2,13 @@
 
 The listener publishes ``{pipeline}__{local name}``. A module with no
 ``mcp_tools()`` is not a media plugin. Importing the module to read that
-list does not open a device.
+list does not open a device. A row that fails to import or declare tools is
+skipped so ``favlo serve`` still listens.
 """
 
 from __future__ import annotations
 
+import sys
 from typing import Any, NamedTuple
 
 _RESULTS = frozenset({"image", "video", "audio", "json"})
@@ -80,8 +82,8 @@ def _resolvable_folder(record: PipelineRecord) -> str:
 
 
 def publish(pipeline: str, local: str) -> str:
-    """The tool name a client calls. Hyphens in the pipeline id become underscores."""
-    return f"{pipeline.replace('-', '_')}__{local}"
+    """The tool name a client calls. Prefix is the pipeline id."""
+    return f"{pipeline}__{local}"
 
 
 def tool_kind(spec: ToolSpec) -> str:
@@ -94,13 +96,18 @@ def tool_kind(spec: ToolSpec) -> str:
     raise CatalogError(message)
 
 
+def _skip(message: str) -> None:
+    """Leave the broken row out of the catalog. Serve keeps listening."""
+    sys.stderr.write(f"media catalog: {message}\n")
+
+
 def build_catalog(
     root: Any = None,
     *,
     description_max: int = 256,
     param_max: int = 48,
 ) -> Catalog:
-    """Walk the registry once. An import, a missing handler, or a name clash fails."""
+    """Walk the registry once. A broken pipeline is skipped; the rest stay."""
     from favlo.cli import load_pipeline
     from favlo.registry import load_registry
 
@@ -134,30 +141,41 @@ def build_catalog(
                 runtime=str(entry.get("runtime")),
                 pipeline_root=root_path if isinstance(root_path, str) else None,
             )
-        except (FileNotFoundError, ImportError, OSError, TypeError) as exc:
-            message = f"{folder} did not import ({type(exc).__name__})"
-            raise CatalogError(message) from exc
+        except Exception as exc:
+            _skip(f"{folder} did not import ({type(exc).__name__}: {exc})")
+            continue
         declare = getattr(module, "mcp_tools", None)
         if not callable(declare):
             continue
         try:
             raw = declare()
         except Exception as exc:
-            message = f"{pipeline} mcp_tools failed ({type(exc).__name__})"
-            raise CatalogError(message) from exc
+            _skip(f"{pipeline} mcp_tools failed ({type(exc).__name__}: {exc})")
+            continue
         if not raw:
             continue
-        specs = _tools(module, pipeline, raw, description_max, param_max)
-        record = PipelineRecord(
-            pipeline,
-            tuple(name for name, _entry in rows),
-            tuple(specs),
-        )
+        try:
+            specs = _tools(module, pipeline, raw, description_max, param_max)
+        except CatalogError as exc:
+            _skip(str(exc))
+            continue
+        pending: list[tuple[str, ToolSpec]] = []
+        collision = False
         for spec in specs:
             name = publish(pipeline, spec.name)
             if name in by_name:
-                message = f"published name {name} collides"
-                raise CatalogError(message)
+                _skip(f"published name {name} collides; skipping {pipeline}")
+                collision = True
+                break
+            pending.append((name, spec))
+        if collision or not pending:
+            continue
+        record = PipelineRecord(
+            pipeline,
+            tuple(name for name, _entry in rows),
+            tuple(spec for _name, spec in pending),
+        )
+        for name, spec in pending:
             by_name[name] = (record, spec)
         records.append(record)
     return Catalog(tuple(records), by_name)

@@ -12,7 +12,7 @@ A block quote is a line that starts with `>`. The author wrote those lines, incl
 
 Cursor rules must stay pipeline-agnostic unless the operator asks for a pipeline-specific rule. Name a behavior, a contract, or a shared module. Do not name a served pipeline, a packed folder, or a checkpoint id in the rule body. A pipeline's as-built note and that pipeline's own rule or skill hold the model-specific detail. The `globs` frontmatter may be pipeline-scoped so the rule loads for those edits; that list is not prose that picks a pilot.
 
-Wrong: "`qwen36-35b-a3b` is the pipeline that stores those ids."
+Wrong: "`qwen36_35b_a3b` is the pipeline that stores those ids."
 
 Right: "A language pipeline that serves a `store: true` chat stores those ids, then remembers and compares."
 

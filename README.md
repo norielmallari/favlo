@@ -66,11 +66,11 @@ The app note is [web-spa/README.md](web-spa/README.md). The API note is [web-api
 
 | Pipeline | Note | 16 GB | 24 GB | 48 GB |
 |---|---|---|---|---|
-| `qwen35-4b` | [Qwen3.5-4B](docs/qwen35-4b/README.md) | ✅ | ✅ | ✅ |
-| `qwen36-35b-a3b` | [Qwen3.6-35B-A3B](docs/qwen36-35b-a3b/README.md) | ⚠️ | ⚠️ | ✅ |
-| `gemma4-26b-a4b` | [Gemma 4 26B-A4B](docs/gemma4-26b-a4b/README.md) | ⚠️ | ⚠️ | ✅ |
-| `qwen38-27b` | [Qwen3.8-27B](docs/qwen38-27b/README.md) | ⚠️ | ⚠️ | ✅ |
-| `bge-m3` | [BGE-M3](docs/bge-m3/README.md) | ✅ | ✅ | ✅ |
+| `qwen35_4b` | [Qwen3.5-4B](docs/qwen35_4b/README.md) | ✅ | ✅ | ✅ |
+| `qwen36_35b_a3b` | [Qwen3.6-35B-A3B](docs/qwen36_35b_a3b/README.md) | ⚠️ | ⚠️ | ✅ |
+| `gemma4_26b_a4b` | [Gemma 4 26B-A4B](docs/gemma4_26b_a4b/README.md) | ⚠️ | ⚠️ | ✅ |
+| `qwen38_27b` | [Qwen3.8-27B](docs/qwen38_27b/README.md) | ⚠️ | ⚠️ | ✅ |
+| `bge_m3` | [BGE-M3](docs/bge_m3/README.md) | ✅ | ✅ | ✅ |
 
 ## Media pipeline
 
@@ -129,8 +129,8 @@ Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICEN
 
 | Checkpoint | License | Note |
 |---|---|---|
-| Qwen3.5-4B | Apache License, Version 2.0 | [note](docs/qwen35-4b/README.md) |
-| Qwen3.6-35B-A3B | Apache License, Version 2.0 | [note](docs/qwen36-35b-a3b/README.md) |
-| Gemma 4 26B-A4B | [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license) | [note](docs/gemma4-26b-a4b/README.md) |
-| Qwen3.8-27B | Apache License, Version 2.0 | [note](docs/qwen38-27b/README.md) |
-| bge-m3 | MIT License | [note](docs/bge-m3/README.md) |
+| Qwen3.5-4B | Apache License, Version 2.0 | [note](docs/qwen35_4b/README.md) |
+| Qwen3.6-35B-A3B | Apache License, Version 2.0 | [note](docs/qwen36_35b_a3b/README.md) |
+| Gemma 4 26B-A4B | [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license) | [note](docs/gemma4_26b_a4b/README.md) |
+| Qwen3.8-27B | Apache License, Version 2.0 | [note](docs/qwen38_27b/README.md) |
+| bge-m3 | MIT License | [note](docs/bge_m3/README.md) |

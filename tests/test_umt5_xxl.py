@@ -9,10 +9,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from umt5_xxl.formats import pack_int8, relative_error, restore_int8
-from umt5_xxl.quantize import _copy_tokenizer, _drop_source
-from umt5_xxl.source import ENCODER_FILE, TOKENIZER_FILE, pack_dir, source_dir
-from umt5_xxl.weights import hf_key, open_weights
+from umt5_xxl.metal41.formats import pack_int8, relative_error, restore_int8
+from umt5_xxl.metal41.quantize import _copy_tokenizer, _drop_source
+from umt5_xxl.metal41.source import ENCODER_FILE, TOKENIZER_FILE, pack_dir, source_dir
+from umt5_xxl.metal41.weights import hf_key, open_weights
 
 
 def test_pack_paths_live_under_models_google() -> None:
@@ -31,7 +31,7 @@ def test_pack_int8_restores_the_peak() -> None:
 
 
 def test_quantize_copies_the_tokenizer_into_the_pack(tmp_path: Path) -> None:
-    source = tmp_path / "google" / "umt5-xxl"
+    source = tmp_path / "google" / "umt5_xxl"
     pack = tmp_path / "google" / "umt5-xxl-int8"
     source.mkdir(parents=True)
     pack.mkdir(parents=True)
@@ -54,7 +54,7 @@ def test_quantize_refuses_a_missing_tokenizer(tmp_path: Path) -> None:
 
 
 def test_quantize_removes_the_bf16_checkout(tmp_path: Path) -> None:
-    source = tmp_path / "google" / "umt5-xxl"
+    source = tmp_path / "google" / "umt5_xxl"
     pack = tmp_path / "google" / "umt5-xxl-int8"
     source.mkdir(parents=True)
     pack.mkdir(parents=True)
@@ -114,7 +114,7 @@ def test_hf_safetensors_reads_wan_layout_names(tmp_path: Path) -> None:
 
 
 def test_commands_require_the_encoder_format() -> None:
-    from umt5_xxl.commands import main
+    from umt5_xxl.metal41.commands import main
 
     with pytest.raises(SystemExit) as raised:
         main(["quantize"])
@@ -124,7 +124,7 @@ def test_commands_require_the_encoder_format() -> None:
 def test_commands_quantize_writes_the_pack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from umt5_xxl.commands import main
+    from umt5_xxl.metal41.commands import main
 
     seen: dict[str, object] = {}
 
@@ -146,8 +146,8 @@ def test_commands_quantize_writes_the_pack(
         (dest / TOKENIZER_FILE).write_text("{}", encoding="utf-8")
         return 0.0123
 
-    monkeypatch.setattr("umt5_xxl.source.models_dir", lambda root=None: tmp_path / "models")
-    monkeypatch.setattr("umt5_xxl.quantize.quantize", quantize)
+    monkeypatch.setattr("umt5_xxl.metal41.source.models_dir", lambda root=None: tmp_path / "models")
+    monkeypatch.setattr("umt5_xxl.metal41.quantize.quantize", quantize)
     packed = main(["quantize", "--format", "wan"])
     assert packed == 0
     assert seen["dest"] == tmp_path / "models" / "google" / "umt5-xxl-int8"

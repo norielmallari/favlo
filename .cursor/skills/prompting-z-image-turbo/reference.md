@@ -8,7 +8,7 @@
 | Prompting discussion | https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/8 |
 | PE template (Chinese) | https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/main/pe.py |
 | Diffusers pipeline | https://huggingface.co/docs/diffusers/main/api/pipelines/z_image |
-| Favlo pipeline note | docs/z-image-turbo/README.md |
+| Favlo pipeline note | docs/z_image_turbo/README.md |
 
 Authors recommend long prompts, optional LLM enhancement with `pe.py`, and `max_sequence_length=1024` in Diffusers when captions exceed the 512-token demo default. Favlo's caption encoder allows **1536** tokens.
 

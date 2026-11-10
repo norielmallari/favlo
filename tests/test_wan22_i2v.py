@@ -9,14 +9,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from wan22_i2v.chat import VideoRequestError, _seconds_label, handle_video, video_fields
-from wan22_i2v.formats import block_winners, pack_linear, relative_error, restore_linear
-from wan22_i2v.hold import ClipHold, reload_quietly
-from wan22_i2v.latent import condition_volume, unpatchify
-from wan22_i2v.png import decode_png, encode_png
-from wan22_i2v.progress import ClipProgress, clip_label, stage_shares
-from wan22_i2v.record import load_expert, quantize, quantize_int8, write_graph_source
-from wan22_i2v.schedule import (
+from wan22_i2v.metal41.chat import VideoRequestError, _seconds_label, handle_video, video_fields
+from wan22_i2v.metal41.formats import block_winners, pack_linear, relative_error, restore_linear
+from wan22_i2v.metal41.hold import ClipHold, reload_quietly
+from wan22_i2v.metal41.latent import condition_volume, unpatchify
+from wan22_i2v.metal41.png import decode_png, encode_png
+from wan22_i2v.metal41.progress import ClipProgress, clip_label, stage_shares
+from wan22_i2v.metal41.record import load_expert, quantize, quantize_int8, write_graph_source
+from wan22_i2v.metal41.schedule import (
     FIVE_SEC_FRAMES,
     P320_HEIGHT,
     P320_WIDTH,
@@ -33,17 +33,17 @@ from wan22_i2v.schedule import (
     velocity_walks,
     video_modes,
 )
-from wan22_i2v.source import (
+from wan22_i2v.metal41.source import (
     FILES,
     dit_dir,
     expert_paths,
     mask_from_prefix,
     vae_dir,
 )
-from wan22_i2v.text import tokenizer_path
-from wan22_i2v.umt5_pack import shared_pack_dir
-from wan22_i2v.vae import vae_path
-from wan22_i2v.video import avi_meta, write_avi, write_mp4
+from wan22_i2v.metal41.text import tokenizer_path
+from wan22_i2v.metal41.umt5_pack import shared_pack_dir
+from wan22_i2v.metal41.vae import vae_path
+from wan22_i2v.metal41.video import avi_meta, write_avi, write_mp4
 
 from favlo.media_pipeline import MediaPaused
 
@@ -65,13 +65,13 @@ def test_setup_writes_each_repo_under_models() -> None:
 
 
 def test_name_is_the_packed_model_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from wan22_i2v.commands import main
+    from wan22_i2v.metal41.commands import main
 
     def models_dir(root: Path | None = None) -> Path:
         del root
         return tmp_path / "models"
 
-    monkeypatch.setattr("wan22_i2v.source.models_dir", models_dir)
+    monkeypatch.setattr("wan22_i2v.metal41.source.models_dir", models_dir)
     monkeypatch.setattr("favlo.registry.models_dir", models_dir)
     seen: dict[str, Path] = {}
 
@@ -93,7 +93,7 @@ def test_name_is_the_packed_model_id(tmp_path: Path, monkeypatch: pytest.MonkeyP
         dest.mkdir(parents=True)
         return {"high_promoted": [1], "low_promoted": [2]}
 
-    monkeypatch.setattr("wan22_i2v.record.quantize", quantize)
+    monkeypatch.setattr("wan22_i2v.metal41.record.quantize", quantize)
     high = tmp_path / "high.safetensors"
     low = tmp_path / "low.safetensors"
     high.write_bytes(b"h")
@@ -218,7 +218,7 @@ def test_euler_grid_and_expert_switch() -> None:
 
 
 def test_umt5_buckets_are_bidirectional() -> None:
-    from wan22_i2v.text import relative_buckets
+    from wan22_i2v.metal41.text import relative_buckets
 
     buckets = relative_buckets(3, 3)
     assert buckets[1, 1] == 0
@@ -261,16 +261,16 @@ def test_condition_is_noise_then_mask_then_latent() -> None:
 
 
 def test_a_clip_encodes_with_the_int8_pack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from wan22_i2v.commands import main
-    from wan22_i2v.runtime import _text_encoder
+    from wan22_i2v.metal41.commands import main
+    from wan22_i2v.metal41.runtime import _text_encoder
 
     def models_dir(root: Path | None = None) -> Path:
         del root
         return tmp_path / "models"
 
-    monkeypatch.setattr("wan22_i2v.source.models_dir", models_dir)
+    monkeypatch.setattr("wan22_i2v.metal41.source.models_dir", models_dir)
     monkeypatch.setattr("favlo.registry.models_dir", models_dir)
-    monkeypatch.setattr("wan22_i2v.runtime.tokenizer_path", lambda: tmp_path / "tokenizer.json")
+    monkeypatch.setattr("wan22_i2v.metal41.runtime.tokenizer_path", lambda: tmp_path / "tokenizer.json")
 
     def quantize_int8(
         high: Path,
@@ -285,7 +285,7 @@ def test_a_clip_encodes_with_the_int8_pack(tmp_path: Path, monkeypatch: pytest.M
         dest.mkdir(parents=True)
         return {"high_worst": 0.0, "low_worst": 0.0}
 
-    monkeypatch.setattr("wan22_i2v.record.quantize_int8", quantize_int8)
+    monkeypatch.setattr("wan22_i2v.metal41.record.quantize_int8", quantize_int8)
     high = tmp_path / "high.safetensors"
     low = tmp_path / "low.safetensors"
     high.write_bytes(b"h")
@@ -404,7 +404,7 @@ def _png() -> str:
 
 
 def test_duration_floors_to_four_n_plus_one() -> None:
-    from wan22_i2v.schedule import frames_from_duration
+    from wan22_i2v.metal41.schedule import frames_from_duration
 
     assert frames_from_duration(5.0) == 77
     assert video_fields({"prompt": "move", "image": _png(), "duration": 5.0}).frames == 77
@@ -484,6 +484,12 @@ class _Reply:
 
 
 class _Clip:
+    def ensure_open(self, request) -> None:
+        del request
+
+    def close(self) -> None:
+        return None
+
     def generate(self, prompt, image, frames, width, height, seed, progress=None, **_rest):
         del prompt, image, seed, _rest
         if progress is not None:
@@ -494,6 +500,12 @@ class _Clip:
 
 
 class _Broken:
+    def ensure_open(self, request) -> None:
+        del request
+
+    def close(self) -> None:
+        return None
+
     def generate(self, prompt, image, frames, width, height, seed, progress=None, **_rest):
         del prompt, image, frames, width, height, seed, progress, _rest
         message = "vae missing"
@@ -569,6 +581,12 @@ def test_video_job_passes_guidance_into_generate(tmp_path) -> None:
     seen: dict[str, object] = {}
 
     class _Seen:
+        def ensure_open(self, request) -> None:
+            del request
+
+        def close(self) -> None:
+            return None
+
         def generate(self, prompt, image, frames, width, height, seed, progress=None, **kwargs):
             del image, seed
             seen["prompt"] = prompt
@@ -737,6 +755,12 @@ class _Pausing:
         self.state = state
         self.stages: list[str | None] = []
 
+    def ensure_open(self, request) -> None:
+        del request
+
+    def close(self) -> None:
+        return None
+
     def generate(self, prompt, image, frames, width, height, seed, progress=None, **_rest):
         del prompt, image, seed, _rest
         hold = getattr(progress, "hold", None)
@@ -782,8 +806,8 @@ def test_preempt_pauses_and_the_same_job_resumes(tmp_path) -> None:
 
 
 def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:
-    import wan22_i2v.runtime as runtime_mod
-    from wan22_i2v.runtime import Runtime
+    import wan22_i2v.metal41.runtime as runtime_mod
+    from wan22_i2v.metal41.runtime import Runtime
 
     monkeypatch.setattr(
         runtime_mod,
@@ -838,8 +862,8 @@ def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:
 
 
 def test_a_committed_layer_checkpoints_before_the_step_updates(monkeypatch) -> None:
-    import wan22_i2v.runtime as runtime_mod
-    from wan22_i2v.runtime import Runtime
+    import wan22_i2v.metal41.runtime as runtime_mod
+    from wan22_i2v.metal41.runtime import Runtime
 
     monkeypatch.setattr(runtime_mod, "_volume", lambda *_args, **_kwargs: np.zeros((1,)))
 
@@ -884,8 +908,8 @@ def test_cancel_discards_the_hold(tmp_path) -> None:
 
 
 def test_close_drops_the_device_and_the_expert() -> None:
-    from wan22_i2v.dit import Resident
-    from wan22_i2v.runtime import Runtime
+    from wan22_i2v.metal41.dit import Resident
+    from wan22_i2v.metal41.runtime import Runtime
 
     class _Gpu:
         def __init__(self) -> None:
@@ -906,6 +930,7 @@ def test_close_drops_the_device_and_the_expert() -> None:
     runtime = Runtime.__new__(Runtime)
     runtime.gpu = gpu
     runtime._forward = None
+    runtime._owner = "wan22_i2v:test"
     buf = object()
     host = np.zeros(2, dtype=np.float32)
     runtime._resident = Resident(
@@ -925,13 +950,16 @@ def test_close_drops_the_device_and_the_expert() -> None:
 
 
 def test_close_confirms_the_bytes_it_sweeps(monkeypatch: pytest.MonkeyPatch) -> None:
-    from wan22_i2v.runtime import Runtime
+    from wan22_i2v.metal41.runtime import Runtime
 
     seen = {"live": 4096}
 
     class _Ledger:
         def owner_bytes(self) -> dict[str, int]:
-            return {"wan22-i2v:9": seen["live"]}
+            return {"wan22_i2v:9": seen["live"]}
+
+        def reported(self) -> dict[str, int]:
+            return {}
 
         def sweep(self, owner: str) -> None:
             seen["swept"] = owner
@@ -942,23 +970,38 @@ def test_close_confirms_the_bytes_it_sweeps(monkeypatch: pytest.MonkeyPatch) -> 
             seen["nbytes"] = nbytes
             return True
 
+        def note_returning(self, nbytes: int) -> None:
+            del nbytes
+
     ledger = _Ledger()
-    monkeypatch.setattr("wan22_i2v.runtime.memory", ledger)
+    monkeypatch.setattr("wan22_i2v.metal41.runtime.memory", ledger)
     monkeypatch.setattr("favlo.memory.memory", ledger)
+    monkeypatch.setattr("favlo.media_memory.memory", ledger)
     monkeypatch.setattr("favlo.memory.reclaimable_bytes", lambda: 80)
+    monkeypatch.setattr("favlo.media_memory.reclaimable_bytes", lambda: 80)
+    class _Gpu:
+        def close(self) -> None:
+            return None
+
+        def unkeep(self, _buf: object) -> None:
+            return None
+
+        def reclaim(self) -> None:
+            return None
+
     runtime = Runtime.__new__(Runtime)
-    runtime.gpu = None
+    runtime.gpu = _Gpu()
     runtime._forward = None
     runtime._resident = None
-    runtime._owner = "wan22-i2v:9"
+    runtime._owner = "wan22_i2v:9"
     runtime.close()
-    assert seen["swept"] == "wan22-i2v:9"
+    assert seen["swept"] == "wan22_i2v:9"
     assert seen["before"] == 80
     assert seen["nbytes"] == 4096
 
 
 def test_open_runtime_sets_the_ledger_cap(monkeypatch) -> None:
-    from wan22_i2v import runtime as runtime_mod
+    from wan22_i2v.metal41 import runtime as runtime_mod
 
     seen: dict[str, object] = {}
     caps: list[object] = []
@@ -976,22 +1019,22 @@ def test_open_runtime_sets_the_ledger_cap(monkeypatch) -> None:
 
     monkeypatch.setattr(runtime_mod, "Runtime", fake)
     monkeypatch.setattr(runtime_mod.memory, "set_max_memory", caps.append)
-    opened = runtime_mod.open_runtime(Path("record"), owner="wan22-i2v:4", max_memory="16GiB")
+    opened = runtime_mod.open_runtime(Path("record"), owner="wan22_i2v:4", max_memory="16GiB")
     assert opened == "runtime"
-    assert seen == {"owner": "wan22-i2v:4"}
+    assert seen == {"owner": "wan22_i2v:4"}
     assert caps == ["16GiB"]
 
 
 def test_missing_record_raises_before_the_device(tmp_path: Path) -> None:
-    from wan22_i2v.runtime import Runtime
+    from wan22_i2v.metal41.runtime import Runtime
 
     with pytest.raises(FileNotFoundError):
-        Runtime(tmp_path / "missing", owner="wan22-i2v:4")
+        Runtime(tmp_path / "missing", owner="wan22_i2v:4")
 
 
 def test_forward_scratch_grows_with_the_clip() -> None:
-    from wan22_i2v.dit import forward_bytes
-    from wan22_i2v.formats import TILE_M, TILE_N, pad_to, stored_k
+    from wan22_i2v.metal41.dit import forward_bytes
+    from wan22_i2v.metal41.formats import TILE_M, TILE_N, pad_to, stored_k
 
     config = {"dim": 64, "ffn": 128, "text_len": 8, "text_dim": 32, "freq_dim": 16}
     short = forward_bytes(config, 16, 36 * 2 * 4 * 4)
@@ -1032,7 +1075,7 @@ def test_forward_scratch_grows_with_the_clip() -> None:
 
 
 def test_room_reads_the_ledger(monkeypatch) -> None:
-    from wan22_i2v import runtime as runtime_mod
+    from wan22_i2v.metal41 import runtime as runtime_mod
 
     runtime = runtime_mod.Runtime.__new__(runtime_mod.Runtime)
 
@@ -1049,7 +1092,7 @@ def test_room_reads_the_ledger(monkeypatch) -> None:
 
 
 def test_a_short_ledger_keeps_the_requested_clip(monkeypatch, tmp_path: Path) -> None:
-    from wan22_i2v import runtime as runtime_mod
+    from wan22_i2v.metal41 import runtime as runtime_mod
 
     runtime = runtime_mod.Runtime.__new__(runtime_mod.Runtime)
     runtime.path = tmp_path
@@ -1063,7 +1106,7 @@ def test_a_short_ledger_keeps_the_requested_clip(monkeypatch, tmp_path: Path) ->
 
 
 def test_decode_keeps_one_latent_frame_when_the_volume_does_not_fit() -> None:
-    from wan22_i2v.runtime import decode_peak_bytes, resident_latent_frames
+    from wan22_i2v.metal41.runtime import decode_peak_bytes, resident_latent_frames
 
     frames, height, width, lat_t = 81, 320, 576, 21
     lat_h, lat_w = height // 8, width // 8
@@ -1079,7 +1122,7 @@ def test_decode_keeps_one_latent_frame_when_the_volume_does_not_fit() -> None:
 
 
 def test_slim_pack_drops_host_quant_arrays() -> None:
-    from wan22_i2v.formats import LinearPack, slim_pack
+    from wan22_i2v.metal41.formats import LinearPack, slim_pack
 
     pack = LinearPack(
         kind="fp4",
@@ -1099,7 +1142,7 @@ def test_slim_pack_drops_host_quant_arrays() -> None:
 
 
 def test_vae_release_device_drops_params() -> None:
-    from wan22_i2v.vae import WanVAE
+    from wan22_i2v.metal41.vae import WanVAE
 
     vae = WanVAE.__new__(WanVAE)
     vae.weights = {}

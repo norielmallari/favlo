@@ -350,13 +350,9 @@ def source_mtime(selection: Any) -> float:
     except ValueError:
         return 0.0
     newest = 0.0
-    entry = root / f"{pipeline}.py"
-    package = root / pipeline.replace("-", "_")
     files: list[Path] = []
-    if entry.is_file():
-        files.append(entry)
-    if package.is_dir():
-        for path in package.rglob("*"):
+    if root.is_dir():
+        for path in root.rglob("*"):
             if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
                 continue
             files.append(path)

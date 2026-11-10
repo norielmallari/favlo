@@ -35,14 +35,14 @@ def published_name(pipeline: str, tool: str) -> str:
     """The listener name for one local tool.
 
     A name that already contains ``__`` is already published. Otherwise the
-    pipeline id is the prefix, with hyphens turned into underscores.
+    pipeline id is the prefix.
     """
     if "__" in tool:
         return tool
     if not pipeline:
         message = "pass --pipeline"
         raise ValueError(message)
-    return f"{pipeline.replace('-', '_')}__{tool}"
+    return f"{pipeline}__{tool}"
 
 
 def published_call(name: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -58,7 +58,7 @@ def published_call(name: str, arguments: dict[str, Any]) -> tuple[str, dict[str,
     if isinstance(model, str) and model.strip():
         from favlo.registry import resolve
 
-        pipeline = resolve(model).pipeline.replace("-", "_")
+        pipeline = resolve(model).pipeline
         return f"{pipeline}__{name}", arguments
     from favlo.media_catalog import build_catalog
 

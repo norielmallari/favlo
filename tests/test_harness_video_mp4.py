@@ -6,8 +6,8 @@ from pathlib import Path
 
 import numpy as np
 from harness.video_mp4 import first_frame_png, frame_png, write_mp4
-from wan22_i2v.png import decode_png
-from wan22_i2v.video import write_avi
+from wan22_i2v.metal41.png import decode_png
+from wan22_i2v.metal41.video import write_avi
 
 
 def test_write_mp4_keeps_the_frame_geometry(tmp_path: Path) -> None:

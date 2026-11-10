@@ -180,7 +180,7 @@ def test_gallery_vision_uses_the_agent_model_or_the_global_default(tmp_path: Pat
         "vision-default",
         {
             "provider_id": LOCAL_PROVIDER_ID,
-            "model_id": "qwen36-35b-a3b:thinking",
+            "model_id": "qwen36_35b_a3b:thinking",
             "display_name": "35B",
         },
     )
@@ -189,7 +189,7 @@ def test_gallery_vision_uses_the_agent_model_or_the_global_default(tmp_path: Pat
         "vision-other",
         {
             "provider_id": LOCAL_PROVIDER_ID,
-            "model_id": "qwen35-4b:thinking",
+            "model_id": "qwen35_4b:thinking",
             "display_name": "4B",
         },
     )
@@ -214,7 +214,7 @@ def test_gallery_vision_uses_the_agent_model_or_the_global_default(tmp_path: Pat
         },
     )
     model, base = store.gallery_vision_model(workspace["id"])
-    assert model == "qwen36-35b-a3b:thinking"
+    assert model == "qwen36_35b_a3b:thinking"
     assert base
     favlo = next(row for row in store.agents() if row["id"] == FAVLO_AGENT_ID)
     store.update_agent(
@@ -225,7 +225,7 @@ def test_gallery_vision_uses_the_agent_model_or_the_global_default(tmp_path: Pat
         other[1]["id"],
     )
     model, _base = store.gallery_vision_model(workspace["id"])
-    assert model == "qwen35-4b:thinking"
+    assert model == "qwen35_4b:thinking"
 
 
 def test_provider_model_throws_when_settings_has_no_model(tmp_path: Path) -> None:

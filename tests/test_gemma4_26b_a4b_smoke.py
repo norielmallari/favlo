@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from gemma4_26b_a4b.chat import decode_text, encode_chat, reply_text
-from gemma4_26b_a4b.commands import CARROT_PROMPT
-from gemma4_26b_a4b.forward import Gemma4Runtime
-from gemma4_26b_a4b.sampling import VARIANTS
+from gemma4_26b_a4b.metal41.chat import decode_text, encode_chat, reply_text
+from gemma4_26b_a4b.metal41.commands import CARROT_PROMPT
+from gemma4_26b_a4b.metal41.forward import Gemma4Runtime
+from gemma4_26b_a4b.metal41.sampling import VARIANTS
 
 _ROOT = Path("models/gemma-4-26B-A4B-it-fp8-e20")
 _INSTRUCT_TOKENS = 384
@@ -29,7 +29,7 @@ _ANSWER = re.compile(
 def carrot_runtime():
     if not (_ROOT / "manifest.json").is_file():
         pytest.skip("quantized record is not installed")
-    runtime = Gemma4Runtime(_ROOT, owner="gemma4-26b-a4b:smoke")
+    runtime = Gemma4Runtime(_ROOT, owner="gemma4_26b_a4b:smoke")
     try:
         yield runtime
     finally:
@@ -141,7 +141,7 @@ def test_prefill_and_decode_counts_advance(carrot_runtime: Gemma4Runtime) -> Non
             return None
 
     sink = _Sink()
-    console = Console("json", pipeline="gemma4-26b-a4b", stream=sink, start_thread=True)
+    console = Console("json", pipeline="gemma4_26b_a4b", stream=sink, start_thread=True)
     console.live_decode = True
     carrot_runtime.console = console
     try:
