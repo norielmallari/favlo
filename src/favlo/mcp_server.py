@@ -389,6 +389,9 @@ def _request_body(
     for key, value in arguments.items():
         if key in {"include_image", "include_audio", "session"}:
             continue
+        if key == "image" and isinstance(value, list):
+            body[key] = _image_list(value, state)
+            continue
         body[key] = _argument(value, state, still=key in _STILL_KEYS)
     named = body.get("model")
     try:
@@ -424,6 +427,16 @@ def _media_model_id(named: Any, record: PipelineRecord, spec: ToolSpec) -> str:
                 return alias
         return folder
     raise LookupError("unknown model")
+
+
+def _image_list(images: list[Any], state: dict[str, Any]) -> list[str]:
+    """One `image` argument may be several stills. Each item is `_still`."""
+    if not images:
+        raise ToolError("image is required")
+    try:
+        return [_still(item, state) for item in images]
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
 
 
 def _argument(value: Any, state: dict[str, Any], *, still: bool = False) -> Any:

@@ -44,6 +44,24 @@ def test_a_prompt_with_a_slash_is_not_a_still() -> None:
         _argument(str(Path("/tmp/face.png")), {}, still=True)
 
 
+def test_an_image_list_keeps_each_still(tmp_path: Path) -> None:
+    from favlo.mcp_server import _image_list
+    from fastmcp.exceptions import ToolError
+
+    raw = b"\xff" * 8
+    first = tmp_path / "a.png"
+    second = tmp_path / "b.png"
+    first.write_bytes(raw)
+    second.write_bytes(b"\xfe" * 4)
+    encoded = base64.b64encode(raw).decode("ascii")
+    other = base64.b64encode(b"\xfe" * 4).decode("ascii")
+    assert _image_list([file_uri(first), file_uri(second)], {}) == [encoded, other]
+    with pytest.raises(ToolError, match="image is required"):
+        _image_list([], {})
+    with pytest.raises(ToolError, match="bare path"):
+        _image_list([str(first)], {})
+
+
 def test_a_file_uri_still_argument_survives_base64_slashes(tmp_path: Path) -> None:
     from favlo.mcp_server import _argument
 
