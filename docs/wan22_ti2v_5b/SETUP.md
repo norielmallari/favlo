@@ -4,18 +4,18 @@
 [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B)
 into `models/Wan-AI/Wan2.2-TI2V-5B/`. Quantize reads a local DiT checkpoint.
 It does not download the VAE again, and it does not pack the VAE. The shared
-umT5 pack is a separate pipeline.
+umT5 pack is owned by this pipeline’s `umt5` commands (same pack as I2V).
 
 ```text
-uv run favlo --umt5_xxl setup
-uv run favlo --umt5_xxl quantize
+uv run favlo --wan22_ti2v_5b umt5 setup
+uv run favlo --wan22_ti2v_5b umt5 quantize --format wan
 uv run favlo --wan22_ti2v_5b setup
 uv run favlo --wan22_ti2v_5b quantize --weights <checkpoint>
 uv run favlo --wan22_ti2v_5b kernels
 uv run favlo --wan22_ti2v_5b smoke
 ```
 
-`favlo --umt5_xxl quantize` writes `models/google/umt5-xxl-int8` with the
+`favlo --wan22_ti2v_5b umt5 quantize` writes `models/google/umt5-xxl-int8` with the
 tokenizer inside that pack and removes the BF16 checkout. DiT `quantize`
 writes `models/Wan2.2-TI2V-5B-int8`, prints the relative RMS of each int8
 matrix, and points `parts.umt5` at that shared pack. Smoke opens that part. Those commands do not pack the encoder, and they do not open the

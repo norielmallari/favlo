@@ -2,7 +2,7 @@
 
 How to download, pack, and make a clip with `wan22_i2v`. The kernel contract is [README.md](README.md). The listener is [../serve.md](../serve.md). Pointing a client at the server is [../guides/clients.md](../guides/clients.md).
 
-The official checkpoint is [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B). The text encoder is [google/umt5-xxl](https://huggingface.co/google/umt5-xxl), packed by [../umt5-xxl/SETUP.md](../umt5-xxl/SETUP.md). Those weights are under the Apache License, Version 2.0.
+The official checkpoint is [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B). The text encoder is [google/umt5-xxl](https://huggingface.co/google/umt5-xxl), packed by this pipeline’s `umt5` commands ([../umt5_xxl/SETUP.md](../umt5_xxl/SETUP.md)). Those weights are under the Apache License, Version 2.0.
 
 ## What you need
 
@@ -31,11 +31,11 @@ Release 0.3.0 is on PyPI as the runtime under `src/favlo`. The pipelines stay in
 ## Pack the text encoder
 
 ```bash
-uv run favlo --umt5_xxl setup
-uv run favlo --umt5_xxl quantize
+uv run favlo --wan22_i2v umt5 setup
+uv run favlo --wan22_i2v umt5 quantize --format wan
 ```
 
-That writes `models/google/umt5-xxl-int8` with the tokenizer inside the pack and removes the BF16 checkout. A clip reads that directory. The steps are [../umt5-xxl/SETUP.md](../umt5-xxl/SETUP.md).
+That writes `models/google/umt5-xxl-int8` with the tokenizer inside the pack and removes the BF16 checkout. A clip reads that directory. The steps are [../umt5_xxl/SETUP.md](../umt5_xxl/SETUP.md).
 
 ## Download the VAE and the experts
 

@@ -35,7 +35,7 @@ Note topics are `prompt`, `cache`, `prefix_load`, `prefix_store`, `prefix_store_
 | `ace_step_15_turbo` | music | no | no | no | no | no |
 | `voxcpm2` | voice | no | no | no | no | no |
 | `bge_m3` | embeddings | no | no | no | no | no |
-| `umt5_xxl` | text encoder | no | no | no | no | no |
+| `umt5_xxl` (library) | text encoder pack | no | no | no | no | no |
 | `wan22_ti2v_5b` | video | no | no | no | no | no |
 
 `wan22_i2v` stage names on a `sample` or `decode` row are `compile`, `text`, `encode`, `high`, `low`, and `decode`. The job percent written onto the clip stays on the job dict. It is not a console count.

@@ -5,7 +5,7 @@ Text-to-video and image-to-video on the Metal 4.1 GPU. The weights are the
 card. The record is `models/Wan2.2-TI2V-5B-int8`. The umT5 encoder is the int8 pack named by `parts.umt5` on the registry
 row, `models/google/umt5-xxl-int8`. A clip reads that pack and does not
 open the BF16 encoder file. The tokenizer is `tokenizer.json` inside that
-pack. `favlo --umt5_xxl` writes the pack. This pipeline does not pack the
+pack. `favlo --wan22_ti2v_5b umt5` writes the pack. This pipeline does not pack the
 encoder. The VAE is the float32 `Wan2.2_VAE.pth` from that card.
 
 `handle_video` is a `MediaPipeline`. `wan22_ti2v_5b__generate_video_t2v` samples from text. `wan22_ti2v_5b__generate_video_i2v` conditions the
@@ -57,8 +57,8 @@ until that request's `close`.
 ## Commands
 
 ```text
-uv run favlo --umt5_xxl setup
-uv run favlo --umt5_xxl quantize
+uv run favlo --wan22_ti2v_5b umt5 setup
+uv run favlo --wan22_ti2v_5b umt5 quantize --format wan
 uv run favlo --wan22_ti2v_5b setup
 uv run favlo --wan22_ti2v_5b quantize --weights <checkpoint>
 uv run favlo --wan22_ti2v_5b kernels

@@ -57,7 +57,7 @@ The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z_image_tu
 
 The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google/umt5-xxl`. The steps are [wan22_i2v/SETUP.md](../wan22_i2v/SETUP.md).
 
-`favlo --umt5_xxl setup` and `quantize` write `models/google/umt5-xxl-int8` with the tokenizer inside that pack. The steps are [umt5_xxl/SETUP.md](../umt5_xxl/SETUP.md). `favlo --wan22_i2v setup` downloads the VAE and the two expert files. `quantize --int8` packs `models/Wan2.2-I2V-A14B-int8`. That folder is the served record. `quantize --high` and `--low` with `--fp8-percent 50` pack `models/Wan2.2-I2V-A14B-fp8-e50`. The default percent is 20, which writes `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, points `parts.umt5` at the shared pack, and `--high-dir` and `--low-dir` store the quantized expert directories. A clip encodes with that umT5 directory.
+`favlo --wan22_i2v umt5 setup` and `umt5 quantize` write `models/google/umt5-xxl-int8` with the tokenizer inside that pack. The steps are [umt5_xxl/SETUP.md](../umt5_xxl/SETUP.md). `favlo --wan22_i2v setup` downloads the VAE and the two expert files. `quantize --int8` packs `models/Wan2.2-I2V-A14B-int8`. That folder is the served record. `quantize --high` and `--low` with `--fp8-percent 50` pack `models/Wan2.2-I2V-A14B-fp8-e50`. The default percent is 20, which writes `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, points `parts.umt5` at the shared pack, and `--high-dir` and `--low-dir` store the quantized expert directories. A clip encodes with that umT5 directory.
 
 ## ACE-Step
 

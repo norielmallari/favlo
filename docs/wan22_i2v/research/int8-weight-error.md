@@ -19,7 +19,7 @@ Relative RMS is the RMS of the residual divided by the RMS of the BF16 matrix, s
 
 ## Command
 
-`uv run favlo --wan22_i2v quantize --int8` packs each DiT linear and prints `int8 worst` with the matrix name. A matrix already stored as int8 is skipped, so a second run of the same directory does not reprint that table. `uv run favlo --umt5_xxl quantize` packs umT5 and prints `umt5 int8 worst` with the matrix name.
+`uv run favlo --wan22_i2v quantize --int8` packs each DiT linear and prints `int8 worst` with the matrix name. A matrix already stored as int8 is skipped, so a second run of the same directory does not reprint that table. `uv run favlo --wan22_i2v umt5 quantize --format wan` packs umT5 and prints `umt5 int8 worst` with the matrix name.
 
 ## Table
 

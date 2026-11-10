@@ -99,7 +99,7 @@ A user message can include a still image. The served window stops at 131072 toke
 
 ```bash
 uv run favlo --qwen38_27b delete Qwen3.8-27B-fp4
-uv run favlo --qwen38_27b delete qwen38-27b
+uv run favlo --qwen38_27b delete qwen38_27b
 ```
 
 `delete` takes the folder name or the alias. A `:instruct` or `:thinking` suffix deletes that same model. The command removes the registry row, the packed directory under `models/`, and the BF16 checkout when that checkout is still under `models/` and no other row uses it. It also removes that record's prefix files under `~/.favlo/prefix/qwen38-27b/`. A checkout outside `models/` is left in place. Another model's directory and row stay.
