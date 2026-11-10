@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numpy as np
 
 from voxcpm2.metal41.block import silu
 from voxcpm2.metal41.fsq import quantize_bound
-from voxcpm2.metal41.metal import Session
+from voxcpm2.metal41.metal import Plane, Session
 from voxcpm2.metal41.stack import Cache, Stack
 from voxcpm2.metal41.store import Store
 
@@ -35,7 +36,10 @@ def project_patch(session: Session, store: Store, stack: Stack, patch: np.ndarra
     special = store.vector("feat_encoder.special_token").reshape(1, -1)
     sequence = np.concatenate((special, frames), axis=0)
     cache = Cache(stack.layers, stack.kv_heads, stack.head_dim)
-    hidden = stack.forward(sequence, np.arange(sequence.shape[0]), False, cache)
+    try:
+        hidden = stack.forward(sequence, np.arange(sequence.shape[0]), False, cache)
+    finally:
+        cache.release()
     return store.linear(session, "enc_to_lm_proj.weight", hidden[0], "enc_to_lm_proj.bias")
 
 
@@ -75,15 +79,24 @@ def sample_patch(
     cfg: float,
     mean_mode: bool,
     rng: np.random.Generator,
+    on_step: Any = None,
+    before_step: Any = None,
 ) -> np.ndarray:
-    """One latent patch, ``[channels, frames]``, from the swayed Euler solver."""
+    """One latent patch, ``[channels, frames]``, from the swayed Euler solver.
+
+    ``before_step`` runs before the estimates so the sample row can name the
+    step. ``on_step`` runs after that step's command buffers have finished.
+    """
     span = diffusion_schedule(steps)
+    counted = len(span) - 1
     time = float(span[0])
     dt = float(span[0] - span[1])
     skip = zero_init_steps(span)
     latent = rng.standard_normal((int(cond.shape[0]), int(cond.shape[1]))).astype(np.float32)
     blank = np.zeros_like(mu)
     for step in range(1, len(span)):
+        if before_step is not None:
+            before_step(step, counted)
         if step <= skip:
             velocity = np.zeros_like(latent)
         else:
@@ -95,6 +108,8 @@ def sample_patch(
         time = time - dt
         if step < len(span) - 1:
             dt = time - float(span[step + 1])
+        if on_step is not None:
+            on_step()
     return latent
 
 
@@ -121,40 +136,101 @@ def _estimate(
     dt: float,
     mean_mode: bool,
 ) -> np.ndarray:
-    frames = store.linear(
-        session,
-        "feat_decoder.estimator.in_proj.weight",
-        latent.T,
-        "feat_decoder.estimator.in_proj.bias",
-    )
-    context = store.linear(
-        session,
-        "feat_decoder.estimator.cond_proj.weight",
-        cond.T,
-        "feat_decoder.estimator.cond_proj.bias",
-    )
-    delta = dt if mean_mode else 0.0
-    token = _mlp(session, store, "time_mlp", time) + _mlp(session, store, "delta_time_mlp", delta)
-    token = token.reshape(1, -1)
-    tokens = np.concatenate((mu.reshape(-1, frames.shape[-1]), token, context, frames), axis=0)
-    cache = Cache(stack.layers, stack.kv_heads, stack.head_dim)
-    hidden = stack.forward(tokens, np.arange(tokens.shape[0]), False, cache)
-    kept = hidden[context.shape[0] + mu.reshape(-1, frames.shape[-1]).shape[0] + 1 :]
-    out = store.linear(
-        session,
-        "feat_decoder.estimator.out_proj.weight",
+    """One diffusion estimate. The projections and the stack share one command buffer."""
+    frames_in = np.ascontiguousarray(latent.T, dtype=np.float32)
+    cond_in = np.ascontiguousarray(cond.T, dtype=np.float32)
+    mu_in = np.ascontiguousarray(mu, dtype=np.float32).reshape(-1, stack.hidden)
+    n_mu = int(mu_in.shape[0])
+    n_cond = int(cond_in.shape[0])
+    n_frames = int(frames_in.shape[0])
+    seq = n_mu + 1 + n_cond + n_frames
+    delta = float(dt) if mean_mode else 0.0
+    cache = Cache(stack.layers, stack.kv_heads, stack.head_dim, capacity=seq)
+    stack.prepare(seq, seq)
+    lat = session.load(frames_in)
+    cond_plane = session.load(cond_in)
+    time_plane = session.load(_sinusoid(float(time)))
+    delta_plane = session.load(_sinusoid(delta))
+    mu_plane = session.load(mu_in)
+    frames = session.plane(n_frames, stack.hidden)
+    context = session.plane(n_cond, stack.hidden)
+    token = session.plane(1, stack.hidden)
+    hid = session.plane(1, stack.hidden)
+    act = session.plane(1, stack.hidden)
+    tokens = session.plane(seq, stack.hidden)
+    kept = session.plane(n_frames, stack.hidden)
+    out = session.plane(n_frames, int(frames_in.shape[1]))
+    owned = [
+        lat,
+        cond_plane,
+        time_plane,
+        delta_plane,
+        mu_plane,
+        frames,
+        context,
+        token,
+        hid,
+        act,
+        tokens,
         kept,
-        "feat_decoder.estimator.out_proj.bias",
+        out,
+    ]
+    handles: list[object] = []
+    try:
+        _project(session, store, "feat_decoder.estimator.in_proj", lat, frames)
+        _project(session, store, "feat_decoder.estimator.cond_proj", cond_plane, context)
+        _time_mlp(session, store, "time_mlp", time_plane, token, hid, act, add=False)
+        _time_mlp(session, store, "delta_time_mlp", delta_plane, token, hid, act, add=True)
+        session.copy(mu_plane, tokens, n_mu, 0, 0)
+        session.copy(token, tokens, 1, 0, n_mu)
+        session.copy(context, tokens, n_cond, 0, n_mu + 1)
+        session.copy(frames, tokens, n_frames, 0, n_mu + 1 + n_cond)
+        hidden = stack.encode(tokens, np.arange(seq), False, cache, owned, handles)
+        session.copy(hidden, kept, n_frames, n_mu + 1 + n_cond, 0)
+        _project(session, store, "feat_decoder.estimator.out_proj", kept, out)
+        result = session.read(out)
+    finally:
+        session.release_all(owned, handles)
+        cache.release()
+    return result.T
+
+
+def _project(session: Session, store: Store, name: str, src: Plane, dst: Plane) -> None:
+    session.project(
+        src,
+        store.weight(session, f"{name}.weight"),
+        store.bias_handle(session, f"{name}.bias"),
+        dst,
     )
-    return out.T
 
 
-def _mlp(session: Session, store: Store, name: str, value: float) -> np.ndarray:
+def _time_mlp(
+    session: Session,
+    store: Store,
+    name: str,
+    src: Plane,
+    dst: Plane,
+    hid: Plane,
+    act: Plane,
+    *,
+    add: bool,
+) -> None:
     stem = f"feat_decoder.estimator.{name}"
-    hidden = silu(
-        store.linear(session, f"{stem}.linear_1.weight", _sinusoid(value), f"{stem}.linear_1.bias")
+    session.project(
+        src,
+        store.weight(session, f"{stem}.linear_1.weight"),
+        store.bias_handle(session, f"{stem}.linear_1.bias"),
+        hid,
     )
-    return store.linear(session, f"{stem}.linear_2.weight", hidden, f"{stem}.linear_2.bias")
+    session.silu(hid, act)
+    session.project(
+        act,
+        store.weight(session, f"{stem}.linear_2.weight"),
+        store.bias_handle(session, f"{stem}.linear_2.bias"),
+        hid if add else dst,
+    )
+    if add:
+        session.add(dst, hid, dst)
 
 
 def _sinusoid(value: float, dim: int = 1024, scale: float = 1000.0) -> np.ndarray:

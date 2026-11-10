@@ -24,7 +24,7 @@ def test_a_44k_clip_fails() -> None:
 def test_smoke_note_names_the_model_and_rate() -> None:
     note = json.loads((repo_root() / "docs" / "voxcpm2" / "smoke.json").read_text(encoding="utf-8"))
     assert isinstance(note["input"], str) and note["input"].strip()
-    assert isinstance(note["instructions"], str)
+    assert isinstance(note["persona"], str) and note["persona"].strip()
     assert note["model"] == "VoxCPM2"
     assert note["sample_rate"] == 48000
     assert float(note["max_seconds"]) > 0

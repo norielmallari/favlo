@@ -26,6 +26,8 @@ class Store:
         self._origin = 8 + count
         self._resident: dict[str, Resident] = {}
         self._vector: dict[str, np.ndarray] = {}
+        self._bias: dict[str, object] = {}
+        self._gain: dict[str, object] = {}
 
     def close(self) -> None:
         self._map.close()
@@ -49,6 +51,28 @@ class Store:
         """Project ``hidden`` with a resident half weight."""
         shift = None if bias is None else self.vector(bias)
         return session.linear(hidden, self._matrix(session, name), shift)
+
+    def weight(self, session: Session, name: str) -> Resident:
+        """The resident half matrix for a device linear."""
+        return self._matrix(session, name)
+
+    def bias_handle(self, session: Session, name: str) -> object:
+        """A resident float32 bias. The device linear adds it after the product."""
+        cached = self._bias.get(name)
+        if cached is None:
+            raw = np.ascontiguousarray(self.vector(name), dtype=np.float32).tobytes()
+            cached = session.upload(raw)
+            self._bias[name] = cached
+        return cached
+
+    def gain(self, session: Session, name: str) -> object:
+        """A resident half RMSNorm weight."""
+        cached = self._gain.get(name)
+        if cached is None:
+            raw = np.ascontiguousarray(self.vector(name), dtype=np.float16).tobytes()
+            cached = session.upload(raw)
+            self._gain[name] = cached
+        return cached
 
     def embed(self, tokens: np.ndarray) -> np.ndarray:
         """Gather token rows. The embedding scale is 1 when ``use_mup`` is false."""

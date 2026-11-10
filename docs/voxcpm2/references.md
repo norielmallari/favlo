@@ -16,4 +16,4 @@ Kazemnejad, Amirhossein, Inkit Padhi, Karthikeyan Natesan Ramamurthy, Payel Das,
 
 OpenBMB. [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2). Apache-2.0. The checkout `config.json` is the width table.
 
-Apple. *Explore Metal 4 games.* [WWDC26 session 330](https://developer.apple.com/videos/play/wwdc2026/330/). `matmul2d` and the tensor types. The language-model plane is `half` in and float out. The AudioVAE convolutions are float32.
+Apple. *Explore Metal 4 games.* [WWDC26 session 330](https://developer.apple.com/videos/play/wwdc2026/330/). `matmul2d` and the tensor types. The language-model plane is `half` in and float out. A language-model step and one diffusion estimate each run as one command buffer, with float32 values between kernels. The AudioVAE convolutions are float32.

@@ -217,3 +217,124 @@ kernel void causal_transpose1d(
     }
     destination[oc * tout + t] = acc;
 }
+
+// Float row to a packed half tile. Cells outside the logical matrix are zero.
+kernel void pack_half(
+    device const float* src [[buffer(0)]],
+    device half* dst [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& inner [[buffer(3)]],
+    constant uint& rows_pad [[buffer(4)]],
+    constant uint& inner_pad [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= rows_pad || gid.x >= inner_pad) {
+        return;
+    }
+    float value = 0.0f;
+    if (gid.y < rows && gid.x < inner) {
+        value = src[gid.y * inner + gid.x];
+    }
+    dst[gid.y * inner_pad + gid.x] = half(value);
+}
+
+// Crop the matmul tile and add the bias. ``stride`` is the padded column count.
+kernel void bias_pack(
+    device const float* src [[buffer(0)]],
+    device const float* bias [[buffer(1)]],
+    device float* dst [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& stride [[buffer(5)]],
+    constant uint& has_bias [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= rows || gid.x >= cols) {
+        return;
+    }
+    float value = src[gid.y * stride + gid.x];
+    if (has_bias != 0) {
+        value += bias[gid.x];
+    }
+    dst[gid.y * cols + gid.x] = value;
+}
+
+kernel void cast_f32_f16(
+    device const float* src [[buffer(0)]],
+    device half* dst [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    dst[gid] = half(src[gid]);
+}
+
+kernel void cast_f16_f32(
+    device const half* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    dst[gid] = float(src[gid]);
+}
+
+kernel void silu_f32(
+    device const float* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    float value = src[gid];
+    dst[gid] = value / (1.0f + exp(-value));
+}
+
+kernel void swiglu_f32(
+    device const float* gate [[buffer(0)]],
+    device const float* up [[buffer(1)]],
+    device float* dst [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    float value = gate[gid];
+    dst[gid] = value / (1.0f + exp(-value)) * up[gid];
+}
+
+kernel void add_f32(
+    device const float* left [[buffer(0)]],
+    device const float* right [[buffer(1)]],
+    device float* dst [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) {
+        return;
+    }
+    dst[gid] = left[gid] + right[gid];
+}
+
+// Copy ``rows`` of ``cols`` into ``dst`` at ``dst_row``. The cache append uses this.
+kernel void copy_rows(
+    device const float* src [[buffer(0)]],
+    device float* dst [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant uint& src_row [[buffer(4)]],
+    constant uint& dst_row [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.y >= rows || gid.x >= cols) {
+        return;
+    }
+    dst[(dst_row + gid.y) * cols + gid.x] = src[(src_row + gid.y) * cols + gid.x];
+}

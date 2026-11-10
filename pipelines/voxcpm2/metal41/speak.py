@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sys
+import time
 from typing import Any
 
 import numpy as np
@@ -11,6 +11,7 @@ from voxcpm2.metal41.block import rope_factors, rope_scale
 from voxcpm2.metal41.config import ModelConfig
 from voxcpm2.metal41.dit import condition, fuse, project_patch, quantize, sample_patch, stop_token
 from voxcpm2.metal41.metal import Session
+from voxcpm2.metal41.progress import VoiceProgress, patch_limit, sample_total
 from voxcpm2.metal41.stack import Cache, Stack
 from voxcpm2.metal41.store import Store
 from voxcpm2.metal41.tokenize import LineTokenizer
@@ -29,13 +30,14 @@ def generate(
     min_len: int,
     steps: int,
     seed: int | None,
+    progress: VoiceProgress,
     stop: Any = None,
 ) -> np.ndarray:
     """Speak ``text`` and return one float32 waveform at the decoder rate."""
-    if max_len < 1:
-        message = "max_len must be at least 1"
-        raise ValueError(message)
     tokens = tokenizer.encode(text)
+    limit = patch_limit(int(tokens.shape[0]) - 1, max_len, config.max_length)
+    progress.open(sample_total(limit, steps))
+    progress.stage("text")
     hidden = store.embed(tokens)
     base = _tower(
         session,
@@ -90,54 +92,72 @@ def generate(
         rope=True,
     )
     positions = np.arange(hidden.shape[0], dtype=np.int32)
-    base_cache = Cache(base.layers, base.kv_heads, base.head_dim)
-    res_cache = Cache(residual.layers, residual.kv_heads, residual.head_dim)
-    lm = base.forward(hidden, positions, True, base_cache)
-    fused = fuse(session, store, lm, np.zeros_like(lm))
-    res = residual.forward(fused, positions, True, res_cache)
-    lm_hidden = lm[-1]
-    res_hidden = res[-1]
-    cond = np.zeros((config.feat_dim, config.patch_size), dtype=np.float32)
-    rng = np.random.default_rng() if seed is None else np.random.default_rng(seed)
-    patches: list[np.ndarray] = []
-    for index in range(max_len):
-        if stop is not None:
-            stop()
-        sys.stderr.write(f"voxcpm2 patch {index + 1}\n")
-        sys.stderr.flush()
-        mu = condition(session, store, lm_hidden, res_hidden)
-        pred = sample_patch(
-            session,
-            store,
-            dit,
-            mu,
-            cond,
-            steps=steps,
-            cfg=config.cfg_rate,
-            mean_mode=config.mean_mode,
-            rng=rng,
-        )
-        patches.append(pred)
-        cond = pred
-        if index > min_len and stop_token(session, store, lm_hidden) == 1:
-            break
-        feat = project_patch(session, store, encoder, pred)
-        lm_hidden = quantize(
-            session,
-            store,
-            base.forward(feat, np.array([base_cache.k[0].shape[0]]), True, base_cache),
-            config.fsq_scale,
-        )
-        res_hidden = residual.forward(
-            fuse(session, store, lm_hidden, feat),
-            np.array([res_cache.k[0].shape[0]]),
-            True,
-            res_cache,
-        )
-    sys.stderr.write("voxcpm2 decode\n")
-    sys.stderr.flush()
-    latent = np.concatenate(patches, axis=1)
-    return decoder.decode(latent)
+    room = int(hidden.shape[0]) + limit
+    base_cache = Cache(base.layers, base.kv_heads, base.head_dim, capacity=room)
+    res_cache = Cache(residual.layers, residual.kv_heads, residual.head_dim, capacity=room)
+    try:
+        lm = base.forward(hidden, positions, True, base_cache)
+        fused = fuse(session, store, lm, np.zeros_like(lm))
+        res = residual.forward(fused, positions, True, res_cache)
+        lm_hidden = lm[-1]
+        res_hidden = res[-1]
+        cond = np.zeros((config.feat_dim, config.patch_size), dtype=np.float32)
+        rng = np.random.default_rng() if seed is None else np.random.default_rng(seed)
+        patches: list[np.ndarray] = []
+        for index in range(limit):
+            if stop is not None:
+                stop()
+            patch = index + 1
+            progress.stage(f"patch {patch}/{limit}")
+            started = time.perf_counter()
+            mu = condition(session, store, lm_hidden, res_hidden)
+
+            def begin(step: int, total: int, patch: int = patch) -> None:
+                progress.stage(f"patch {patch}/{limit} step {step}/{total}")
+
+            pred = sample_patch(
+                session,
+                store,
+                dit,
+                mu,
+                cond,
+                steps=steps,
+                cfg=config.cfg_rate,
+                mean_mode=config.mean_mode,
+                rng=rng,
+                on_step=progress.advance,
+                before_step=begin,
+            )
+            progress.stage(f"patch {patch}/{limit}")
+            progress.note(f"patch {patch}/{limit} {time.perf_counter() - started:.2f}s")
+            patches.append(pred)
+            cond = pred
+            if index > min_len and stop_token(session, store, lm_hidden) == 1:
+                break
+            feat = project_patch(session, store, encoder, pred)
+            lm_hidden = quantize(
+                session,
+                store,
+                base.forward(feat, np.array([base_cache.length]), True, base_cache),
+                config.fsq_scale,
+            )
+            res_hidden = residual.forward(
+                fuse(session, store, lm_hidden, feat),
+                np.array([res_cache.length]),
+                True,
+                res_cache,
+            )
+        progress.patches = len(patches)
+        progress.stage("decode")
+        started = time.perf_counter()
+        latent = np.concatenate(patches, axis=1)
+        wave = decoder.decode(latent)
+        progress.decode_s = time.perf_counter() - started
+        progress.advance()
+        return wave
+    finally:
+        base_cache.release()
+        res_cache.release()
 
 
 def _tower(

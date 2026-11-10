@@ -21,7 +21,14 @@ def test_basic_line_writes_a_48k_wav(tmp_path: Path) -> None:
         pytest.skip("checkout missing")
     runtime = open_runtime(_CHECKOUT, owner="voxcpm2:smoke")
     try:
-        samples = runtime.speak("Hello.", max_len=3, min_len=2, steps=10, seed=0)
+        samples = runtime.speak(
+            "Hello.",
+            persona="Clear adult voice.",
+            max_len=3,
+            min_len=2,
+            steps=10,
+            seed=0,
+        )
         rate = runtime.config.out_sample_rate
         hop = math.prod(runtime.config.decoder_rates)
         frames = 3 * runtime.config.patch_size

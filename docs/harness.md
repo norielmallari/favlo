@@ -225,7 +225,7 @@ Calls the published tool for the request in `docs/<id>/<card>` (default `long.js
 python -m harness.voice_smoke_agent --pipeline <id> --tool generate_voice
 ```
 
-`--tool` may be repeated. The agent registers those published names through `MCPStreamableHTTPTool` and calls the first one with the model, line, and instructions in `docs/<id>/smoke.json`. Reads the WAV into `artifacts/voice-smoke-agent.wav`. Exit 0 means mono at the note's sample rate, RMS above the silence floor, and duration inside `max_seconds`. Uses the listener session. Not part of `pytest`. `tests/test_voice_smoke_agent.py` checks the same format rule without a listener.
+`--tool` may be repeated. The agent registers those published names through `MCPStreamableHTTPTool` and calls the first one with the model, line, and persona in `docs/<id>/smoke.json`. Reads the WAV into `artifacts/voice-smoke-agent.wav`. Exit 0 means mono at the note's sample rate, RMS above the silence floor, and duration inside `max_seconds`. Uses the listener session. Not part of `pytest`. `tests/test_voice_smoke_agent.py` checks the same format rule without a listener.
 
 ## Media preemption
 

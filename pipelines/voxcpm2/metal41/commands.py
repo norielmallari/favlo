@@ -9,11 +9,13 @@ from pathlib import Path
 
 from voxcpm2.metal41.checkpoint import summarize, tensor_header
 from voxcpm2.metal41.checks import (
+    activation_matches,
     attention_matches,
     conv_matches,
     linear_matches,
     rmsnorm_matches,
     rope_matches,
+    stack_matches,
 )
 from voxcpm2.metal41.fetch import checkout, download
 from voxcpm2.metal41.sampling import CONTEXT_LENGTH
@@ -29,8 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     speak = sub.add_parser("speak", help="speak one line to a wav file")
     speak.add_argument("--text", required=True)
     speak.add_argument("--out", type=Path, required=True)
-    speak.add_argument("--instructions", default="")
-    speak.add_argument("--max-len", type=int, default=48)
+    speak.add_argument("--persona", required=True)
+    speak.add_argument("--max-len", type=int, default=None)
     speak.add_argument("--seed", type=int, default=None)
     models = sub.add_parser("models", help="list or edit the flavor registry")
     models_sub = models.add_subparsers(dest="models_command")
@@ -49,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "kernels":
         return _kernels()
     if args.command == "speak":
-        return _speak(args.text, args.out, args.instructions, args.max_len, args.seed)
+        return _speak(args.text, args.out, args.persona, args.max_len, args.seed)
     if args.command == "models":
         return _models(args)
     return 2
@@ -76,17 +78,25 @@ def _kernels() -> int:
     print("gqa_attention")
     conv_matches()
     print("causal_conv1d")
+    activation_matches()
+    print("silu_f32")
+    print("swiglu_f32")
+    print("add_f32")
+    print("copy_rows")
+    print("bias_pack")
+    stack_matches()
+    print("stack")
     return 0
 
 
-def _speak(text: str, dest: Path, instructions: str, max_len: int, seed: int | None) -> int:
+def _speak(text: str, dest: Path, persona: str, max_len: int | None, seed: int | None) -> int:
     from favlo.cli import repo_root
     from voxcpm2.metal41.audio import encode_wav
     from voxcpm2.metal41.runtime import open_runtime
 
     runtime = open_runtime(checkout(repo_root()), owner="voxcpm2:speak")
     try:
-        samples = runtime.speak(text, instructions=instructions, max_len=max_len, seed=seed)
+        samples = runtime.speak(text, persona=persona, max_len=max_len, seed=seed)
     finally:
         runtime.close()
     payload = encode_wav(samples, runtime.config.out_sample_rate)

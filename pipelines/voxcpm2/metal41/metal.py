@@ -20,6 +20,14 @@ _NAMES = (
     "gqa_attention",
     "causal_conv1d",
     "causal_transpose1d",
+    "pack_half",
+    "bias_pack",
+    "cast_f32_f16",
+    "cast_f16_f32",
+    "silu_f32",
+    "swiglu_f32",
+    "add_f32",
+    "copy_rows",
 )
 
 
@@ -36,6 +44,15 @@ class Resident:
         self.cols = cols
         self.rows_pad = rows_pad
         self.cols_pad = cols_pad
+
+
+class Plane:
+    """A contiguous float32 matrix on the device. ``rows`` by ``cols``."""
+
+    def __init__(self, handle: object, rows: int, cols: int) -> None:
+        self.handle = handle
+        self.rows = rows
+        self.cols = cols
 
 
 class Session:
@@ -68,10 +85,29 @@ class Session:
             self._pipes[name] = pipeline
         width = int(self._pipes["matmul_f16"].threadExecutionWidth())
         self._matmul_threads = (width * 4, 1, 1)
+        self._enc = None
+        self._cmd = None
+        self._half_a = None
+        self._half_b = None
+        self._half_count = 0
+        self._wide = None
+        self._wide_count = 0
+        self._attn = None
+        self._attn_count = 0
 
     def close(self) -> None:
-        memory.sweep(self._owner)
-        self._queue = None
+        try:
+            self.flush()
+        finally:
+            memory.sweep(self._owner)
+            self._queue = None
+            self._half_a = None
+            self._half_b = None
+            self._wide = None
+            self._attn = None
+            self._half_count = 0
+            self._wide_count = 0
+            self._attn_count = 0
 
     def upload(self, raw: bytes) -> object:
         return memory.upload(raw, owner=self._owner)
@@ -332,6 +368,289 @@ class Session:
             memory.release(dest)
         return np.frombuffer(raw, dtype=np.float32).copy().reshape(out.shape)
 
+    def plane(self, rows: int, cols: int, *, zero: bool = False) -> Plane:
+        """A float32 matrix. The caller releases it after the command buffer finishes."""
+        if rows < 1 or cols < 1:
+            message = f"a device tensor is {rows} by {cols}"
+            raise ValueError(message)
+        handle = memory.allocate(int(rows) * int(cols) * 4, owner=self._owner, zero=zero)
+        return Plane(handle, int(rows), int(cols))
+
+    def load(self, values: np.ndarray) -> Plane:
+        """Upload a float32 matrix. A vector becomes one row."""
+        data = np.asarray(values, dtype=np.float32)
+        if data.ndim == 1:
+            data = data.reshape(1, -1)
+        if data.ndim != 2:
+            message = f"a device tensor has rank {data.ndim}"
+            raise ValueError(message)
+        data = np.ascontiguousarray(data)
+        plane = self.plane(int(data.shape[0]), int(data.shape[1]))
+        memory.store(plane.handle, 0, data.tobytes())
+        return plane
+
+    def read(self, plane: Plane) -> np.ndarray:
+        """Finish the open command buffer and copy the matrix back."""
+        self.flush()
+        raw = memory.load(plane.handle, 0, plane.rows * plane.cols * 4)
+        return np.frombuffer(raw, dtype=np.float32).copy().reshape(plane.rows, plane.cols)
+
+    def release_all(self, planes: list[Plane], handles: list[object] | None = None) -> None:
+        """Finish any open command buffer, then release these tensors."""
+        self.flush()
+        for plane in planes:
+            memory.release(plane.handle)
+        for handle in handles or ():
+            memory.release(handle)
+
+    def prepare_linear(self, rows: int, inner: int, outer: int, attn: int) -> None:
+        """Size the scratch for a stack step. Call this before the command buffer opens."""
+        rows_pad = _pad(rows, TILE_M)
+        self._grow_half(rows_pad * _pad(inner, K_ALIGN))
+        self._grow_wide(rows_pad * _pad(outer, TILE_N))
+        self._grow_attn(max(int(attn), 1))
+
+    def project(self, src: Plane, weight: Resident, bias: object | None, dst: Plane) -> None:
+        """``src @ weight.T`` plus an optional bias, encoded on the open command buffer."""
+        rows, inner = src.rows, src.cols
+        if weight.cols != inner or dst.rows != rows or dst.cols != weight.rows:
+            message = (
+                f"project {rows}x{inner} -> {dst.rows}x{dst.cols} "
+                f"does not match weight {weight.rows}x{weight.cols}"
+            )
+            raise ValueError(message)
+        rows_pad = _pad(rows, TILE_M)
+        if (
+            self._half_a is None
+            or self._wide is None
+            or self._half_count < rows_pad * weight.cols_pad
+            or self._wide_count < rows_pad * weight.rows_pad
+        ):
+            message = "the matmul scratch is short of this linear"
+            raise RuntimeError(message)
+        self._encode(
+            "pack_half",
+            [src.handle, self._half_a],
+            [_u(rows), _u(inner), _u(rows_pad), _u(weight.cols_pad)],
+            _groups(weight.cols_pad, rows_pad, 1, 16, 16),
+            (16, 16, 1),
+        )
+        self._encode(
+            "matmul_f16",
+            [self._half_a, weight.handle, self._wide],
+            [_u(rows_pad), _u(weight.rows_pad), _u(weight.cols_pad)],
+            (weight.rows_pad // TILE_N, rows_pad // TILE_M, 1),
+            self._matmul_threads,
+        )
+        self._encode(
+            "bias_pack",
+            [self._wide, dst.handle if bias is None else bias, dst.handle],
+            [_u(rows), _u(dst.cols), _u(weight.rows_pad), _u(0 if bias is None else 1)],
+            _groups(dst.cols, rows, 1, 16, 16),
+            (16, 16, 1),
+        )
+
+    def norm(self, src: Plane, gain: object, dst: Plane, eps: float) -> None:
+        """RMSNorm. The row is cast to half, normalized, and stored as float32."""
+        _same(src, dst, "rmsnorm")
+        count = src.rows * src.cols
+        if self._half_a is None or self._half_b is None or self._half_count < count:
+            message = "the half scratch is short of this norm"
+            raise RuntimeError(message)
+        groups, threads = _count(count)
+        self._encode("cast_f32_f16", [src.handle, self._half_a], [_u(count)], groups, threads)
+        self._encode(
+            "rmsnorm_row",
+            [self._half_a, gain, self._half_b],
+            [_u(src.cols), _f(eps)],
+            (src.rows, 1, 1),
+            (1, 1, 1),
+        )
+        self._encode("cast_f16_f32", [self._half_b, dst.handle], [_u(count)], groups, threads)
+
+    def silu(self, src: Plane, dst: Plane) -> None:
+        _same(src, dst, "silu")
+        self._map("silu_f32", [src.handle, dst.handle], src.rows * src.cols)
+
+    def swiglu(self, gate: Plane, up: Plane, dst: Plane) -> None:
+        _same(gate, up, "swiglu")
+        _same(gate, dst, "swiglu")
+        self._map("swiglu_f32", [gate.handle, up.handle, dst.handle], gate.rows * gate.cols)
+
+    def add(self, left: Plane, right: Plane, dst: Plane) -> None:
+        _same(left, right, "add")
+        _same(left, dst, "add")
+        self._map("add_f32", [left.handle, right.handle, dst.handle], left.rows * left.cols)
+
+    def copy(self, src: Plane, dst: Plane, rows: int, src_row: int, dst_row: int) -> None:
+        """Copy ``rows`` from ``src_row`` into ``dst`` at ``dst_row``."""
+        if src.cols != dst.cols:
+            message = f"copy width is {src.cols} and {dst.cols}"
+            raise ValueError(message)
+        if rows < 1 or src_row < 0 or dst_row < 0:
+            message = "copy rows start below zero"
+            raise ValueError(message)
+        if src_row + rows > src.rows or dst_row + rows > dst.rows:
+            message = "copy rows do not fit"
+            raise ValueError(message)
+        self._encode(
+            "copy_rows",
+            [src.handle, dst.handle],
+            [_u(rows), _u(src.cols), _u(src_row), _u(dst_row)],
+            _groups(src.cols, rows, 1, 16, 16),
+            (16, 16, 1),
+        )
+
+    def rotate(self, hidden: Plane, cos: object, sin: object, heads: int, dim: int) -> None:
+        """In-place rotate-half. ``hidden`` is ``[seq, heads * dim]``."""
+        if hidden.cols != heads * dim:
+            message = f"rope width is {hidden.cols}, the heads cover {heads * dim}"
+            raise ValueError(message)
+        if dim % 2:
+            message = f"rope dim {dim} is odd"
+            raise ValueError(message)
+        self._encode(
+            "rope_half",
+            [hidden.handle, cos, sin, hidden.handle],
+            [_u(heads), _u(dim)],
+            _groups(dim // 2, heads, hidden.rows, 8, 4),
+            (8, 4, 1),
+        )
+
+    def attend(
+        self,
+        query: Plane,
+        key: Plane,
+        value: Plane,
+        dest: Plane,
+        *,
+        kv_len: int,
+        heads: int,
+        kv_heads: int,
+        dim: int,
+        causal: bool,
+    ) -> None:
+        """Grouped-query attention. ``kv_len`` is the filled prefix, not the allocation."""
+        if query.cols != heads * dim or dest.rows != query.rows or dest.cols != query.cols:
+            message = f"attention query is {query.rows}x{query.cols}"
+            raise ValueError(message)
+        if key.cols != kv_heads * dim or value.cols != key.cols:
+            message = f"attention cache width is {key.cols}"
+            raise ValueError(message)
+        if kv_len < 1 or kv_len > key.rows or kv_len > value.rows:
+            message = f"attention reads {kv_len} keys from {key.rows}"
+            raise ValueError(message)
+        need = query.rows * heads * kv_len
+        if self._attn is None or self._attn_count < need:
+            message = f"attention scratch holds {self._attn_count}, this step needs {need}"
+            raise RuntimeError(message)
+        self._encode(
+            "gqa_attention",
+            [query.handle, key.handle, value.handle, dest.handle, self._attn],
+            [
+                _u(query.rows),
+                _u(kv_len),
+                _u(heads),
+                _u(kv_heads),
+                _u(dim),
+                _u(1 if causal else 0),
+            ],
+            (heads, query.rows, 1),
+            (1, 1, 1),
+        )
+
+    def flush(self) -> None:
+        """Wait for the open command buffer. A closed session has nothing to wait for."""
+        encoder = self._enc
+        command = self._cmd
+        if encoder is None or command is None:
+            return
+        self._enc = None
+        self._cmd = None
+        status = 0
+        error = None
+        try:
+            encoder.endEncoding()
+            command.commit()
+            command.waitUntilCompleted()
+            status = int(command.status())
+            error = command.error()
+        finally:
+            memory.retire(command)
+        if status != 4:
+            message = f"command status {status} {error}"
+            raise RuntimeError(message)
+
+    def _map(self, name: str, handles: list[object], count: int) -> None:
+        groups, threads = _count(count)
+        self._encode(name, handles, [_u(count)], groups, threads)
+
+    def _grow_half(self, count: int) -> None:
+        if self._half_count >= count:
+            return
+        if self._enc is not None:
+            message = "a scratch buffer grew while a command buffer was open"
+            raise RuntimeError(message)
+        for slot in ("_half_a", "_half_b"):
+            old = getattr(self, slot)
+            if old is not None:
+                memory.release(old)
+            setattr(self, slot, memory.allocate(count * 2, owner=self._owner, zero=False))
+        self._half_count = count
+
+    def _grow_wide(self, count: int) -> None:
+        self._grow("_wide", "_wide_count", count, 4)
+
+    def _grow_attn(self, count: int) -> None:
+        self._grow("_attn", "_attn_count", count, 4)
+
+    def _grow(self, slot: str, count_slot: str, count: int, width: int) -> None:
+        if getattr(self, count_slot) >= count:
+            return
+        if self._enc is not None:
+            message = "a scratch buffer grew while a command buffer was open"
+            raise RuntimeError(message)
+        old = getattr(self, slot)
+        if old is not None:
+            memory.release(old)
+        setattr(self, slot, memory.allocate(count * width, owner=self._owner, zero=False))
+        setattr(self, count_slot, count)
+
+    def _encoder(self) -> object:
+        if self._enc is None:
+            self._cmd = memory.command_buffer(self._queue)
+            self._enc = self._cmd.computeCommandEncoder()
+        return self._enc
+
+    def _encode(
+        self,
+        name: str,
+        handles: list[object],
+        constants: list[bytes],
+        groups: tuple[int, int, int],
+        threads: tuple[int, int, int],
+    ) -> None:
+        self._bind(self._encoder(), name, handles, constants, groups, threads)
+
+    def _bind(
+        self,
+        encoder: object,
+        name: str,
+        handles: list[object],
+        constants: list[bytes],
+        groups: tuple[int, int, int],
+        threads: tuple[int, int, int],
+    ) -> None:
+        encoder.setComputePipelineState_(self._pipes[name])
+        for index, handle in enumerate(handles):
+            memory.bind(encoder, index, handle, 0)
+        for offset, packed in enumerate(constants):
+            encoder.setBytes_length_atIndex_(packed, len(packed), len(handles) + offset)
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+            self._metal.MTLSize(int(groups[0]), int(groups[1]), int(groups[2])),
+            self._metal.MTLSize(int(threads[0]), int(threads[1]), int(threads[2])),
+        )
+
     def _dispatch(
         self,
         name: str,
@@ -342,17 +661,12 @@ class Session:
         *,
         read: tuple[object, int],
     ) -> bytes:
+        if self._enc is not None:
+            message = f"{name} started while a command buffer was open"
+            raise RuntimeError(message)
         command = memory.command_buffer(self._queue)
         encoder = command.computeCommandEncoder()
-        encoder.setComputePipelineState_(self._pipes[name])
-        for index, handle in enumerate(handles):
-            memory.bind(encoder, index, handle, 0)
-        for offset, packed in enumerate(constants):
-            encoder.setBytes_length_atIndex_(packed, len(packed), len(handles) + offset)
-        encoder.dispatchThreadgroups_threadsPerThreadgroup_(
-            self._metal.MTLSize(int(groups[0]), int(groups[1]), int(groups[2])),
-            self._metal.MTLSize(int(threads[0]), int(threads[1]), int(threads[2])),
-        )
+        self._bind(encoder, name, handles, constants, groups, threads)
         encoder.endEncoding()
         command.commit()
         command.waitUntilCompleted()
@@ -371,3 +685,22 @@ class Session:
 
 def _groups(x: int, y: int, z: int, tx: int, ty: int) -> tuple[int, int, int]:
     return ((int(x) + tx - 1) // tx, (int(y) + ty - 1) // ty, int(z))
+
+
+def _count(items: int) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    width = 256
+    return ((int(items) + width - 1) // width, 1, 1), (width, 1, 1)
+
+
+def _same(src: Plane, dst: Plane, name: str) -> None:
+    if src.rows != dst.rows or src.cols != dst.cols:
+        message = f"{name} shape is {src.rows}x{src.cols} and {dst.rows}x{dst.cols}"
+        raise ValueError(message)
+
+
+def _u(value: int) -> bytes:
+    return struct.pack("<I", int(value))
+
+
+def _f(value: float) -> bytes:
+    return struct.pack("<f", float(value))

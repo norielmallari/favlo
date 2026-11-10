@@ -162,9 +162,9 @@ def probes(root: Path, still: Path) -> list[Probe]:
         "model": voice_model,
         "response_format": "wav",
     }
-    instructions = voice.get("instructions") or ""
-    if instructions:
-        voice_body["instructions"] = instructions
+    persona = voice.get("persona")
+    if isinstance(persona, str) and persona.strip():
+        voice_body["persona"] = persona.strip()
     return [
         Probe(
             "image",

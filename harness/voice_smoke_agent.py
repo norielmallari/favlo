@@ -126,9 +126,9 @@ def main(argv: list[str] | None = None) -> int:
     folder = args.model or note.get("model")
     if isinstance(folder, str) and folder:
         body["model"] = folder
-    instructions = note.get("instructions")
-    if isinstance(instructions, str) and instructions:
-        body["instructions"] = instructions
+    persona = note.get("persona")
+    if isinstance(persona, str) and persona.strip():
+        body["persona"] = persona.strip()
     rate = int(note["sample_rate"])
     max_seconds = float(note["max_seconds"])
     listener = None
@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _ask(tool: str, body: dict[str, Any]) -> str:
     lines = [f"Call {tool} once with these arguments, then stop."]
-    for key in ("input", "instructions", "response_format"):
+    for key in ("input", "persona", "response_format"):
         if key in body:
             lines.append(f"{key}: {body[key]}")
     return "\n".join(lines)

@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
-
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
 
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.media_pipeline import MediaTool, MediaCall, MediaPipeline, MediaRequestError, checkpoint
+from favlo.media_pipeline import (
+    MediaCall,
+    MediaPaused,
+    MediaPipeline,
+    MediaRequestError,
+    MediaTool,
+    checkpoint,
+)
 from favlo.memory import memory
 from voxcpm2.metal41.audio import encode_wav
 from voxcpm2.metal41.config import ModelConfig, load_config
 from voxcpm2.metal41.metal import Session
+from voxcpm2.metal41.progress import PATCH_CAP, VoiceProgress
 from voxcpm2.metal41.speak import generate
 from voxcpm2.metal41.store import Store
 from voxcpm2.metal41.text import style_line
@@ -87,32 +95,54 @@ class Runtime:
         self,
         text: str,
         *,
-        instructions: str = "",
-        max_len: int = 48,
+        persona: str,
+        max_len: int | None = None,
         min_len: int = 2,
         steps: int = 10,
         seed: int | None = None,
         stop: Any = None,
+        job: dict[str, Any] | None = None,
     ) -> np.ndarray:
-        """One waveform. ``instructions`` is a parenthetical style prefix."""
-        line = style_line(text, instructions).strip()
-        if not line:
+        """One waveform. ``persona`` is a parenthetical phrase in front of ``text``."""
+        spoken = text.strip()
+        if not spoken:
             message = "input is required"
             raise ValueError(message)
+        line = style_line(spoken, persona)
         session, store, decoder, tokenizer = self._open()
-        return generate(
-            session,
-            store,
-            decoder,
-            tokenizer,
-            self.config,
-            line,
-            max_len=max_len,
-            min_len=min_len,
-            steps=steps,
-            seed=seed,
-            stop=stop,
-        )
+        progress = VoiceProgress(self.console, job)
+        try:
+            samples = generate(
+                session,
+                store,
+                decoder,
+                tokenizer,
+                self.config,
+                line,
+                max_len=PATCH_CAP if max_len is None else max_len,
+                min_len=min_len,
+                steps=steps,
+                seed=seed,
+                progress=progress,
+                stop=stop,
+            )
+        except MediaPaused as paused:
+            label = "sample paused" if paused.reason == "preempt" else "sample cancelled"
+            progress.close(label)
+            raise
+        except Exception:
+            progress.close(progress.summary(failed=True))
+            raise
+        progress.complete()
+        summary = progress.summary()
+        spent = time.perf_counter() - progress.started
+        try:
+            progress.note(
+                f"speak {spent:.2f}s patches {progress.patches} decode {progress.decode_s:.2f}s"
+            )
+        finally:
+            progress.close(summary)
+        return samples
 
     def _open(self) -> tuple[Session, Store, Decoder, LineTokenizer]:
         ready = (
@@ -206,7 +236,7 @@ def handle_chat(
 
 class VoiceRequest(NamedTuple):
     text: str
-    instructions: str
+    persona: str
     output_format: str
 
 
@@ -247,23 +277,21 @@ class Pipeline(MediaPipeline):
         fmt = body.get("response_format") or "mp3"
         if fmt not in {"mp3", "wav", "flac"}:
             raise MediaRequestError("response_format must be mp3, wav, or flac", "response_format")
-        instructions = body.get("instructions")
-        if instructions is None:
-            instructions = ""
-        if not isinstance(instructions, str):
-            raise MediaRequestError("instructions must be a string", "instructions")
-        return VoiceRequest(text, instructions, fmt)
+        persona = body.get("persona")
+        if not isinstance(persona, str) or not persona.strip():
+            raise MediaRequestError("persona is required", "persona")
+        return VoiceRequest(text.strip(), persona.strip(), fmt)
 
     def describe(self, request: VoiceRequest) -> dict[str, Any]:
         return {"response_format": request.output_format}
 
     def generate(self, runtime: Runtime, request: VoiceRequest, hold: Any, job: dict[str, Any], stop: Any, call: MediaCall):
-        del hold, job, call
+        del hold, call
 
         def gate() -> None:
             checkpoint(stop, None)
 
-        return runtime.speak(request.text, instructions=request.instructions, stop=gate)
+        return runtime.speak(request.text, persona=request.persona, stop=gate, job=job)
 
     def pack(self, runtime: Runtime, request: VoiceRequest, result: Any, job: dict[str, Any], home: Path | None, table: dict[str, Any], call: MediaCall):
         del call
@@ -301,11 +329,14 @@ class Pipeline(MediaPipeline):
                     "type": "object",
                     "properties": {
                         "input": {"type": "string", "description": "Line to speak."},
+                        "persona": {
+                            "type": "string",
+                            "description": "Joined in front of the line.",
+                        },
                         "voice": {"type": "string", "description": "Empty speaks with no reference."},
-                        "instructions": {"type": "string", "description": "Style prefix."},
                         "response_format": {"type": "string", "description": "mp3, wav, or flac."},
                     },
-                    "required": ["input"],
+                    "required": ["input", "persona"],
                 },
                 handler="handle_voice",
                 result="audio",
