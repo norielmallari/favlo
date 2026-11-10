@@ -196,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model",
         default=None,
-        help="registry folder; omit for the pipeline's first folder",
+        help="registry folder; omit for the pipeline_default row, else the first folder",
     )
     args = parser.parse_args(argv)
     root = args.root.resolve()

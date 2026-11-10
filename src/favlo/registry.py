@@ -687,6 +687,47 @@ _media_misses: set[str] = set()
 _MEDIA_KINDS = ("image", "music", "voice")
 
 
+def pipeline_default(pipeline: str, root: Path | None = None) -> str:
+    """The folder marked ``pipeline_default`` for ``pipeline``, or empty.
+
+    Registry order wins when more than one row for that pipeline is marked.
+    """
+    if not isinstance(pipeline, str) or not pipeline:
+        return ""
+    data = load_registry(root)
+    for folder, entry in data["models"].items():
+        if not isinstance(entry, dict) or entry.get("pipeline") != pipeline:
+            continue
+        if entry.get("pipeline_default") is True:
+            return folder
+    return ""
+
+
+def set_pipeline_default(folder: str, *, enabled: bool = True, root: Path | None = None) -> str:
+    """Mark ``folder`` as the pipeline default, or clear that mark.
+
+    Enabling it clears the mark on every other row of the same pipeline.
+    """
+    data = load_registry(root)
+    entry = data["models"].get(folder)
+    if not isinstance(entry, dict):
+        message = f"{folder} is not registered"
+        raise ValueError(message)
+    pipeline = entry.get("pipeline")
+    if enabled:
+        for name, other in data["models"].items():
+            if not isinstance(other, dict) or other.get("pipeline") != pipeline:
+                continue
+            if name == folder:
+                other["pipeline_default"] = True
+            else:
+                other.pop("pipeline_default", None)
+    else:
+        entry.pop("pipeline_default", None)
+    save_registry(data, root)
+    return folder
+
+
 def media_default(kind: str, root: Path | None = None) -> str:
     """The folder id for one media kind when a request omits ``model``.
 

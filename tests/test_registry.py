@@ -367,6 +367,36 @@ def test_model_mtp_is_stored_on_the_row(tmp_path) -> None:
     assert kept == "packed mtp off depth 4"
 
 
+def test_pipeline_default_marks_one_row_and_keeps_other_pipelines(tmp_path) -> None:
+    from favlo import registry
+    from favlo.media_catalog import PipelineRecord, default_folder
+
+    root = tmp_path
+    (root / "models").mkdir()
+    registry.save_registry(
+        {
+            "version": 1,
+            "models": {
+                "base": {"pipeline": "example-model", "runtime": "metal41", "pipeline_default": True},
+                "fast": {"pipeline": "example-model", "runtime": "metal41", "pipeline_default": True},
+                "other": {"pipeline": "other", "runtime": "metal41", "pipeline_default": True},
+            },
+        },
+        root,
+    )
+    assert registry.pipeline_default("example-model", root) == "base"
+    assert registry.set_pipeline_default("fast", root=root) == "fast"
+    data = registry.load_registry(root)
+    assert data["models"]["fast"]["pipeline_default"] is True
+    assert "pipeline_default" not in data["models"]["base"]
+    assert data["models"]["other"]["pipeline_default"] is True
+    record = PipelineRecord("example-model", ("base", "fast"), ())
+    assert default_folder(record, None, root) == "fast"
+    registry.set_pipeline_default("fast", enabled=False, root=root)
+    assert registry.pipeline_default("example-model", root) == ""
+    assert default_folder(record, None, root) == "base"
+
+
 def test_the_first_image_row_fills_an_empty_media_default(monkeypatch) -> None:
     from types import SimpleNamespace
 

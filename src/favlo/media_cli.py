@@ -114,10 +114,11 @@ def _value(raw: str) -> Any:
 def _default_model(pipeline: str, kind: str) -> str:
     """The registry ``media`` row for this kind when that folder is this pipeline.
 
-    A missing row, or a row for another pipeline, uses the first folder registered
-    for ``pipeline``.
+    A missing row, or a row for another pipeline, uses the row marked
+    ``pipeline_default``. When none is marked, the first folder registered
+    for ``pipeline`` is used.
     """
-    from favlo.registry import load_registry, media_default
+    from favlo.registry import load_registry, media_default, pipeline_default
 
     named = media_default(kind)
     data = load_registry()
@@ -128,6 +129,11 @@ def _default_model(pipeline: str, kind: str) -> str:
             entry = models[found]
             if isinstance(entry, dict) and entry.get("pipeline") == pipeline:
                 return _public(entry, found)
+    marked = pipeline_default(pipeline)
+    if marked:
+        entry = models.get(marked)
+        if isinstance(entry, dict) and entry.get("pipeline") == pipeline:
+            return _public(entry, marked)
     for folder, entry in models.items():
         if isinstance(entry, dict) and entry.get("pipeline") == pipeline:
             return _public(entry, folder)

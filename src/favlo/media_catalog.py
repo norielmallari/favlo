@@ -70,9 +70,15 @@ class Catalog(NamedTuple):
 
 def _resolvable_folder(record: PipelineRecord) -> str:
     """A model id ``resolve`` accepts. The pipeline id is the fallback."""
-    from favlo.registry import resolve
+    from favlo.registry import pipeline_default, resolve
 
-    for candidate in (*record.folders, record.pipeline):
+    marked = pipeline_default(record.pipeline)
+    candidates = (marked, *record.folders, record.pipeline) if marked else (*record.folders, record.pipeline)
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
         try:
             resolve(candidate)
         except LookupError:
@@ -194,8 +200,16 @@ def build_catalog(
 
 
 def default_folder(record: PipelineRecord, spec: ToolSpec, root: Any = None) -> str:
-    """The folder a call uses when ``model`` is omitted. The pipeline is the model."""
-    del spec, root
+    """The folder a call uses when ``model`` is omitted.
+
+    A row marked ``pipeline_default`` wins. Otherwise the first registered folder.
+    """
+    del spec
+    from favlo.registry import pipeline_default
+
+    named = pipeline_default(record.pipeline, root)
+    if named and named in record.folders:
+        return named
     return record.folders[0]
 
 
