@@ -15,8 +15,8 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from favlo.images import load_image, store_source, sweep_images
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
-from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
+from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError, checkpoint
+from z_image_turbo.hold import ImageHold, ImageJob
 from z_image_turbo.png import REPORTED_QUALITY, pack_rgb, write_png
 from z_image_turbo.schedule import STEPS
 from z_image_turbo.scratch import MAX_EDGE
@@ -102,21 +102,19 @@ class Pipeline(MediaPipeline):
         call.image = image
         try:
             while image.index < 1:
-                reason = stop()
-                if reason == "cancel":
-                    raise MediaPaused("cancel", image)
+                checkpoint(stop, None, preempt=False)
                 pixels, timing = _draw(runtime, request, image, stop)
-                reason = stop()
-                if reason == "cancel":
-                    raise MediaPaused("cancel", image)
-                if reason == "preempt":
+                checkpoint(stop, None, preempt=False)
+                if callable(stop) and stop() == "preempt":
                     image.hold = _decoded(pixels, timing)
-                    raise MediaPaused("preempt", image)
+                    checkpoint(stop, image)
                 image.images.append(_store(pixels, request.quality, home))
                 image.timings.append(timing)
                 image.index += 1
                 image.hold = None
-        except ImagePaused as paused:
+        except MediaPaused as paused:
+            if isinstance(paused.hold, ImageJob):
+                raise
             image.hold = paused.hold
             raise MediaPaused(paused.reason, image) from paused
         except (TypeError, ValueError) as exc:

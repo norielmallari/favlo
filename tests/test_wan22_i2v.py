@@ -11,7 +11,7 @@ import pytest
 
 from wan22_i2v.chat import VideoRequestError, _seconds_label, handle_video, video_fields
 from wan22_i2v.formats import block_winners, pack_linear, relative_error, restore_linear
-from wan22_i2v.hold import ClipHold, ClipPaused, reload_quietly
+from wan22_i2v.hold import ClipHold, reload_quietly
 from wan22_i2v.latent import condition_volume, unpatchify
 from wan22_i2v.png import decode_png, encode_png
 from wan22_i2v.progress import ClipProgress, clip_label, stage_shares
@@ -44,6 +44,8 @@ from wan22_i2v.text import tokenizer_path
 from wan22_i2v.umt5_pack import shared_pack_dir
 from wan22_i2v.vae import vae_path
 from wan22_i2v.video import avi_meta, write_avi, write_mp4
+
+from favlo.media_pipeline import MediaPaused
 
 
 def test_setup_writes_each_repo_under_models() -> None:
@@ -746,7 +748,7 @@ class _Pausing:
         progress.advance()
         self.state["preempt"].set()
         reason = progress.interrupt()
-        raise ClipPaused(reason, ClipHold(stage="text", done=progress.done))
+        raise MediaPaused(reason, ClipHold(stage="text", done=progress.done))
 
 
 def test_preempt_pauses_and_the_same_job_resumes(tmp_path) -> None:
@@ -796,7 +798,7 @@ def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:
         def _pause(self, progress, hold) -> None:
             hold.done = progress.done
             self.saved = hold
-            raise ClipPaused("preempt", hold)
+            raise MediaPaused("preempt", hold)
 
     host = _Host()
     progress = ClipProgress(console=None, clip="clip")
@@ -820,7 +822,7 @@ def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:
     )
     try:
         Runtime._load_stop(*args, quiet=False)(False)
-    except ClipPaused:
+    except MediaPaused:
         pass
     assert host.saved is not None
     assert host.saved.stage == "step"
@@ -829,7 +831,7 @@ def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:
     assert host.saved.done == 4
     try:
         Runtime._load_stop(*args, quiet=True)(True)
-    except ClipPaused:
+    except MediaPaused:
         pass
     assert host.saved.expert == "high_noise"
     assert host.saved.step == 1
@@ -848,7 +850,7 @@ def test_a_committed_layer_checkpoints_before_the_step_updates(monkeypatch) -> N
         def _pause(self, progress, hold) -> None:
             hold.done = progress.done
             self.saved = hold
-            raise ClipPaused("preempt", hold)
+            raise MediaPaused("preempt", hold)
 
     host = _Host()
     progress = ClipProgress(console=None, clip="clip")
@@ -860,7 +862,7 @@ def test_a_committed_layer_checkpoints_before_the_step_updates(monkeypatch) -> N
     progress.done = 9
     try:
         Runtime._after_commit(host, progress, hold)
-    except ClipPaused:
+    except MediaPaused:
         pass
     assert host.saved is not None
     assert host.saved.stage == "step"

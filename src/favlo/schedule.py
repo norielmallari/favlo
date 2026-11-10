@@ -2,13 +2,15 @@
 
 Two queues. The foreground queue is embeddings, then chats that have not
 started. The media queue runs only when the foreground queue is empty.
-A chat preempts media at its next safe point and leaves ``preempt`` set
-until the chat queue has drained. After a chat releases, a short debounce
-keeps media from admitting so the next model call (the reply to a tool
-result) can reuse the resident language model instead of unloading it for
-media and loading it again. An embedding does not set ``preempt`` and does
-not preempt a chat that already holds the GPU. ``flush`` drops every
-waiter. The request that holds admission stays until it releases.
+Which kinds preempt, drop a disconnected waiter, and debounce live on
+``LanguagePipeline``, ``EmbeddingsPipeline``, and ``MediaPipeline``. This
+module runs the queues. A chat preempts media at its next safe point and
+leaves ``preempt`` set until the chat queue has drained. After a chat
+releases, a short debounce keeps media from admitting so the next model
+call can reuse the resident language model. An embedding does not set
+``preempt`` and does not preempt a chat that already holds the GPU.
+``flush`` drops every waiter. The request that holds admission stays until
+it releases.
 """
 
 from __future__ import annotations
@@ -16,12 +18,59 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from typing import Any
 
-_FOREGROUND = frozenset({"embed", "chat", "responses"})
-_KINDS = _FOREGROUND | {"media"}
-# Gap between a chat release and the next /v1/responses that carries the
-# tool result. Media must not win that race and unload the language model.
 _CHAT_DEBOUNCE_SECONDS = 1.0
+_QUEUE_KINDS = frozenset({"embed", "chat", "responses", "media"})
+
+
+def seam_for(kind: str) -> type:
+    """The admission class for an HTTP or queue kind."""
+    from favlo.embeddings_pipeline import EmbeddingsPipeline
+    from favlo.language_pipeline import LanguagePipeline
+    from favlo.media_pipeline import MediaPipeline
+
+    if kind in LanguagePipeline.admission:
+        return LanguagePipeline
+    if kind in EmbeddingsPipeline.admission:
+        return EmbeddingsPipeline
+    if kind in MediaPipeline.admission:
+        return MediaPipeline
+    message = f"unknown queue kind {kind}"
+    raise ValueError(message)
+
+
+def disconnect_event(kind: str, flag: Any) -> Any:
+    """The cancel passed to ``acquire`` when this seam drops a disconnected waiter."""
+    if not isinstance(flag, threading.Event):
+        return None
+    try:
+        seam = seam_for(kind)
+    except ValueError:
+        return None
+    if not seam.drop_if_disconnected:
+        return None
+    return flag
+
+
+def _foreground(kind: str) -> bool:
+    """True for a language or embeddings kind. Media waits behind both."""
+    try:
+        seam = seam_for(kind)
+    except ValueError:
+        return False
+    from favlo.media_pipeline import MediaPipeline
+
+    return seam is not MediaPipeline
+
+
+def _queue_is_media(kind: str) -> bool:
+    from favlo.media_pipeline import MediaPipeline
+
+    try:
+        return seam_for(kind) is MediaPipeline
+    except ValueError:
+        return False
 
 
 class ClientClosed(Exception):
@@ -68,7 +117,7 @@ class Scheduler:
         ``cancel`` drops the ticket while it is still waiting. A chat whose
         client has gone does not take the GPU.
         """
-        if kind not in _KINDS:
+        if kind not in _QUEUE_KINDS:
             message = f"unknown queue kind {kind}"
             raise ValueError(message)
         ticket = _Ticket(kind)
@@ -97,7 +146,7 @@ class Scheduler:
                 raise ClientClosed()
             self._queue(kind).popleft()
             self._running = ticket
-            if ticket.kind in {"chat", "responses"}:
+            if seam_for(ticket.kind).debounce_after_release:
                 self._chat_debounce_until = 0.0
             self._sync_preempt()
         except BaseException:
@@ -123,7 +172,7 @@ class Scheduler:
         with self._cond:
             if self._running is ticket:
                 self._running = None
-                if ticket.kind in {"chat", "responses"} and self._chat_debounce_seconds > 0:
+                if seam_for(ticket.kind).debounce_after_release and self._chat_debounce_seconds > 0:
                     self._chat_debounce_until = time.monotonic() + self._chat_debounce_seconds
             self._sync_preempt()
             self._cond.notify_all()
@@ -173,19 +222,20 @@ class Scheduler:
         with self._cond:
             if self._embeds or self._chats:
                 return True
-            if self._running is not None and self._running.kind in _FOREGROUND:
+            if self._running is not None and _foreground(self._running.kind):
                 return True
             return self._debounce_active()
 
     def _queue(self, kind: str) -> deque[_Ticket]:
-        if kind == "embed":
+        from favlo.embeddings_pipeline import EmbeddingsPipeline
+        from favlo.language_pipeline import LanguagePipeline
+
+        seam = seam_for(kind)
+        if seam is EmbeddingsPipeline:
             return self._embeds
-        if kind in {"chat", "responses"}:
+        if seam is LanguagePipeline:
             return self._chats
-        if kind == "media":
-            return self._media
-        message = f"unknown queue kind {kind}"
-        raise ValueError(message)
+        return self._media
 
     def _is_next(self, ticket: _Ticket) -> bool:
         if self._running is not None:
@@ -223,8 +273,16 @@ class Scheduler:
         self._cond.notify_all()
 
     def _sync_preempt(self) -> None:
-        media = self._running is not None and self._running.kind == "media"
-        if media and self._chats:
+        from favlo.embeddings_pipeline import EmbeddingsPipeline
+        from favlo.language_pipeline import LanguagePipeline
+
+        media = self._running is not None and _queue_is_media(self._running.kind)
+        waiting = False
+        if media and self._chats and LanguagePipeline.preempts_media:
+            waiting = True
+        if media and self._embeds and EmbeddingsPipeline.preempts_media:
+            waiting = True
+        if waiting:
             self.preempt.set()
             return
         self.preempt.clear()

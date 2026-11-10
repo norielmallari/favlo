@@ -712,7 +712,13 @@ def _open_embed_for(body: dict[str, Any], state: dict[str, Any], args: Any) -> O
 
 def open_for(kind: str, body: dict[str, Any], state: dict[str, Any], args: Any) -> Opened:
     """Open the runtime that serves ``kind``. A different resident waits, then switches."""
-    if kind == "embed" and getattr(args, "lazy", False):
+    from favlo.schedule import seam_for
+
+    try:
+        beside = seam_for(kind).resident == "beside"
+    except ValueError:
+        beside = False
+    if beside and getattr(args, "lazy", False):
         return _open_embed_for(body, state, args)
     selection = bind_request(body, state, args, kind=kind)
     return Opened(selection, state.get("runtime"), state.get("module"))

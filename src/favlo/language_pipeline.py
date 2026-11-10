@@ -14,9 +14,18 @@ from favlo.pipeline import ClientClosed, Pipeline
 
 
 class LanguagePipeline(Pipeline):
-    """Disconnect handling around one pipeline's own Responses completion."""
+    """Disconnect handling around one pipeline's own Responses completion.
+
+    ``admission`` is both HTTP kinds that share the chat deque. The scheduler
+    reads the flags below. A package does not.
+    """
 
     kind = "responses"
+    admission = frozenset({"chat", "responses"})
+    preempts_media = True
+    drop_if_disconnected = True
+    debounce_after_release = True
+    resident = "exclusive"
 
     def handle(
         self,
@@ -57,8 +66,14 @@ class LanguagePipeline(Pipeline):
             self.on_finish(runtime, selection, complete=completed)
 
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
-        """Work that already sits outside the handler's try."""
-        del runtime, reply, selection
+        """Work that already sits outside the handler's try.
+
+        Assigns ``runtime._stop`` from the reply. A subclass that adds work
+        calls ``super``. Gemma 4 keeps a bool and does not call this.
+        """
+        del selection
+        if runtime is not None:
+            runtime._stop = getattr(reply, "stopped", None)
 
     def prepare(
         self,

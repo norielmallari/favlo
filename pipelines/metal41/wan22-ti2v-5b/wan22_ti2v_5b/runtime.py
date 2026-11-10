@@ -162,29 +162,21 @@ class Pipeline(MediaPipeline):
 
     def generate(self, runtime, request, hold, job, stop, call: MediaCall):
         kept = hold if isinstance(hold, ClipHold) else None
-
-        def gate(pause: bool = False) -> bool:
-            reason = stop()
-            if reason == "cancel":
-                return True
-            return bool(pause and reason == "preempt")
-
-        payload, paused = runtime.clip.sample(
-            request,
-            video_id=job["id"],
-            home=call.home,
-            videos=call.table,
-            hold=kept,
-            stop=gate,
-        )
-        if paused is not None:
-            job["progress"] = min(99, int(100 * paused.step / 4))
-            job["size"] = request.size
-            job["seconds"] = request.seconds
-            raise MediaPaused("preempt", paused)
-        if isinstance(payload, dict) and payload.get("status") == "cancelled":
-            raise MediaPaused("cancel", None)
-        return payload
+        try:
+            return runtime.clip.sample(
+                request,
+                video_id=job["id"],
+                home=call.home,
+                videos=call.table,
+                hold=kept,
+                stop=stop,
+            )
+        except MediaPaused as paused:
+            if isinstance(paused.hold, ClipHold):
+                job["progress"] = min(99, int(100 * paused.hold.step / 4))
+                job["size"] = request.size
+                job["seconds"] = request.seconds
+            raise
 
     def pack(self, runtime, request, result, job, home, table, call):
         del runtime, request, job, home, table, call

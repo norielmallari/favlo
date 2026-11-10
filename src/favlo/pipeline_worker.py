@@ -843,7 +843,7 @@ def _call(
         control["disconnect"].set()
     if control["halt"].is_set():
         _halt_runtime()
-    state = _child_state(message, control)
+    state = _child_state(message, control, message.get("kind") if isinstance(message.get("kind"), str) else "")
     reply = _ChildReply(proto, control["disconnect"])
     args = SimpleNamespace(max_memory=max_memory, console_ui=console, shutdown=None, lazy=True)
     call(reply, runtime, body, selection, args, state)
@@ -864,7 +864,7 @@ def _call(
     )
 
 
-def _child_state(message: dict[str, Any], control: dict[str, threading.Event]) -> dict[str, Any]:
+def _child_state(message: dict[str, Any], control: dict[str, threading.Event], kind: str) -> dict[str, Any]:
     state: dict[str, Any] = {
         "preempt": control["preempt"],
         "cancel": control["cancel"],
@@ -882,11 +882,22 @@ def _child_state(message: dict[str, Any], control: dict[str, threading.Event]) -
             if isinstance(bucket, dict):
                 state[key] = bucket
     holds = message.get("holds")
-    if isinstance(holds, dict):
+    if isinstance(holds, dict) and _loads_media_hold(kind):
         for key, value in holds.items():
             if key in _HOLDS and isinstance(value, str) and value:
                 state[key] = _load_hold(Path(value))
     return state
+
+
+def _loads_media_hold(kind: str) -> bool:
+    """A language or embeddings call does not unpickle a media checkpoint."""
+    from favlo.media_pipeline import MediaPipeline
+    from favlo.schedule import seam_for
+
+    try:
+        return seam_for(kind) is MediaPipeline
+    except ValueError:
+        return False
 
 
 def _export_holds(state: dict[str, Any]) -> dict[str, str | None]:

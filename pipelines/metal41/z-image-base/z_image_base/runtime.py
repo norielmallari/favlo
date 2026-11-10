@@ -11,17 +11,18 @@ from typing import Any
 
 import numpy as np
 import objc
+
+from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
+from favlo.media_pipeline import MediaPaused, checkpoint
+from favlo.memory import memory
 from z_image.dit import velocity
 from z_image.formats import TILE_M, pad_to
-from z_image.hold import ImageHold, ImagePaused, ask
+from z_image.hold import ImageHold
 from z_image.metal import Gpu
 from z_image.progress import ImageProgress, LoadProgress, sample_total
 from z_image.record import Plane, load, weight_bytes
 from z_image.scratch import DIT_HIDDEN, MAX_CAPTION, MAX_EDGE, Scratch, scratch_bytes
 from z_image.text import embed_caption, prompt_ids
-
-from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.memory import memory
 from z_image_base.guide import applies, normalization_limit
 from z_image_base.schedule import MAX_STEPS, sigmas
 
@@ -232,7 +233,7 @@ class Runtime:
                 cfg_truncation=cfg_truncation,
                 cfg_normalization=cfg_normalization,
             )
-        except ImagePaused as paused:
+        except MediaPaused as paused:
             label = "sample paused" if paused.reason == "preempt" else "sample cancelled"
             progress.close(label)
             raise
@@ -305,7 +306,7 @@ class Runtime:
                     )
             self.gpu.reclaim()
             caption_s = time.perf_counter() - caption_started
-            if ask(stop) == "cancel":
+            if callable(stop) and stop() == "cancel":
                 self._stop(
                     stop,
                     stage="step" if done_steps else "caption",
@@ -369,7 +370,9 @@ class Runtime:
             self.gpu.reclaim()
             times.append(time.perf_counter() - started)
             progress.note(f"step {index + 1}/{steps} {times[-1]:.2f}s")
-            reason = ask(stop)
+            reason = stop() if callable(stop) else None
+            if reason not in {"cancel", "preempt"}:
+                reason = None
             if reason == "cancel":
                 self._stop(
                     stop,
@@ -409,7 +412,7 @@ class Runtime:
             pixels = _decode_image(self, latent_h, latent_w, progress.advance)
         self.gpu.reclaim()
         vae_s = time.perf_counter() - vae_started
-        if ask(stop):
+        if callable(stop) and stop() in {"cancel", "preempt"}:
             self._stop(
                 stop,
                 stage="decode",
@@ -450,12 +453,9 @@ class Runtime:
         pixels: np.ndarray | None = None,
         vae_s: float = 0.0,
     ) -> None:
-        reason = ask(stop)
-        if reason is None:
-            return
         kept = None if latent is None else np.array(latent, copy=True, dtype=np.float32)
-        raise ImagePaused(
-            reason,
+        checkpoint(
+            stop,
             ImageHold(
                 stage=stage,
                 step=step,

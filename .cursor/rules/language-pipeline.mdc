@@ -38,7 +38,7 @@ Wrong: read `store` or `previous_response_id` inside a pipeline, call `remember`
 
 Right: `present` builds the transcript, the pipeline encodes that `input`, and `finish_turn` keeps the Response.
 
-`on_open` is the work that already sits outside the try. qwen36 and qwen38-27b reset `_halted` and set `runtime._stop` there. Flash Next only calls `open_request` there. `prepare` is inside the outer try and outside the disconnect try. Only Flash Next uses it, for the tool fields and the sampler. `on_finish` keeps that pipeline's current order and always runs after `prepare`. Hooks are called directly. Do not swallow a hook exception.
+`on_open` is the work that already sits outside the try. The base method assigns `runtime._stop` from `reply.stopped`. qwen36, qwen38-27b, and qwen35-4b call `super` and still reset `_halted`. qwen36 still calls `open_request` after that. Gemma 4 keeps a bool on the stream thread and does not call `super`. `prepare` is inside the outer try and outside the disconnect try. Only Flash Next uses it, for the tool fields and the sampler. `on_finish` keeps that pipeline's current order and always runs after `prepare`. Hooks are called directly. Do not swallow a hook exception.
 
 A new abstract method on `LanguagePipeline` updates every served language subclass in that same change. A new abstract method on `Pipeline` updates every subclass of every seam.
 

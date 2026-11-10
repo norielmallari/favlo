@@ -9,14 +9,14 @@ from typing import Any
 from tokenizers import Tokenizer
 
 from ace_step_15_turbo.graph import generate
-from ace_step_15_turbo.hold import ClipHold, ClipPaused
+from ace_step_15_turbo.hold import ClipHold
 from ace_step_15_turbo.metal import Gpu
 from ace_step_15_turbo.record import load, weight_bytes
 from ace_step_15_turbo.request import MusicRequest, parse_music
 from ace_step_15_turbo.schedule import HOP, LYRIC_LIMIT, STEPS, TEXT_LIMIT, latent_frames
 from ace_step_15_turbo.tiles import tile_frames
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError
+from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError, checkpoint
 from favlo.memory import memory
 
 _UNITS = 28 + 8 + 4 + 32 * STEPS + 7
@@ -109,9 +109,7 @@ class Pipeline(MediaPipeline):
             wav = kept.wav
         else:
             wav = runtime.generate(request, progress, kept)
-        reason = stop()
-        if reason:
-            raise ClipPaused(reason, ClipHold(stage="encode", wav=wav, done=progress.done))
+        checkpoint(stop, ClipHold(stage="encode", wav=wav, done=progress.done))
         return wav
 
     def pack(

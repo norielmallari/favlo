@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from ace_step_15_turbo.graph import _boundary_device, generate
-from ace_step_15_turbo.hold import ClipHold, ClipPaused
+from ace_step_15_turbo.hold import ClipHold
 from ace_step_15_turbo.pack import dequant_fp4, dequant_fp8, pack_fp4, pack_fp8, promote_count, promoted_ids
 from ace_step_15_turbo.pcm import wav_bytes, wav_info
 from ace_step_15_turbo.request import parse_music
@@ -27,6 +27,7 @@ from ace_step_15_turbo.schedule import (
     timestep_schedule,
 )
 from ace_step_15_turbo.tiles import dependency, plan, tile_frames
+from favlo.media_pipeline import MediaPaused
 from favlo.music import music_dir, store_wav
 
 
@@ -325,7 +326,7 @@ def test_a_preempt_reads_the_finished_text() -> None:
             return "preempt"
 
     gpu = _Gpu()
-    with pytest.raises(ClipPaused) as caught:
+    with pytest.raises(MediaPaused) as caught:
         _boundary_device(gpu, _Ask(), "text", text=(object(), (2, 4)))
     assert gpu.waited
     assert caught.value.hold.stage == "text"
@@ -347,10 +348,10 @@ def test_cancel_does_not_keep_the_text() -> None:
         def interrupt(self) -> str:
             return "cancel"
 
-    with pytest.raises(ClipPaused) as caught:
+    with pytest.raises(MediaPaused) as caught:
         _boundary_device(_Gpu(), _Ask(), "text", text=(object(), (2, 4)))
     assert caught.value.reason == "cancel"
-    assert caught.value.hold.text is None
+    assert caught.value.hold is None
 
 
 class _Flag:
@@ -392,7 +393,7 @@ class _Pausing:
             return wav_bytes(np.zeros((2, 8), dtype=np.float32))
         progress("text")
         self.state["preempt"].set()
-        raise ClipPaused("preempt", ClipHold(stage="text", text=np.zeros((1, 4), dtype=np.float32), done=progress.done))
+        raise MediaPaused("preempt", ClipHold(stage="text", text=np.zeros((1, 4), dtype=np.float32), done=progress.done))
 
 
 def _body(prompt: str = "solo piano") -> dict[str, object]:
@@ -440,7 +441,7 @@ def test_halt_stops_the_clip_like_cancel(tmp_path) -> None:
     def generate(fields: object, progress: object, hold: ClipHold | None = None) -> bytes:
         del fields, hold
         reason = progress.interrupt()
-        raise ClipPaused(str(reason), ClipHold(stage="start"))
+        raise MediaPaused(str(reason), ClipHold(stage="start"))
 
     runtime.generate = generate
     reply = _Reply()
@@ -456,7 +457,7 @@ def test_cancel_discards_the_music_hold(tmp_path) -> None:
 
     def generate(fields: object, progress: object, hold: ClipHold | None = None) -> bytes:
         del fields, progress, hold
-        raise ClipPaused("cancel", ClipHold(stage="text", text=np.zeros((1, 4), dtype=np.float32)))
+        raise MediaPaused("cancel", ClipHold(stage="text", text=np.zeros((1, 4), dtype=np.float32)))
 
     runtime.generate = generate
     state["cancel"].set()

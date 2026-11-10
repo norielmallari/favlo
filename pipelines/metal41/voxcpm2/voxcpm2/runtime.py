@@ -8,7 +8,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError
+from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError, checkpoint
 from favlo.memory import memory
 from voxcpm2.audio import encode_wav
 from voxcpm2.config import ModelConfig, load_config
@@ -259,9 +259,7 @@ class Pipeline(MediaPipeline):
         del hold, job, call
 
         def gate() -> None:
-            reason = stop()
-            if reason:
-                raise MediaPaused(reason, None)
+            checkpoint(stop, None)
 
         return runtime.speak(request.text, instructions=request.instructions, stop=gate)
 

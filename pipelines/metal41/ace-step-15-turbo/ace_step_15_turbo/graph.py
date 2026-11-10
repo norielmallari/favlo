@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from ace_step_15_turbo.hold import ClipHold, ClipPaused, interrupt
+from ace_step_15_turbo.hold import ClipHold
 from ace_step_15_turbo.pcm import wav_bytes
 from ace_step_15_turbo.record import Plane, plane
 from ace_step_15_turbo.schedule import (
@@ -21,6 +21,8 @@ from ace_step_15_turbo.schedule import (
     timestep_schedule,
 )
 from ace_step_15_turbo.tiles import plan
+
+from favlo.media_pipeline import checkpoint
 
 HEAD_DIM = 128
 SLIDING = 128
@@ -48,14 +50,13 @@ def generate(
 
     ``hold`` is a finished prefix. ``reached`` is stage order, so those stages
     are not run again. A reached stage with no host array is an error. A
-    preempt or cancel at a boundary raises ``ClipPaused``.
+    preempt or cancel at a boundary raises ``MediaPaused``.
     """
     if hold is None:
         found = getattr(progress, "hold", None)
         if isinstance(found, ClipHold):
             hold = found
-    if interrupt(progress) == "cancel":
-        raise ClipPaused("cancel", ClipHold(stage="start"))
+    checkpoint(_ask(progress), None, preempt=False)
     frames = latent_frames(seconds)
     if frames % 2 != 0:
         frames += 1
@@ -230,30 +231,39 @@ def _array(hold: ClipHold | None, stage: str, name: str, label: str) -> np.ndarr
     return array
 
 
+def _ask(progress: Any) -> Any:
+    found = getattr(progress, "interrupt", None)
+    return found if callable(found) else None
+
+
 def _pause(progress: Progress | None, hold: ClipHold) -> None:
     """Stop when the listener asked. Cancel keeps no checkpoint."""
-    reason = interrupt(progress)
-    if reason is None:
-        return
+    ask = _ask(progress)
+    reason = ask() if callable(ask) else None
     if reason == "cancel":
-        raise ClipPaused("cancel", ClipHold(stage="start"))
+        checkpoint(ask, None, preempt=False)
+        return
+    if reason != "preempt":
+        return
     hold.done = _done(progress)
-    raise ClipPaused(reason, hold)
+    checkpoint(ask, hold)
 
 
 def _boundary_device(gpu: Any, progress: Progress | None, stage: str, step: int = 0, **named: tuple[Any, tuple[int, ...]]) -> None:
     """Copy the finished device buffers, then stop when the listener asked."""
-    reason = interrupt(progress)
+    ask = _ask(progress)
+    reason = ask() if callable(ask) else None
     if reason is None:
         return
     if reason == "cancel":
-        raise ClipPaused("cancel", ClipHold(stage="start"))
+        checkpoint(ask, None, preempt=False)
+        return
     gpu.wait()
     host: dict[str, np.ndarray] = {}
     for name, (buf, shape) in named.items():
         count = int(np.prod(shape))
         host[name] = gpu.read(buf, count, np.dtype(np.float32)).reshape(shape)
-    raise ClipPaused(reason, ClipHold(stage=stage, step=step, done=_done(progress), **host))
+    checkpoint(ask, ClipHold(stage=stage, step=step, done=_done(progress), **host))
 
 
 def _done(progress: Progress | None) -> int:

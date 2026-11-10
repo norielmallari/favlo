@@ -21,9 +21,18 @@ class EmbeddingsRequestError(ValueError):
 
 
 class EmbeddingsPipeline(Pipeline):
-    """One string in, one dense vector out."""
+    """One string in, one dense vector out.
+
+    The scheduler reads these flags. This seam does not set ``preempt`` and
+    opens beside the resident model.
+    """
 
     kind = "embed"
+    admission = frozenset({"embed"})
+    preempts_media = False
+    drop_if_disconnected = False
+    debounce_after_release = False
+    resident = "beside"
 
     def handle(
         self,

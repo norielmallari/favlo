@@ -55,7 +55,7 @@ class Catalog(NamedTuple):
             return None
         generators = [item for item in matches if item[1].name.startswith("generate_")]
         record, spec = (generators or matches)[0]
-        return record, spec, record.folders[0]
+        return record, spec, _resolvable_folder(record)
 
     def published(self) -> list[tuple[str, PipelineRecord, ToolSpec]]:
         rows = [
@@ -64,6 +64,19 @@ class Catalog(NamedTuple):
         ]
         rows.sort(key=lambda item: item[0])
         return rows
+
+
+def _resolvable_folder(record: PipelineRecord) -> str:
+    """A model id ``resolve`` accepts. The pipeline id is the fallback."""
+    from favlo.registry import resolve
+
+    for candidate in (*record.folders, record.pipeline):
+        try:
+            resolve(candidate)
+        except LookupError:
+            continue
+        return candidate
+    return record.folders[0]
 
 
 def publish(pipeline: str, local: str) -> str:

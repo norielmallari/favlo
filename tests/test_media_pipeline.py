@@ -255,3 +255,33 @@ def test_a_concrete_subclass_sets_kind_id_prefix_and_object_name() -> None:
 
             def pack(self, runtime, request, result, job, home, table, call) -> None:
                 return None
+
+
+def test_checkpoint_raises_preempt_with_the_hold() -> None:
+    from favlo.media_pipeline import checkpoint
+
+    with pytest.raises(MediaPaused) as caught:
+        checkpoint(lambda: "preempt", {"stage": "text"})
+    assert caught.value.reason == "preempt"
+    assert caught.value.hold == {"stage": "text"}
+
+
+def test_checkpoint_cancel_drops_the_hold() -> None:
+    from favlo.media_pipeline import checkpoint
+
+    with pytest.raises(MediaPaused) as caught:
+        checkpoint(lambda: "cancel", {"stage": "text"})
+    assert caught.value.reason == "cancel"
+    assert caught.value.hold is None
+
+
+def test_checkpoint_can_ignore_preempt_and_still_cancel() -> None:
+    from favlo.media_pipeline import checkpoint
+
+    checkpoint(lambda: "preempt", {"stage": "text"}, preempt=False)
+    with pytest.raises(MediaPaused) as caught:
+        checkpoint(lambda: "cancel", {"stage": "text"}, preempt=False)
+    assert caught.value.reason == "cancel"
+    assert caught.value.hold is None
+    checkpoint(None, {"stage": "text"})
+    checkpoint(lambda: "later", {"stage": "text"})

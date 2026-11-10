@@ -8,6 +8,8 @@ alwaysApply: false
 
 A served embedding model inherits `EmbeddingsPipeline` in `src/favlo/embeddings_pipeline.py`. That class extends `Pipeline`. A language model and a media pipeline do not inherit it. The class writes the OpenAI list object. It does not normalize a vector or choose a hidden size.
 
+Admission is `embed`. An embeddings request sits ahead of chats that have not started and does not set `preempt`. `resident` is `beside`. A lazy `open_for` keeps the second process in `_open_embed_for` when this model is not already resident, and parks the resident when it is. `embeddings_ttl_seconds` stays in settings.
+
 Bind `handle_embed = Pipeline()`. `embed` returns the vector and the token count. `parse` rejects a missing or blank string with `input must be a string` and `param` `input`. A `ValueError` from `embed` is a 400 with `param` `None`. The `model` field is `selection.requested_id`, or `""` when the selection is missing. It does not read `body["model"]`.
 
 A new abstract method on `EmbeddingsPipeline` updates every served embedding subclass in that same change.

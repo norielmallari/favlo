@@ -12,15 +12,6 @@ from typing import Any
 
 import numpy as np
 
-from favlo.media_pipeline import MediaPaused
-
-
-class ImagePaused(MediaPaused):
-    """The image stopped between stages. The job stays in progress."""
-
-    def __init__(self, reason: str, hold: ImageHold) -> None:
-        super().__init__(reason, hold)
-
 
 @dataclass
 class ImageHold:
@@ -48,13 +39,3 @@ class ImageJob:
     images: list[dict[str, str]] = field(default_factory=list)
     timings: list[dict[str, Any]] = field(default_factory=list)
     hold: ImageHold | None = None
-
-
-def ask(stop: Any) -> str | None:
-    """``cancel`` or ``preempt`` when the listener has asked the stage to stop."""
-    if not callable(stop):
-        return None
-    reason = stop()
-    if reason in {"preempt", "cancel"}:
-        return str(reason)
-    return None

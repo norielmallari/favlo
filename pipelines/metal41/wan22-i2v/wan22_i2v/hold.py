@@ -7,20 +7,10 @@ stages. A later call skips those stages and opens the device again.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
 
-from favlo.media_pipeline import MediaPaused
-
 _STAGES = ("compile", "text", "encode", "step", "decode", "pack")
-
-
-class ClipPaused(MediaPaused):
-    """The clip stopped between stages. The job stays in progress."""
-
-    def __init__(self, reason: str, hold: ClipHold) -> None:
-        super().__init__(reason, hold)
 
 
 @dataclass
@@ -48,14 +38,3 @@ def reload_quietly(hold: ClipHold | None, expert: str, index: int) -> bool:
     if hold is None or hold.stage != "step" or hold.expert != expert:
         return False
     return index == hold.step
-
-
-def interrupt(progress: Any) -> str | None:
-    """``cancel`` or ``preempt`` when the listener has asked the stage to stop."""
-    ask = getattr(progress, "interrupt", None)
-    if not callable(ask):
-        return None
-    reason = ask()
-    if reason in {"preempt", "cancel"}:
-        return str(reason)
-    return None

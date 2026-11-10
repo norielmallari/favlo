@@ -353,9 +353,8 @@ class Pipeline(LanguagePipeline):
     """One Responses generation for this package."""
 
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
-        del selection
+        super().on_open(runtime, reply, selection)
         runtime._halted = False
-        runtime._stop = reply.stopped
 
     def client_closed(self, exc: OSError) -> bool:
         return str(exc) == "client closed"

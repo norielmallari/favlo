@@ -28,6 +28,17 @@ class MediaPaused(Exception):
         self.hold = hold
 
 
+def checkpoint(stop: Any, hold: Any, *, preempt: bool = True) -> None:
+    """Raise ``MediaPaused`` when this boundary should stop.
+
+    Cancel wins and carries no hold. ``preempt=False`` ignores a preempt and
+    still raises on cancel. A boundary that is not stopping returns.
+    """
+    reason = stop() if callable(stop) else None
+    if reason == "cancel" or (reason == "preempt" and preempt):
+        raise MediaPaused(str(reason), None if reason == "cancel" else hold)
+
+
 class MediaRequestError(ValueError):
     """The body cannot be run. The reply is a 400."""
 
@@ -62,6 +73,11 @@ class MediaPipeline(Pipeline):
     table_name: str | None = None
     id_hex: int = 12
     seeds: bool = True
+    admission = frozenset({"media", "image", "video", "music", "voice"})
+    preempts_media = False
+    drop_if_disconnected = False
+    debounce_after_release = False
+    resident = "exclusive"
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

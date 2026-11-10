@@ -339,14 +339,14 @@ def _one(runtime, card: dict, image: np.ndarray | None, home: Path) -> dict:
         image=image,
     )
     videos: dict = {}
-    payload, paused = runtime.clip.sample(
+    payload = runtime.clip.sample(
         request,
         video_id="video_smoke_" + ("i2v" if image is not None else "t2v"),
         home=home,
         videos=videos,
         stop=None,
     )
-    if paused is not None or payload.get("status") != "completed":
+    if payload.get("status") != "completed":
         message = "smoke clip did not finish"
         raise RuntimeError(message)
     print(payload["id"], payload["size"], payload["seconds"], flush=True)

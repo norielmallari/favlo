@@ -18,10 +18,11 @@ from favlo.media_memory import (
     open_gate,
     stamp_owner,
 )
+from favlo.media_pipeline import MediaPaused, checkpoint
 from favlo.memory import memory
 from wan22_i2v.dit import Forward, drop_expert, forward_bytes
 from wan22_i2v.formats import TILE_M, pad_to
-from wan22_i2v.hold import ClipHold, ClipPaused, interrupt, reload_quietly
+from wan22_i2v.hold import ClipHold, reload_quietly
 from wan22_i2v.latent import stride_decode, stride_encode
 from wan22_i2v.metal import _NAMES, Gpu
 from wan22_i2v.png import resize_rgb
@@ -341,7 +342,7 @@ class Runtime:
 
                     def on_layer() -> None:
                         progress.advance()
-                        if interrupt(progress) is None:
+                        if not _stopping(progress):
                             return
                         self._pause(
                             progress,
@@ -424,7 +425,7 @@ class Runtime:
 
                 def on_decode() -> None:
                     progress.advance()
-                    if interrupt(progress) is None:
+                    if not _stopping(progress):
                         return
                     self._pause(
                         progress,
@@ -470,7 +471,7 @@ class Runtime:
                     progress,
                     ClipHold(stage="pack", avi=avi, step_times=list(step_times)),
                 )
-        except ClipPaused:
+        except MediaPaused:
             raise
         except Exception:
             if own:
@@ -484,16 +485,14 @@ class Runtime:
 
     def _after_commit(self, progress: ClipProgress, hold: ClipHold) -> None:
         """Stop after the committed dispatch when a chat or a cancel is waiting."""
-        if interrupt(progress) is None:
+        if not _stopping(progress):
             return
         self._pause(progress, hold)
 
     def _pause(self, progress: ClipProgress, hold: ClipHold) -> None:
-        reason = interrupt(progress)
-        if reason is None:
-            return
         hold.done = progress.done
-        raise ClipPaused(reason, hold)
+        ask = getattr(progress, "interrupt", None)
+        checkpoint(ask if callable(ask) else None, hold)
 
     def _drop_forward(self) -> None:
         forward = self._forward
@@ -632,8 +631,7 @@ class Runtime:
 
         def stop(after_file: bool = False) -> None:
             del after_file
-            reason = interrupt(progress)
-            if reason is None:
+            if not _stopping(progress):
                 return
             self._pause(
                 progress,
@@ -765,6 +763,14 @@ def resident_latent_frames(room: int, frames: int, height: int, width: int, lat_
 
 def _pixel_bytes(frames: int, height: int, width: int) -> int:
     return 3 * frames * height * width * 4
+
+
+def _stopping(progress: Any) -> bool:
+    """True when the stage loop should hand the device back."""
+    ask = getattr(progress, "interrupt", None)
+    if not callable(ask):
+        return False
+    return ask() in {"cancel", "preempt"}
 
 
 def _volume(gpu: Gpu, buf: Any, shape: tuple[int, ...]) -> np.ndarray:

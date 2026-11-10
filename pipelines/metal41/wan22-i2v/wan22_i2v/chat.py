@@ -8,9 +8,9 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError
+from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError, checkpoint
 from favlo.videos import reported_quality, store_source, sweep_videos
-from wan22_i2v.hold import ClipHold, ClipPaused
+from wan22_i2v.hold import ClipHold
 from wan22_i2v.png import decode_png, resize_rgb
 from wan22_i2v.progress import ClipProgress, clip_label
 from wan22_i2v.schedule import (
@@ -127,9 +127,7 @@ class Pipeline(MediaPipeline):
                 guidance=request.guidance,
                 steps=request.steps,
             )
-        reason = stop()
-        if reason:
-            raise ClipPaused(reason, ClipHold(stage="pack", avi=avi, done=progress.done))
+        checkpoint(stop, ClipHold(stage="pack", avi=avi, done=progress.done))
         return avi
 
     def pack(

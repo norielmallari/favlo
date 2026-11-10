@@ -19,7 +19,7 @@ from z_image_turbo.formats import (
     restore_int8,
     stored_k,
 )
-from z_image_turbo.hold import ImageHold, ImageJob, ImagePaused
+from z_image_turbo.hold import ImageHold, ImageJob
 from z_image_turbo.png import ZLIB_LEVEL, encode_png, pack_rgb, unpack_rgb, write_png
 from z_image_turbo.progress import (
     CAPTION_PIECES,
@@ -34,6 +34,7 @@ from z_image_turbo.schedule import sigmas, timestep
 from z_image_turbo.scratch import MAX_EDGE, Scratch, scratch_bytes
 
 from favlo.media_meta import load_media
+from favlo.media_pipeline import MediaPaused
 from favlo.reply import MemoryReply
 
 
@@ -482,7 +483,7 @@ def test_a_resumed_image_keeps_the_drawn_seed(tmp_path, monkeypatch) -> None:
             del prompt, width, height, steps
             self.seeds.append(seed)
             if not extra.get("done_steps"):
-                raise ImagePaused(
+                raise MediaPaused(
                     "preempt",
                     ImageHold(
                         stage="step",
@@ -578,7 +579,7 @@ def test_a_paused_step_resumes_with_its_latent(tmp_path) -> None:
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **extra):
             del prompt, width, height, steps, seed
             if not extra.get("done_steps"):
-                raise ImagePaused(
+                raise MediaPaused(
                     "preempt",
                     ImageHold(stage="step", step=4, latent=latent, times=[0.2, 0.2, 0.2, 0.2]),
                 )
@@ -614,7 +615,7 @@ def test_a_waiting_chat_still_draws_the_next_step(tmp_path) -> None:
         def generate(self, prompt: str, width: int, height: int, steps: int, seed: int, **extra):
             del prompt, width, height, steps, seed
             called.append(extra.get("done_steps") or 0)
-            raise ImagePaused(
+            raise MediaPaused(
                 "preempt",
                 ImageHold(stage="step", step=1, latent=np.arange(4, dtype=np.float32), times=[0.2]),
             )
@@ -658,7 +659,7 @@ def test_cancel_during_the_draw_drops_the_checkpoint(tmp_path) -> None:
             del prompt, width, height, steps
             self.seeds.append(seed)
             if len(self.seeds) == 1:
-                raise ImagePaused("cancel", ImageHold(stage="step", step=1, latent=_picture(1)))
+                raise MediaPaused("cancel", ImageHold(stage="step", step=1, latent=_picture(1)))
             timing = {"total": 1.0, "caption": 0.1, "vae": 0.2, "steps": [0.1]}
             return _picture(seed), "digest", timing
 
@@ -806,7 +807,7 @@ def test_a_paused_generate_closes_the_sample_row(monkeypatch) -> None:
 
     def _run(self, prompt, width, height, steps, seed, **kwargs):
         del self, prompt, width, height, steps, seed, kwargs
-        raise ImagePaused("preempt", ImageHold(stage="step", step=4))
+        raise MediaPaused("preempt", ImageHold(stage="step", step=4))
 
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
@@ -814,7 +815,7 @@ def test_a_paused_generate_closes_the_sample_row(monkeypatch) -> None:
     runtime._room = lambda: 0
     runtime.console = _bars(store)
     latent = np.zeros((16, 2, 2), dtype=np.float32)
-    with pytest.raises(ImagePaused):
+    with pytest.raises(MediaPaused):
         runtime.generate("a cat", 16, 16, 8, 0, done_steps=4, latent=latent)
     assert store["total"] == sample_total(steps=8, done_steps=4)
     assert store["summary"] == "sample paused"
@@ -826,14 +827,14 @@ def test_a_cancelled_generate_closes_the_sample_row(monkeypatch) -> None:
 
     def _run(self, prompt, width, height, steps, seed, **kwargs):
         del self, prompt, width, height, steps, seed, kwargs
-        raise ImagePaused("cancel", ImageHold(stage="caption"))
+        raise MediaPaused("cancel", ImageHold(stage="caption"))
 
     monkeypatch.setattr(Runtime, "_run", _run)
     runtime = Runtime.__new__(Runtime)
     runtime.scratch = _covering_scratch()
     runtime._room = lambda: 0
     runtime.console = _bars(store)
-    with pytest.raises(ImagePaused):
+    with pytest.raises(MediaPaused):
         runtime.generate("a cat", 16, 16, 8, 0)
     assert store["summary"] == "sample cancelled"
 

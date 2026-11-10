@@ -313,9 +313,8 @@ class Pipeline(LanguagePipeline):
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         from qwen36_35b_a3b.firing import open_request
 
-        del selection
+        super().on_open(runtime, reply, selection)
         runtime._halted = False
-        runtime._stop = reply.stopped
         open_request(runtime)
 
     def client_closed(self, exc: OSError) -> bool:
@@ -330,7 +329,7 @@ class Pipeline(LanguagePipeline):
         runtime._vision_at = None
         runtime._rope_positions = None
         runtime._rope_delta = 0
-        runtime._stop = None
+        super().on_finish(runtime, selection, complete=complete)
         finish_request(runtime, selection, complete=complete)
 
     def handle_responses(

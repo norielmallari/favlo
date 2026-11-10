@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from favlo.media_pipeline import checkpoint
 from favlo.videos import encode_mp4, reported_quality, store_source
 from wan22_ti2v_5b.avi import encode_avi
 from wan22_ti2v_5b.dit import DiT
@@ -59,7 +60,7 @@ class Clip:
         videos: dict | None,
         hold: ClipHold | None = None,
         stop=None,
-    ) -> tuple[dict, ClipHold | None]:
+    ) -> dict:
         if hold is None:
             print("encode text", flush=True)
             text, text_valid = self.text.encode(request.prompt)
@@ -93,8 +94,7 @@ class Clip:
         rng = np.random.default_rng()
         rng.bit_generator.state = state.rng_state
         while state.step < len(knots):
-            if stop is not None and stop():
-                return {"id": state.video_id, "status": "cancelled"}, None
+            checkpoint(stop, None, preempt=False)
             sigma = float(noise[state.step])
             print(f"knot {state.step} {knots[state.step]:.6f}", flush=True)
             state.latent = blend(state.latent, _image(state), state.mask)
@@ -113,14 +113,13 @@ class Clip:
             if state.step == len(knots):
                 break
             state.rng_state = rng.bit_generator.state
-            if stop is not None and stop(pause=True):
-                return {"id": state.video_id, "status": "in_progress"}, state
+            checkpoint(stop, state)
         print("decode", flush=True)
         started = time.perf_counter()
         frames = self.vae.decode(state.latent.astype(np.float32))
         print(f"decode {time.perf_counter() - started:.3f}s", flush=True)
         payload = _store(state, frames, home, videos)
-        return payload, None
+        return payload
 
 
 def _image(state: ClipHold) -> np.ndarray:

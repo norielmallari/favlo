@@ -8,7 +8,7 @@ alwaysApply: false
 
 `MediaPipeline` in `src/favlo/media_pipeline.py` extends `Pipeline` and owns the shared job / pause / pack / memory-gate shell. A language model, an embedding model, and a failed pipeline do not inherit it. A served package subclasses `MediaPipeline` and sets `kind` (`image`, `video`, `music`, or `voice`), `id_prefix`, and `object_name`. `table_name`, `seeds`, and `id_hex` stay on that class when they differ from the shell defaults. The class does not run a forward, name stages, or acquire a scheduler ticket. It does call `runtime.ensure_open` and `runtime.close`.
 
-Bind one instance. `__call__` is `handle`. The concrete class implements `parse`, `generate`, and `pack`. The tool record names that instance. The checkpoint type stays in the pipeline package. `ClipPaused` and `ImagePaused` subclass `MediaPaused`.
+Bind one instance. `__call__` is `handle`. The concrete class implements `parse`, `generate`, and `pack`. The tool record names that instance. The checkpoint type stays in the pipeline package. A safe point calls `checkpoint(stop, hold)` after the submitted command finishes. Cancel raises `MediaPaused("cancel", None)`. Preempt raises `MediaPaused("preempt", hold)`.
 
 `generate` calls `stop()` at a stage boundary, after the Metal command already submitted has finished. Preempt raises `MediaPaused("preempt", hold)` with the host values the next stage needs. Cancel raises `MediaPaused("cancel", None)`. Device buffers do not go in the hold. They do not survive `close`. Resume calls `generate` again with that hold and the same job id.
 

@@ -548,11 +548,11 @@ def _run_locked(
 ) -> None:
     _prepare_listener(state)
     ticket = None
-    cancel = getattr(reply, "disconnected", None)
-    if kind not in {"chat", "responses"} or not isinstance(cancel, threading.Event):
-        cancel = None
+    from favlo.schedule import disconnect_event
+
+    cancel = disconnect_event(kind, getattr(reply, "disconnected", None))
     try:
-        if kind in {"embed", "chat", "responses"}:
+        if _admits_with_foreground(kind):
             ticket = admit(state, kind, cancel=cancel)
             if ticket is None:
                 if cancel is not None and cancel.is_set():
@@ -568,6 +568,13 @@ def _run_locked(
     finally:
         if ticket is not None:
             release_admission(state, ticket)
+
+
+def _admits_with_foreground(kind: str) -> bool:
+    """Language and embeddings take a ticket before the handler. Media admits inside its slice loop."""
+    from favlo.schedule import _foreground
+
+    return _foreground(kind)
 
 
 def _run_media(
