@@ -65,13 +65,20 @@ def _kind(pipeline: str) -> str:
     if runtime is None:
         message = f"unknown pipeline {pipeline}"
         raise ValueError(message)
+    from favlo.cli import pipeline_instance
+    from favlo.media_pipeline import MediaPipeline
+    from favlo.mcp_server import media_kinds
+
     module = load_pipeline(pipeline, runtime=runtime, pipeline_root=root)
-    kinds: list[str] = []
-    for name in ("handle_image", "handle_video", "handle_music", "handle_voice"):
-        handler = getattr(module, name, None)
-        kind = getattr(handler, "kind", None)
-        if isinstance(kind, str) and kind not in kinds:
-            kinds.append(kind)
+    kinds = media_kinds(module)
+    if not kinds:
+        try:
+            plugin = pipeline_instance(module)
+        except TypeError as exc:
+            message = "pass --kind"
+            raise ValueError(message) from exc
+        if isinstance(plugin, MediaPipeline):
+            kinds = [plugin.kind]
     if len(kinds) != 1:
         message = "pass --kind"
         raise ValueError(message)

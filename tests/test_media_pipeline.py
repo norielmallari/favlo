@@ -86,6 +86,17 @@ class _Pipe(MediaPipeline):
         del call
         runtime.finished += 1
 
+    def main(self, argv):
+        del argv
+        return 0
+
+    def open_runtime(self, path, **kwargs):
+        del path, kwargs
+        return _Runtime()
+
+    def mcp_tools(self):
+        return []
+
 
 def _state() -> dict:
     return {"preempt": threading.Event(), "cancel": threading.Event()}

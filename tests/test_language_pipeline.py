@@ -41,6 +41,14 @@ def test_a_closed_client_clears_stop_and_does_not_fail() -> None:
             notes.append("closed")
             super().on_disconnect(runtime)
 
+        def main(self, argv):
+            del argv
+            return 0
+
+        def open_runtime(self, path, **kwargs):
+            del path, kwargs
+            raise RuntimeError("unused")
+
     runtime = SimpleNamespace(_stop=True, _status=notes.append)
     Pipe().handle(_Reply(), runtime, {}, None, None, {})
     assert runtime._stop is None
@@ -52,6 +60,14 @@ def test_an_unrelated_oserror_propagates_and_clears_stop() -> None:
         def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
             del reply, runtime, body, selection, args, state
             raise OSError("disk")
+
+        def main(self, argv):
+            del argv
+            return 0
+
+        def open_runtime(self, path, **kwargs):
+            del path, kwargs
+            raise RuntimeError("unused")
 
     runtime = SimpleNamespace(_stop=True)
     with pytest.raises(OSError, match="disk"):
@@ -67,6 +83,14 @@ def test_a_named_oserror_can_count_as_the_client() -> None:
 
         def client_closed(self, exc: OSError) -> bool:
             return str(exc) == "client closed"
+
+        def main(self, argv):
+            del argv
+            return 0
+
+        def open_runtime(self, path, **kwargs):
+            del path, kwargs
+            raise RuntimeError("unused")
 
     runtime = SimpleNamespace(_stop=True, _status=lambda _message: None)
     Pipe().handle(_Reply(), runtime, {}, None, None, {})
@@ -90,14 +114,29 @@ def test_qwen36_treats_only_the_client_message_as_closed() -> None:
     assert not pipe.client_closed(OSError("disk"))
 
 
-def test_a_blank_embedding_is_a_400() -> None:
+def _embed_pipe(embed):
     class Pipe(EmbeddingsPipeline):
         def embed(self, runtime, text):
-            del runtime, text
-            raise AssertionError("embed")
+            return embed(runtime, text)
+
+        def main(self, argv):
+            del argv
+            return 0
+
+        def open_runtime(self, path, **kwargs):
+            del path, kwargs
+            raise RuntimeError("unused")
+
+    return Pipe()
+
+
+def test_a_blank_embedding_is_a_400() -> None:
+    def embed(runtime, text):
+        del runtime, text
+        raise AssertionError("embed")
 
     reply = _Reply()
-    Pipe().handle(reply, None, {"input": "  "}, None, None, {})
+    _embed_pipe(embed).handle(reply, None, {"input": "  "}, None, None, {})
     assert reply.status == 400
     error = reply.payload["error"]
     assert error["message"] == "input must be a non-empty string or array of strings"
@@ -106,40 +145,37 @@ def test_a_blank_embedding_is_a_400() -> None:
 
 
 def test_an_embed_value_error_is_a_400_without_a_param() -> None:
-    class Pipe(EmbeddingsPipeline):
-        def embed(self, runtime, text):
-            del runtime, text
-            raise ValueError("too long")
+    def embed(runtime, text):
+        del runtime, text
+        raise ValueError("too long")
 
     reply = _Reply()
-    Pipe().handle(reply, None, {"input": "hello"}, None, None, {})
+    _embed_pipe(embed).handle(reply, None, {"input": "hello"}, None, None, {})
     error = reply.payload["error"]
     assert error["message"] == "too long"
     assert error["param"] is None
 
 
 def test_an_embedding_reply_uses_the_selection_id() -> None:
-    class Pipe(EmbeddingsPipeline):
-        def embed(self, runtime, text):
-            del runtime
-            return [float(len(text))], 3
+    def embed(runtime, text):
+        del runtime
+        return [float(len(text))], 3
 
     reply = _Reply()
     selection = SimpleNamespace(requested_id="bge-m3-int8")
-    Pipe().handle(reply, None, {"input": "hello", "model": "other"}, selection, None, {})
+    _embed_pipe(embed).handle(reply, None, {"input": "hello", "model": "other"}, selection, None, {})
     assert reply.payload["model"] == "bge-m3-int8"
     assert reply.payload["data"][0]["embedding"] == [5.0]
     assert reply.payload["usage"] == {"prompt_tokens": 3, "total_tokens": 3}
 
 
 def test_an_embedding_array_returns_one_object_per_string() -> None:
-    class Pipe(EmbeddingsPipeline):
-        def embed(self, runtime, text):
-            del runtime
-            return [float(len(text))], len(text)
+    def embed(runtime, text):
+        del runtime
+        return [float(len(text))], len(text)
 
     reply = _Reply()
-    Pipe().handle(reply, None, {"input": ["ab", "cde"]}, None, None, {})
+    _embed_pipe(embed).handle(reply, None, {"input": ["ab", "cde"]}, None, None, {})
     assert reply.payload["data"][0]["embedding"] == [2.0]
     assert reply.payload["data"][1]["embedding"] == [3.0]
     assert reply.payload["data"][1]["index"] == 1
@@ -147,11 +183,10 @@ def test_an_embedding_array_returns_one_object_per_string() -> None:
 
 
 def test_an_embedding_without_a_selection_has_an_empty_model() -> None:
-    class Pipe(EmbeddingsPipeline):
-        def embed(self, runtime, text):
-            del runtime, text
-            return [1.0], 2
+    def embed(runtime, text):
+        del runtime, text
+        return [1.0], 2
 
     reply = _Reply()
-    Pipe().handle(reply, None, {"input": "hello", "model": "other"}, None, None, {})
+    _embed_pipe(embed).handle(reply, None, {"input": "hello", "model": "other"}, None, None, {})
     assert reply.payload["model"] == ""

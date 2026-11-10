@@ -8,7 +8,7 @@ called directly. A hook exception propagates.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any
+from typing import Any, ClassVar, Mapping
 
 from favlo.pipeline import ClientClosed, Pipeline
 
@@ -17,7 +17,9 @@ class LanguagePipeline(Pipeline):
     """Disconnect handling around one pipeline's own Responses completion.
 
     ``admission`` is both HTTP kinds that share the chat deque. The scheduler
-    reads the flags below. A package does not.
+    reads the flags below. A package does not. Sampling defaults mirror the
+    package ``sampling.py`` card; registration still path-loads that file so
+    it does not import Metal.
     """
 
     kind = "responses"
@@ -26,6 +28,12 @@ class LanguagePipeline(Pipeline):
     drop_if_disconnected = True
     debounce_after_release = True
     resident = "exclusive"
+
+    context_length: ClassVar[int | None] = None
+    variants: ClassVar[Mapping[str, Mapping[str, Any]]] = {}
+    default_variant: ClassVar[str] = ""
+    default_thinking: ClassVar[bool] = True
+    default_reasoning_effort: ClassVar[str | None] = None
 
     def handle(
         self,

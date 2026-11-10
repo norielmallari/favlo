@@ -119,31 +119,31 @@ def test_the_video_setup_commands_are_accepted() -> None:
         "uv run favlo --wan22_i2v quantize --high models/example-model/high.safetensors "
         "--low models/example-model/low.safetensors --name example-model "
         "--high-dir models/example-high --low-dir models/example-low",
-        "uv run favlo --umt5_xxl setup",
-        "uv run favlo --umt5_xxl quantize",
+        "uv run favlo --wan22_i2v umt5 setup",
+        "uv run favlo --wan22_i2v umt5 quantize --format wan",
     )
     for command in commands:
         assert command in guide
         argv = accepted_argv(command, root)
         assert frees_model(argv)
-        assert argv[3] in {"--wan22_i2v", "--umt5_xxl"}
+        assert argv[3] == "--wan22_i2v"
 
 
 def test_the_umt5_setup_commands_are_accepted() -> None:
     from favlo.cli import repo_root
-    from favlo.guides import read_setup
 
     root = repo_root()
-    guide = read_setup("umt5_xxl")
     commands = (
-        "uv run favlo --umt5_xxl setup",
-        "uv run favlo --umt5_xxl quantize",
+        "uv run favlo --wan22_i2v umt5 setup",
+        "uv run favlo --wan22_i2v umt5 quantize --format wan",
+        "uv run favlo --wan22_ti2v_5b umt5 setup",
+        "uv run favlo --wan22_ti2v_5b umt5 quantize --format wan",
     )
     for command in commands:
-        assert command in guide
         argv = accepted_argv(command, root)
         assert frees_model(argv)
-        assert argv[3:5] == [command.split()[3], command.split()[4]]
+        assert argv[4] == "umt5"
+        assert argv[5] in {"setup", "quantize"}
 
 
 def test_the_ti2v_setup_commands_are_accepted() -> None:
@@ -153,8 +153,8 @@ def test_the_ti2v_setup_commands_are_accepted() -> None:
     root = repo_root()
     guide = read_setup("wan22_ti2v_5b")
     commands = (
-        "uv run favlo --umt5_xxl setup",
-        "uv run favlo --umt5_xxl quantize",
+        "uv run favlo --wan22_ti2v_5b umt5 setup",
+        "uv run favlo --wan22_ti2v_5b umt5 quantize --format wan",
         "uv run favlo --wan22_ti2v_5b setup",
         "uv run favlo --wan22_ti2v_5b quantize --weights <checkpoint>",
     )
@@ -164,7 +164,7 @@ def test_the_ti2v_setup_commands_are_accepted() -> None:
             continue
         argv = accepted_argv(command, root)
         assert frees_model(argv)
-        assert argv[3] in {"--wan22_ti2v_5b", "--umt5_xxl"}
+        assert argv[3] == "--wan22_ti2v_5b"
 
 
 def test_a_path_and_a_shell_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

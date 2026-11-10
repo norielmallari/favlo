@@ -1330,6 +1330,26 @@ def _selection(folder: str, pipeline: str) -> SimpleNamespace:
     )
 
 
+def _plugin_module(opener):
+    from favlo.pipeline import Pipeline
+    from favlo.pipelines import bind_open_runtime
+
+    class _Plugin(Pipeline):
+        kind = "test"
+
+        def handle(self, reply, runtime, body, selection, args, state) -> None:
+            del reply, runtime, body, selection, args, state
+
+        def main(self, argv):
+            del argv
+            return 0
+
+        def open_runtime(self, path, **kwargs):
+            return bind_open_runtime(opener, path, **kwargs)
+
+    return SimpleNamespace(pipeline=_Plugin(), __name__="test.plugin")
+
+
 def test_open_runtime_passes_owner_when_accepted(monkeypatch) -> None:
     seen: dict[str, str] = {}
 
@@ -1339,7 +1359,7 @@ def test_open_runtime_passes_owner_when_accepted(monkeypatch) -> None:
         seen["owner"] = owner
         return SimpleNamespace(_owner=owner)
 
-    module = SimpleNamespace(open_runtime=opener)
+    module = _plugin_module(opener)
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda _selection: module)
     runtime = open_runtime(_selection("record", "z_image_turbo"), None, None)
     assert seen["path"] == "record"
@@ -1355,7 +1375,7 @@ def test_open_runtime_passes_mtp_when_accepted(monkeypatch) -> None:
         seen["mtp"] = mtp
         return SimpleNamespace()
 
-    module = SimpleNamespace(open_runtime=opener)
+    module = _plugin_module(opener)
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda _selection: module)
     selection = _selection("record", "qwen38_27b")
     open_runtime(selection, None, None)
@@ -1370,7 +1390,7 @@ def test_open_runtime_omits_owner_when_absent(monkeypatch) -> None:
         del kv_cache, console, resident_percent
         return SimpleNamespace(path=path)
 
-    module = SimpleNamespace(open_runtime=opener)
+    module = _plugin_module(opener)
     monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda _selection: module)
     runtime = open_runtime(_selection("record", "wan22_i2v"), None, None)
     assert runtime.path == "record"

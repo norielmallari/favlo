@@ -6,41 +6,77 @@ from favlo.cli import main, pipeline_names
 
 ROOT = Path(__file__).resolve().parents[1]
 
+_DEMO_INIT = '''\
+from __future__ import annotations
 
-def test_a_pipeline_package_names_itself(tmp_path: Path) -> None:
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+from favlo.language_pipeline import LanguagePipeline
+from favlo.pipeline import Runtime
+
+
+class _Runtime(Runtime):
+    pass
+
+
+class Pipeline(LanguagePipeline):
+    def handle_responses(self, reply, runtime, body, selection, args, state):
+        del reply, runtime, body, selection, args, state
+
+    def main(self, argv: Sequence[str]) -> int:
+        del argv
+        return 0
+
+    def open_runtime(self, path: Path, **kwargs: Any) -> Runtime:
+        del path, kwargs
+        return _Runtime()
+
+
+pipeline = Pipeline()
+'''
+
+
+def test_a_pipeline_package_names_itself(tmp_path: Path, monkeypatch) -> None:
     model = tmp_path / "pipelines" / "demo_model"
     runtime = model / "metal41"
     runtime.mkdir(parents=True)
     (model / "__init__.py").write_text("", encoding="utf-8")
-    (runtime / "__init__.py").write_text('PIPELINE = "demo_model"\n', encoding="utf-8")
+    (runtime / "__init__.py").write_text(_DEMO_INIT, encoding="utf-8")
     (runtime / "notes.py").write_text("PIPELINE = 'other'\n", encoding="utf-8")
+    monkeypatch.delenv("FAVLO_PIPELINE_ROOTS", raising=False)
+    monkeypatch.setattr("favlo.logs.configured_pipeline_roots", lambda settings=None: ())
     assert pipeline_names(tmp_path) == ("demo_model",)
 
 
-def test_a_registry_pipeline_root_is_discovered(tmp_path: Path) -> None:
+def test_an_extra_plugin_root_is_discovered(tmp_path: Path, monkeypatch) -> None:
     model = tmp_path / "outside" / "demo_model"
     runtime = model / "metal41"
     runtime.mkdir(parents=True)
     (model / "__init__.py").write_text("", encoding="utf-8")
-    (runtime / "__init__.py").write_text('PIPELINE = "demo_model"\n', encoding="utf-8")
-    models = tmp_path / "models"
-    models.mkdir()
-    (models / "registry.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "models": {
-                    "demo": {
-                        "pipeline": "demo_model",
-                        "runtime": "metal41",
-                        "pipeline_root": "outside/demo_model/metal41",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    (runtime / "__init__.py").write_text(_DEMO_INIT, encoding="utf-8")
+    (tmp_path / "pipelines").mkdir()
+    monkeypatch.setenv("FAVLO_PIPELINE_ROOTS", str(tmp_path / "outside"))
+    monkeypatch.setattr("favlo.logs.configured_pipeline_roots", lambda settings=None: ())
     assert pipeline_names(tmp_path) == ("demo_model",)
+
+
+def test_load_pipeline_falls_back_when_registry_runtime_is_gone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from favlo.cli import drop_pipeline_modules, load_pipeline
+
+    model = tmp_path / "pipelines" / "moved_model"
+    runtime = model / "portable"
+    runtime.mkdir(parents=True)
+    (model / "__init__.py").write_text("", encoding="utf-8")
+    (runtime / "__init__.py").write_text(_DEMO_INIT, encoding="utf-8")
+    monkeypatch.delenv("FAVLO_PIPELINE_ROOTS", raising=False)
+    monkeypatch.setattr("favlo.logs.configured_pipeline_roots", lambda settings=None: ())
+    drop_pipeline_modules()
+    module = load_pipeline("moved_model", tmp_path, runtime="metal41")
+    assert module.__name__ == "moved_model.portable"
 
 
 def test_media_exits_when_serve_is_down(capsys) -> None:

@@ -232,6 +232,7 @@ def pipeline_module(selection: Any) -> Any:
 
 
 def _accepts(opener: Any, name: str) -> bool:
+    """True when ``name`` is an explicit parameter. ``**kwargs`` alone does not count."""
     try:
         parameters = inspect.signature(opener).parameters
     except (TypeError, ValueError):
@@ -239,30 +240,31 @@ def _accepts(opener: Any, name: str) -> bool:
     return name in parameters
 
 
+def bind_open_runtime(opener: Any, path: Any, **kwargs: Any) -> Any:
+    """Call ``opener(path, …)`` with only kwargs that opener names explicitly."""
+    return opener(path, **{key: value for key, value in kwargs.items() if _accepts(opener, key)})
+
+
 def open_runtime(selection: Any, console: Any, max_memory: str | None) -> Any:
     """Open the pipeline named on the registry row. The previous runtime is already closed."""
+    from favlo.cli import pipeline_instance
     from favlo.memory import memory, mint_owner
 
     memory.set_max_memory(max_memory)
     module = pipeline_module(selection)
-    opener = getattr(module, "open_runtime", None)
-    if not callable(opener):
-        message = f"{selection.pipeline} does not open a runtime"
-        raise RuntimeError(message)
-    kwargs: dict[str, Any] = {
-        "kv_cache": selection.kv_cache,
-        "console": console,
-        "resident_percent": selection.resident_percent,
-    }
-    if _accepts(opener, "max_memory"):
-        kwargs["max_memory"] = max_memory
-    if _accepts(opener, "owner"):
-        kwargs["owner"] = mint_owner(selection.pipeline)
-    if _accepts(opener, "mtp"):
-        kwargs["mtp"] = bool(getattr(selection, "mtp", False))
-    if _accepts(opener, "parts"):
-        kwargs["parts"] = selection.parts or {}
-    return opener(selection.path, **kwargs)
+    plugin = pipeline_instance(module)
+    # Pipeline.open_runtime wrappers accept ``**kwargs`` and filter against the
+    # concrete factory via ``bind_open_runtime``. Pass the full host set here.
+    return plugin.open_runtime(
+        selection.path,
+        kv_cache=selection.kv_cache,
+        console=console,
+        resident_percent=selection.resident_percent,
+        max_memory=max_memory,
+        owner=mint_owner(selection.pipeline),
+        mtp=bool(getattr(selection, "mtp", False)),
+        parts=getattr(selection, "parts", None) or {},
+    )
 
 
 def opening_owners(before: Any, runtime: Any) -> tuple[str, ...]:
@@ -504,8 +506,7 @@ def drop_runtime(state: dict[str, Any], args: Any) -> str | None:
 
 
 def _require_kind(kind: str, selection: Any, module: Any) -> None:
-    name = _HANDLERS.get(kind)
-    if name is not None and callable(getattr(module, name, None)):
+    if handler_for(kind, module) is not None:
         return
     message = f"{selection.pipeline} does not serve {kind}"
     raise LookupError(message)
@@ -722,16 +723,35 @@ def open_for(kind: str, body: dict[str, Any], state: dict[str, Any], args: Any) 
 
 def handler_for(kind: str, module: Any, handler: str | None = None) -> Any:
     """The handler on the runtime the manager opened. A missing kind stays missing."""
-    name = handler or _HANDLERS.get(kind)
-    if name is None or module is None:
+    if module is None:
         return None
+    from favlo.cli import pipeline_instance
+    from favlo.embeddings_pipeline import EmbeddingsPipeline
+    from favlo.language_pipeline import LanguagePipeline
+    from favlo.media_pipeline import MediaPipeline
+
+    if handler is not None:
+        call = getattr(module, handler, None)
+        return call if callable(call) else None
     try:
-        call = getattr(module, name)
-    except AttributeError:
-        return None
-    if not callable(call):
-        return None
-    return call
+        plugin = pipeline_instance(module)
+    except TypeError:
+        plugin = None
+    if kind == "responses" and isinstance(plugin, LanguagePipeline):
+        return plugin
+    if kind == "embed" and isinstance(plugin, EmbeddingsPipeline):
+        return plugin
+    if kind in {"image", "video", "music", "voice"}:
+        name = _HANDLERS.get(kind)
+        call = getattr(module, name, None) if name else None
+        if isinstance(call, MediaPipeline) and call.kind == kind:
+            return call
+        if isinstance(plugin, MediaPipeline) and plugin.kind == kind:
+            return plugin
+        return call if callable(call) else None
+    name = _HANDLERS.get(kind)
+    call = getattr(module, name, None) if name else None
+    return call if callable(call) else None
 
 
 def admission(state: dict[str, Any]) -> Any:

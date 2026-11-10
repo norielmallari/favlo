@@ -48,7 +48,9 @@ def forward_signal(signum: int) -> None:
 def _served_kinds(module: Any, stub: bool) -> list[str]:
     if stub:
         return list(_KINDS)
-    return [kind for kind, name in _KINDS.items() if callable(getattr(module, name, None))]
+    from favlo.pipelines import handler_for
+
+    return [kind for kind in _KINDS if handler_for(kind, module) is not None]
 
 
 class ChildExited(RuntimeError):

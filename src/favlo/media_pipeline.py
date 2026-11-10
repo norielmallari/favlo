@@ -13,10 +13,12 @@ from __future__ import annotations
 import secrets
 import time
 from abc import abstractmethod
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from favlo.pipeline import Pipeline
+from favlo.pipeline import Pipeline, Runtime
 
 
 class MediaPaused(Exception):
@@ -54,6 +56,18 @@ class MediaCall:
         self.progress: Any = None
         self.home: Path | None = None
         self.table: dict[str, Any] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class MediaTool:
+    """One MCP tool row declared by ``MediaPipeline.mcp_tools``."""
+
+    name: str
+    description: str
+    parameters: Mapping[str, Any]
+    handler: str
+    result: str
+    task: bool = True
 
 
 _KINDS = frozenset({"image", "video", "music", "voice"})
@@ -195,6 +209,14 @@ class MediaPipeline(Pipeline):
         call: MediaCall,
     ) -> dict[str, Any] | None:
         """Write the file. Return a replacement payload, or ``None`` to keep ``job``."""
+
+    @abstractmethod
+    def mcp_tools(self) -> Sequence[MediaTool]:
+        """Local MCP tools. The host publishes the pipeline prefix. Loads no weights."""
+
+    @abstractmethod
+    def open_runtime(self, path: Path, **kwargs: Any) -> Runtime:
+        """Open the media runtime for this packed record or folder."""
 
     def _run(
         self,

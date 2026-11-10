@@ -7,7 +7,7 @@ stays here. The class does not normalize the vector.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any
+from typing import Any, ClassVar, Mapping
 
 from favlo.pipeline import Pipeline
 
@@ -33,6 +33,10 @@ class EmbeddingsPipeline(Pipeline):
     drop_if_disconnected = False
     debounce_after_release = False
     resident = "beside"
+
+    context_length: ClassVar[int | None] = None
+    variants: ClassVar[Mapping[str, Mapping[str, Any]]] = {}
+    default_variant: ClassVar[str] = ""
 
     def handle(
         self,

@@ -757,27 +757,46 @@ def _ensure_media_default(
 
 
 def _media_keys(pipeline: str, runtime: str, pipeline_root: str | None) -> list[str]:
-    from favlo.cli import load_pipeline
+    from favlo.cli import load_pipeline, pipeline_instance
+    from favlo.media_pipeline import MediaPipeline, MediaTool
 
     try:
         module = load_pipeline(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     except Exception:
         return []
-    declare = getattr(module, "mcp_tools", None)
-    if not callable(declare):
-        return []
+    raw: list[Any] | None = None
     try:
-        raw = declare()
-    except Exception:
-        return []
-    if not isinstance(raw, list):
-        return []
+        plugin = pipeline_instance(module)
+    except TypeError:
+        plugin = None
+    if isinstance(plugin, MediaPipeline):
+        try:
+            tools = plugin.mcp_tools()
+        except Exception:
+            tools = None
+        if isinstance(tools, list):
+            raw = tools
+    if raw is None:
+        declare = getattr(module, "mcp_tools", None)
+        if not callable(declare):
+            return []
+        try:
+            tools = declare()
+        except Exception:
+            return []
+        if not isinstance(tools, list):
+            return []
+        raw = tools
     keys: list[str] = []
     for item in raw:
-        if not isinstance(item, dict):
+        if isinstance(item, MediaTool):
+            handler = item.handler
+            name = item.name
+        elif isinstance(item, dict):
+            handler = item.get("handler")
+            name = item.get("name")
+        else:
             continue
-        handler = item.get("handler")
-        name = item.get("name")
         call = getattr(module, handler, None) if isinstance(handler, str) else None
         kind = getattr(call, "kind", None)
         if kind == "video":
@@ -792,12 +811,19 @@ def _media_keys(pipeline: str, runtime: str, pipeline_root: str | None) -> list[
 
 
 def _serves_embed(pipeline: str, runtime: str, pipeline_root: str | None = None) -> bool:
-    from favlo.cli import load_pipeline
+    from favlo.cli import load_pipeline, pipeline_instance
+    from favlo.embeddings_pipeline import EmbeddingsPipeline
 
     try:
         module = load_pipeline(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     except Exception:
         return False
+    try:
+        plugin = pipeline_instance(module)
+    except TypeError:
+        plugin = None
+    if isinstance(plugin, EmbeddingsPipeline):
+        return True
     return callable(getattr(module, "handle_embed", None))
 
 

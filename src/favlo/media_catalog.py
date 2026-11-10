@@ -141,19 +141,31 @@ def build_catalog(
                 runtime=str(entry.get("runtime")),
                 pipeline_root=root_path if isinstance(root_path, str) else None,
             )
+            from favlo.cli import pipeline_instance
+            from favlo.media_pipeline import MediaPipeline, MediaTool
+
+            plugin = pipeline_instance(module)
+            if not isinstance(plugin, MediaPipeline):
+                continue
+            tools = plugin.mcp_tools()
         except Exception as exc:
             _skip(f"{folder} did not import ({type(exc).__name__}: {exc})")
             continue
-        declare = getattr(module, "mcp_tools", None)
-        if not callable(declare):
+        if not tools:
             continue
-        try:
-            raw = declare()
-        except Exception as exc:
-            _skip(f"{pipeline} mcp_tools failed ({type(exc).__name__}: {exc})")
-            continue
-        if not raw:
-            continue
+        raw = [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": dict(tool.parameters),
+                "handler": tool.handler,
+                "result": tool.result,
+                "task": tool.task,
+            }
+            if isinstance(tool, MediaTool)
+            else tool
+            for tool in tools
+        ]
         try:
             specs = _tools(module, pipeline, raw, description_max, param_max)
         except CatalogError as exc:

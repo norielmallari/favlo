@@ -137,7 +137,21 @@ def _default_settings() -> dict[str, Any]:
         "voice_ttl_seconds": DEFAULT_VOICE_TTL_SECONDS,
         "embeddings_ttl_seconds": DEFAULT_EMBEDDINGS_TTL_SECONDS,
         "heartbeat_seconds": DEFAULT_HEARTBEAT_SECONDS,
+        "pipeline_roots": [],
     }
+
+
+def configured_pipeline_roots(settings: dict[str, Any] | None = None) -> tuple[str, ...]:
+    """Extra plugin roots from settings (path strings). Missing key is empty."""
+    source = load_settings(favlo_home()) if settings is None else settings
+    raw = source.get("pipeline_roots")
+    if not isinstance(raw, list):
+        return ()
+    roots: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            roots.append(item.strip())
+    return tuple(roots)
 
 
 def heartbeat_seconds(settings: dict[str, Any]) -> int:

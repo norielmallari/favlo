@@ -46,9 +46,13 @@ def test_a_broken_pipeline_is_skipped_so_serve_keeps_the_rest(
         del root, runtime, pipeline_root
         if name == "broken_pipe":
             raise SyntaxError("from __future__ imports must occur at the beginning of the file")
+        from collections.abc import Sequence
+        from pathlib import Path
         from types import SimpleNamespace
+        from typing import Any
 
-        from favlo.media_pipeline import MediaPipeline
+        from favlo.media_pipeline import MediaCall, MediaPipeline, MediaTool
+        from favlo.pipeline import Runtime
 
         class _Handle(MediaPipeline):
             kind = "image"
@@ -59,35 +63,42 @@ def test_a_broken_pipeline_is_skipped_so_serve_keeps_the_rest(
                 del body
                 raise NotImplementedError
 
-            def generate(self, request, stop, hold):
-                del request, stop, hold
+            def generate(self, runtime, request, hold, job, stop, call):
+                del runtime, request, hold, job, stop, call
                 raise NotImplementedError
 
-            def pack(self, request, result):
-                del request, result
+            def pack(self, runtime, request, result, job, home, table, call):
+                del runtime, request, result, job, home, table, call
                 raise NotImplementedError
+
+            def main(self, argv: Sequence[str]) -> int:
+                del argv
+                return 0
+
+            def open_runtime(self, path: Path, **kwargs: Any) -> Runtime:
+                del path, kwargs
+                return Runtime()
+
+            def mcp_tools(self) -> Sequence[MediaTool]:
+                return [
+                    MediaTool(
+                        name="generate_image",
+                        description="One still.",
+                        parameters={
+                            "type": "object",
+                            "properties": {
+                                "prompt": {"type": "string", "description": "Caption."},
+                            },
+                            "required": ["prompt"],
+                        },
+                        handler="handle_image",
+                        result="image",
+                        task=True,
+                    )
+                ]
 
         handle = _Handle()
-
-        def mcp_tools():
-            return [
-                {
-                    "name": "generate_image",
-                    "description": "One still.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "prompt": {"type": "string", "description": "Caption."},
-                        },
-                        "required": ["prompt"],
-                    },
-                    "task": True,
-                    "handler": "handle_image",
-                    "result": "image",
-                }
-            ]
-
-        return SimpleNamespace(mcp_tools=mcp_tools, handle_image=handle)
+        return SimpleNamespace(pipeline=handle, handle_image=handle)
 
     monkeypatch.setattr("favlo.cli.load_pipeline", load)
     catalog = build_catalog(tmp_path)

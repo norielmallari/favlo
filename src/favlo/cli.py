@@ -1,7 +1,9 @@
 """Discover pipeline packages and run them.
 
-Layout is ``pipelines/<model>/<runtime>/``. The model id is the CLI flag
-stem. Loading imports ``{model}.{runtime}``.
+Layout is ``<root>/<model>/<runtime>/``. Roots are checkout ``pipelines/``,
+``pipeline_roots`` in settings, and ``FAVLO_PIPELINE_ROOTS``. The model id is
+the CLI flag stem. Loading imports ``{model}.{runtime}`` and reads the typed
+``pipeline`` export.
 """
 
 from __future__ import annotations
@@ -13,8 +15,9 @@ import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
-RUNTIMES = ("metal41", "cuda")
+RUNTIMES = ("metal41", "cuda", "portable")
 _IMPORTS = threading.Lock()
 
 
@@ -31,7 +34,7 @@ def repo_root() -> Path:
 
 
 def resolve_pipeline_root(pipeline_root: str, *, root: Path | None = None) -> Path:
-    """One runtime package directory. A relative value resolves against the checkout."""
+    """One path. A relative value resolves against the checkout."""
     text = pipeline_root.strip()
     if not text:
         message = "pipeline_root is empty"
@@ -49,7 +52,7 @@ def pipeline_tree(
     pipeline_root: str | None = None,
     root: Path | None = None,
 ) -> Path:
-    """The runtime package directory for one model."""
+    """The runtime package directory for one model under the checkout."""
     if runtime not in RUNTIMES:
         message = f"unknown runtime: {runtime}"
         raise ValueError(message)
@@ -60,7 +63,7 @@ def pipeline_tree(
 
 
 def _ensure_import_root(path: Path) -> None:
-    """Put the parent of the model package on ``sys.path``."""
+    """Put a plugin root on ``sys.path`` once."""
     text = str(path.resolve())
     if text not in sys.path:
         sys.path.insert(0, text)
@@ -73,43 +76,36 @@ def ensure_pipelines_path(*, root: Path | None = None) -> Path:
     return path
 
 
-def _registry_pipeline_roots(root: Path | None = None) -> tuple[str, ...]:
-    """Each ``pipeline_root`` stored on a registry row."""
-    names: list[str] = []
-    try:
-        from favlo.registry import load_registry
+def plugin_roots(*, root: Path | None = None) -> tuple[Path, ...]:
+    """Built-in ``pipelines/`` plus settings and env extra roots."""
+    base = root or repo_root()
+    found: list[Path] = []
+    seen: set[Path] = set()
 
-        data = load_registry(root)
+    def add(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        if not resolved.is_dir() or resolved in seen:
+            return
+        seen.add(resolved)
+        found.append(resolved)
+        _ensure_import_root(resolved)
+
+    add(base / "pipelines")
+    try:
+        from favlo.logs import configured_pipeline_roots, favlo_home, load_settings
+
+        for item in configured_pipeline_roots(load_settings(favlo_home())):
+            add(resolve_pipeline_root(item, root=base))
     except (OSError, ValueError):
-        return ()
-    models = data.get("models") if isinstance(data, dict) else None
-    if not isinstance(models, dict):
-        return ()
-    for entry in models.values():
-        if not isinstance(entry, dict):
-            continue
-        stored = entry.get("pipeline_root")
-        if isinstance(stored, str) and stored.strip() and stored.strip() not in names:
-            names.append(stored.strip())
-    return tuple(names)
-
-
-def _read_pipeline_constant(init: Path) -> str | None:
-    try:
-        text = init.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("PIPELINE"):
-            continue
-        if "=" not in stripped:
-            continue
-        _, _, rhs = stripped.partition("=")
-        value = rhs.strip().strip("\"'")
-        if value:
-            return value
-    return None
+        pass
+    env = os.environ.get("FAVLO_PIPELINE_ROOTS", "")
+    for item in env.split(":"):
+        if item.strip():
+            add(resolve_pipeline_root(item, root=base))
+    return tuple(found)
 
 
 def _consider_runtime(
@@ -122,9 +118,6 @@ def _consider_runtime(
     init = directory / "__init__.py"
     if not init.is_file():
         return
-    pipeline = _read_pipeline_constant(init)
-    if pipeline != model:
-        return
     runtimes = found.setdefault(model, {})
     previous = runtimes.get(runtime)
     if previous is not None and previous.resolve() != directory.resolve():
@@ -134,11 +127,9 @@ def _consider_runtime(
 
 
 def pipeline_runtimes(root: Path | None = None) -> dict[str, dict[str, Path]]:
-    """Model id to runtime name to package directory."""
-    base = root or repo_root()
+    """Model id to runtime name to package directory across all plugin roots."""
     found: dict[str, dict[str, Path]] = {}
-    tree = base / "pipelines"
-    if tree.is_dir():
+    for tree in plugin_roots(root=root):
         for model_dir in sorted(path for path in tree.iterdir() if path.is_dir()):
             if model_dir.name.startswith(".") or model_dir.name == "__pycache__":
                 continue
@@ -153,50 +144,50 @@ def pipeline_runtimes(root: Path | None = None) -> dict[str, dict[str, Path]]:
                         runtime=runtime,
                         directory=runtime_dir,
                     )
-    for stored in _registry_pipeline_roots(root):
-        if stored == "pipelines":
-            continue
-        try:
-            directory = resolve_pipeline_root(stored, root=base)
-        except ValueError:
-            continue
-        if not directory.is_dir() or not (directory / "__init__.py").is_file():
-            continue
-        runtime = directory.name
-        if runtime not in RUNTIMES:
-            continue
-        model = directory.parent.name
-        _ensure_import_root(directory.parent.parent)
-        _consider_runtime(found, model=model, runtime=runtime, directory=directory)
     return found
 
 
 def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
-    """Discovered model ids (CLI flag stems)."""
-    return tuple(sorted(pipeline_runtimes(root)))
+    """Discovered model ids that export a typed ``pipeline`` instance."""
+    from favlo.pipeline import Pipeline
+
+    names: list[str] = []
+    for model in sorted(pipeline_runtimes(root)):
+        try:
+            module = load_pipeline(model, root=root)
+            plugin = pipeline_instance(module)
+        except (FileNotFoundError, ImportError, TypeError, ValueError, AttributeError):
+            continue
+        if isinstance(plugin, Pipeline):
+            names.append(model)
+    return tuple(names)
 
 
 def pipeline_entries(root: Path | None = None) -> dict[str, Path]:
-    """Model id to a representative runtime package directory (preferred metal41)."""
+    """Model id to a representative runtime package directory."""
     found: dict[str, Path] = {}
     for model, runtimes in pipeline_runtimes(root).items():
         if "metal41" in runtimes:
             found[model] = runtimes["metal41"]
+        elif "portable" in runtimes:
+            found[model] = runtimes["portable"]
         else:
             found[model] = runtimes[sorted(runtimes)[0]]
     return found
 
 
 def default_runtime(name: str, root: Path | None = None) -> str:
-    """Sole runtime for a model, else ``metal41`` when present."""
+    """Sole runtime for a model, else ``metal41``, else ``portable``."""
     runtimes = pipeline_runtimes(root).get(name) or {}
     if not runtimes:
         message = f"pipeline is missing: {name}"
         raise FileNotFoundError(message)
-    if "metal41" in runtimes:
-        return "metal41"
     if len(runtimes) == 1:
         return next(iter(runtimes))
+    if "metal41" in runtimes:
+        return "metal41"
+    if "portable" in runtimes:
+        return "portable"
     message = f"pipeline {name} has multiple runtimes; pass runtime explicitly"
     raise ValueError(message)
 
@@ -225,32 +216,23 @@ def load_pipeline(
     runtime: str | None = None,
     pipeline_root: str | None = None,
 ) -> ModuleType:
+    """Import ``{name}.{runtime}``. ``pipeline_root`` is ignored for discovery.
+
+    A registry row that still names a removed runtime (for example ``metal41``
+    after a move to ``portable``) falls back to the discovered default when
+    that package exists under a plugin root.
+    """
+    del pipeline_root
     base = root or repo_root()
-    ensure_pipelines_path(root=base)
-    if pipeline_root:
-        directory = resolve_pipeline_root(pipeline_root, root=base)
-        if directory.name in RUNTIMES:
-            model_dir = directory.parent
-            chosen = runtime or directory.name
-            if chosen != directory.name:
-                directory = model_dir / chosen
-        else:
-            # Older rows may store the model directory; prefer an explicit runtime.
-            model_dir = directory
-            chosen = runtime or default_runtime(name, root=base)
-            directory = model_dir / chosen
-        if not (directory / "__init__.py").is_file():
-            message = f"pipeline file is missing: {directory}"
-            raise FileNotFoundError(message)
-        _ensure_import_root(model_dir.parent)
-        module_name = f"{model_dir.name}.{directory.name}"
-    else:
-        chosen = runtime or default_runtime(name, root=base)
-        runtimes = pipeline_runtimes(root=base).get(name) or {}
-        if chosen not in runtimes:
-            message = f"pipeline file is missing: {name}.{chosen}"
-            raise FileNotFoundError(message)
-        module_name = f"{name}.{chosen}"
+    plugin_roots(root=base)
+    runtimes = pipeline_runtimes(root=base).get(name) or {}
+    if not runtimes:
+        message = f"pipeline file is missing: {name}"
+        raise FileNotFoundError(message)
+    chosen = runtime or default_runtime(name, root=base)
+    if chosen not in runtimes:
+        chosen = default_runtime(name, root=base)
+    module_name = f"{name}.{chosen}"
     with _IMPORTS:
         try:
             return importlib.import_module(module_name)
@@ -259,8 +241,24 @@ def load_pipeline(
             raise FileNotFoundError(message) from exc
 
 
-def pipeline_roots(root: Path | None = None) -> tuple[Path, ...]:
-    """Directories that hold a discovered runtime package."""
+def pipeline_instance(module: ModuleType) -> Any:
+    """The typed ``pipeline`` export. Missing or wrong type raises ``TypeError``."""
+    from favlo.pipeline import Pipeline
+
+    name = getattr(module, "__name__", type(module).__name__)
+    try:
+        plugin = module.pipeline
+    except AttributeError as exc:
+        message = f"{name} does not export pipeline"
+        raise TypeError(message) from exc
+    if not isinstance(plugin, Pipeline):
+        message = f"{name}.pipeline is not a Pipeline"
+        raise TypeError(message)
+    return plugin
+
+
+def pipeline_package_roots(root: Path | None = None) -> tuple[Path, ...]:
+    """Directories that hold a discovered runtime package (for module drop)."""
     found: list[Path] = []
     seen: set[Path] = set()
     for runtimes in pipeline_runtimes(root).values():
@@ -273,16 +271,15 @@ def pipeline_roots(root: Path | None = None) -> tuple[Path, ...]:
     return tuple(found)
 
 
-def drop_pipeline_modules(root: Path | None = None) -> int:
-    """Drop imported pipeline packages so the next load reads the files again.
+# Back-compat name used by drop_pipeline_modules callers.
+pipeline_roots = pipeline_package_roots
 
-    The lock is the same one ``load_pipeline`` holds. A module under ``src/favlo`` stays.
-    """
+
+def drop_pipeline_modules(root: Path | None = None) -> int:
+    """Drop imported pipeline packages so the next load reads the files again."""
     with _IMPORTS:
-        roots = pipeline_roots(root)
-        model_roots = {
-            path.parent.resolve() for path in roots
-        }
+        roots = pipeline_package_roots(root)
+        model_roots = {path.parent.resolve() for path in roots}
         names = [
             name
             for name, module in list(sys.modules.items())
@@ -312,15 +309,12 @@ def _path_under(path: Path, roots: tuple[Path, ...]) -> bool:
         resolved = path.resolve()
     except OSError:
         return False
-    return any(resolved.is_relative_to(root) for root in roots)
+    return any(resolved.is_relative_to(root.resolve()) for root in roots)
 
 
 def pipeline_main(module: ModuleType) -> Callable[[Sequence[str]], int]:
-    entry = getattr(module, "main", None)
-    if not callable(entry):
-        message = f"{module.__file__} does not define main()"
-        raise TypeError(message)
-    return entry
+    plugin = pipeline_instance(module)
+    return plugin.main
 
 
 def main(argv: Sequence[str] | None = None) -> int:

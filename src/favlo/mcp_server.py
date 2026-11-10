@@ -250,20 +250,29 @@ class FavloTasks(TasksExtension):
 
 def media_kinds(module: Any) -> list[str]:
     """Kinds published by ``mcp_tools()``. A module without tools is not media."""
-    declare = getattr(module, "mcp_tools", None)
-    if not callable(declare):
+    from favlo.cli import pipeline_instance
+    from favlo.media_pipeline import MediaPipeline, MediaTool
+
+    try:
+        plugin = pipeline_instance(module)
+    except TypeError:
+        return []
+    if not isinstance(plugin, MediaPipeline):
         return []
     try:
-        raw = declare()
+        raw = plugin.mcp_tools()
     except Exception:
         return []
     if not isinstance(raw, list):
         return []
     found: list[str] = []
     for item in raw:
-        if not isinstance(item, dict):
+        if isinstance(item, MediaTool):
+            name = item.handler
+        elif isinstance(item, dict):
+            name = item.get("handler")
+        else:
             continue
-        name = item.get("handler")
         if not isinstance(name, str):
             continue
         kind = getattr(getattr(module, name, None), "kind", None)

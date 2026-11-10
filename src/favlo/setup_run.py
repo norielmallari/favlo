@@ -18,12 +18,15 @@ from favlo.cli import pipeline_names, repo_root
 
 _TIMEOUT = 7200
 _TAIL = 8000
-_SUBCOMMANDS = frozenset({"setup", "quantize", "quantize-text", "delete", "download", "models"})
-_HEAVY = frozenset({"setup", "quantize", "quantize-text", "delete", "download"})
+_SUBCOMMANDS = frozenset(
+    {"setup", "quantize", "quantize-text", "delete", "download", "models", "umt5"}
+)
+_HEAVY = frozenset({"setup", "quantize", "quantize-text", "delete", "download", "umt5"})
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _CONSOLE = frozenset({"auto", "pretty", "plain", "json"})
 _HOSTS = frozenset({"huggingface.co", "www.huggingface.co", "hf.co"})
+_UMT5_FORMATS = frozenset({"wan", "hf"})
 _SETUP_FLAGS = {
     "--repo": "repo",
     "--name": "name",
@@ -32,6 +35,7 @@ _SETUP_FLAGS = {
     "--console": "console",
     "--umt5": "repo",
     "--dest": "path",
+    "--student-dir": "path",
 }
 _QUANTIZE_FLAGS = {
     "--src": "path",
@@ -52,6 +56,14 @@ _QUANTIZE_FLAGS = {
     "--high-dir": "path",
     "--low-dir": "path",
     "--dest": "path",
+}
+_UMT5_SETUP_FLAGS = {"--umt5": "repo"}
+_UMT5_QUANTIZE_FLAGS = {
+    "--format": "umt5_format",
+    "--src": "path",
+    "--out": "path",
+    "--tokenizer": "path",
+    "--keep-source": "bool",
 }
 _DOWNLOAD_FLAGS = {"--check": "bool", "--console": "console"}
 _TEXT_FLAGS = {"--out": "path", "--name": "name", "--umt5": "repo"}
@@ -130,6 +142,8 @@ def _favlo(argv: Sequence[str], root: Path) -> list[str]:
         _flags(rest, _QUANTIZE_FLAGS, root)
     elif sub == "quantize-text":
         _flags(rest, _TEXT_FLAGS, root)
+    elif sub == "umt5":
+        _umt5(rest, root)
     elif sub == "download":
         _flags(rest, _DOWNLOAD_FLAGS, root)
     elif sub == "delete":
@@ -137,6 +151,17 @@ def _favlo(argv: Sequence[str], root: Path) -> list[str]:
     else:
         _models(rest, root)
     return ["uv", "run", "favlo", f"--{name}", sub, *rest]
+
+
+def _umt5(rest: Sequence[str], root: Path) -> None:
+    if not rest or rest[0] not in {"setup", "quantize"}:
+        message = "refused: umt5 takes setup or quantize"
+        raise ValueError(message)
+    action = rest[0]
+    if action == "setup":
+        _flags(rest[1:], _UMT5_SETUP_FLAGS, root)
+        return
+    _flags(rest[1:], _UMT5_QUANTIZE_FLAGS, root)
 
 
 def _flags(rest: Sequence[str], spec: Mapping[str, str], root: Path) -> None:
@@ -160,6 +185,10 @@ def _flags(rest: Sequence[str], spec: Mapping[str, str], root: Path) -> None:
             _word(value)
         elif kind == "percent":
             _percent(value)
+        elif kind == "umt5_format":
+            if value not in _UMT5_FORMATS:
+                message = f"refused: format {value}"
+                raise ValueError(message)
         elif kind == "console":
             if value not in _CONSOLE:
                 message = f"refused: console {value}"
