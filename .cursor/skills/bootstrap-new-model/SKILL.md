@@ -17,7 +17,7 @@ Add these, and nothing of another pipeline:
 | Note | `docs/<pipeline>/` | that checkout's `docs/<pipeline>/` |
 | Tests | `tests/` files that import only `<pipeline>.<runtime>` | `custom-pipelines/tests/` files that import only that package |
 
-`<pipeline>` is the flag stem, the model directory, and a Python identifier, such as `qwen36_35b_a3b`. `<runtime>` is `metal41`, `cuda`, or `portable`. The import is `<pipeline>.<runtime>`. Discovery walks plugin roots for `<pipeline>/<runtime>/__init__.py`. Do not edit `src/favlo/cli.py`.
+`<pipeline>` is the flag stem, the model directory, and a Python identifier, such as `example-model`. `<runtime>` is `metal41`, `cuda`, or `portable`. The import is `<pipeline>.<runtime>`. Discovery walks plugin roots for `<pipeline>/<runtime>/__init__.py`. Do not edit `src/favlo/cli.py`.
 
 An open-core pipeline lives in the Favlo checkout. A cloud custom pipeline lives under the hosted checkout's `custom-pipelines/` and is loaded only when that directory is a plugin root (`pipeline_roots` or `FAVLO_PIPELINE_ROOTS`). It uses the same base class, CLI, and MCP contract. It does not add a row to the open runtime table.
 
@@ -37,7 +37,7 @@ Bind one instance: `pipeline = Pipeline()`. A media module sets `handle_image = 
 
 `MediaPipeline` sets `kind` (`image`, `video`, `music`, or `voice`), `id_prefix`, and `object_name`. `generate` calls `checkpoint(stop, hold)` at a stage boundary after the submitted command finishes. Cancel carries no hold. Preempt carries host values only. Device buffers do not go in the hold. `open_runtime` accepts `owner`, calls `memory.set_max_memory`, and stamps one owner for every allocate. `ensure_open` and `close` use `favlo.media_memory`.
 
-Read the seam rule before writing the class, and add the new package and `docs/<pipeline>/**` to its globs when the pipeline is open-core: [language-pipeline.mdc](../../rules/language-pipeline.mdc), [embeddings-pipeline.mdc](../../rules/embeddings-pipeline.mdc), or [media-pipeline.mdc](../../rules/media-pipeline.mdc). Do not add another base class, a shared runner, or a kernel that branches on the pipeline. Do not change `src/favlo/` unless the task is the listener, the registry, the console, or the prefix store.
+Read the sibling package `AGENTS.md` for that seam before writing the class. Write `pipelines/<pipeline>/AGENTS.md` from that sibling wording, speaking as "this package", and do not add a glob rule. Do not add another base class, a shared runner, or a kernel that branches on the pipeline. A seam task may edit `language_pipeline.py`, `embeddings_pipeline.py`, `media_pipeline.py`, `media_memory.py`, `memory.py`, `mcp_server.py`, `response_chain.py`, `schedule.py`, and `pipelines.py`, and the listener, the registry, and the console. Do not change other modules under `src/favlo/`.
 
 ## CLI
 
@@ -91,6 +91,6 @@ Record a printed measurement in this pipeline's note. Do not invent one, and do 
 - The package exports a typed `pipeline` instance of the seam base class.
 - A media pipeline's `mcp_tools` lists every tool the listener should publish.
 - The pipeline smoke and the picture harness, or the language smokes, passed on this model.
-- An open-core pipeline has one runtime-table row, one `docs/README.md` row, and its paths in the seam-rule globs.
+- An open-core pipeline has one runtime-table row, one `docs/README.md` row, and `pipelines/<pipeline>/AGENTS.md`.
 - A cloud custom pipeline is in the hosted CLI catalog and harness note.
 - `git diff` does not touch another pipeline.

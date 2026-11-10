@@ -5,7 +5,7 @@ description: Search public literature and write a Favlo research claim for one p
 
 # Research claims
 
-Read [research-evidence.mdc](../../rules/research-evidence.mdc) and [RESEARCH.md](../../../RESEARCH.md) first. The rule decides where a claim lives and which words are allowed. This skill is the search and the filing.
+Read [docs/AGENTS.md](../../../docs/AGENTS.md) and [RESEARCH.md](../../../RESEARCH.md) first. That file decides where a claim lives and which words are allowed. This skill is the search and the filing.
 
 Work on `main`. Do not create a branch unless the user asks. Land the note, the catalog row, and the README link in one change. Commit only when the user asks.
 
@@ -58,7 +58,7 @@ The package license and readme are the rerun instructions. Do not add another li
 
 ## Key/value plane
 
-A recorded rate, a dispatch sum, or a needle row names the key/value plane that serve loaded. Planes differ in width, scale, and layout. A number measured on one plane does not fill a row for another. The pipeline note lists the planes that server accepts. Read that note for the names, and write the loaded name after aliases resolve. On `qwen36_35b_a3b` those names are `half`, `fp8_e4m3`, `e2m1`, and `f32`. On `qwen38_27b` those names are `half` and `fp8_e4m3`; an omitted cache uses `half`. `f16` and `fp16` resolve to `half`. `e4m3` and `fp8` resolve to `fp8_e4m3`. `fp4` resolves to `e2m1`.
+A recorded rate, a dispatch sum, or a needle row names the key/value plane that serve loaded. Planes differ in width, scale, and layout. A number measured on one plane does not fill a row for another. The pipeline note lists the planes that server accepts. Read that note for the names, and write the loaded name after aliases resolve. `f16` and `fp16` resolve to `half`. `e4m3` and `fp8` resolve to `fp8_e4m3`. `fp4` resolves to `e2m1`.
 
 ## Needle
 

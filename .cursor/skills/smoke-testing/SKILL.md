@@ -7,14 +7,34 @@ description: Run Favlo language-model pipeline smoke and agent smoke. Pipeline s
 
 One pipeline. Read this skill when another skill says to smoke. Do not copy these commands into that skill.
 
-Take the GPU with one `run`. It waits for the lock, closes the resident model when `favlo serve` is up and no request is open, runs the smoke, and releases on every exit, including failure and SIGINT. The daemon stays up. Do not kill it.
+Wait until the machine is free before a command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve` in its own process. That includes `pytest`, `kernels`, `quantize`, `complete`, `bf16`, `probe`, and `matmul`. Editing the write set does not wait. Reading another package does not.
+
+The machine is busy when `artifacts/pipeline-test.lock` exists and the `pid` in it is still running. A running `favlo serve` is not itself a reason to wait. The file is gitignored. Do not commit it.
+
+`run` waits until this shell owns the lock, runs the command, and releases on every exit, including a failed command and SIGINT. When the daemon is up and no request is open, it closes the resident model and holds chat until that release. The daemon stays up. Do not kill the server, and do not kill the process that holds the lock. Do not sleep and retry acquire outside the script.
 
 ```text
 uv run python -m favlo.smoke_lock run --pipeline <stem> --command smoke -- \
   uv run python -m pytest tests/<file> -s
+uv run python -m favlo.smoke_lock attach --pipeline <stem> --command <name> -- <command...>
 ```
 
-A stretch of several commands in one shell uses `acquire --wait` and one `release` at the end. `acquire` without `--wait` is for tests of exit 2 and 3.
+A command that calls the listener uses `attach`. It waits until the lock is clear, reuses `127.0.0.1:8129`, and does not take the lock. It starts the daemon only when that port is closed, and stops it only when this call started it. When `--pipeline` is the resident model and that package's sources are newer than its worker, `attach` closes the model before the command.
+
+A stretch of several commands in one shell uses one blocking acquire and one release at the end. `acquire` without `--wait` is for tests of exit 2 and 3. Agents do not use it.
+
+```text
+uv run python -m favlo.smoke_lock acquire --wait --pipeline <stem> --command <name>
+uv run python -m favlo.smoke_lock release
+```
+
+A lock whose `pid` is gone is stale. `release --stale` removes it and resumes chat. Do not delete the lock file by hand. Do not use `kill`, `stop_pid`, or `POST /v1/pipelines/close` to end a hold. Close during a live hold is 409. A chat during the hold receives 503. After release, the next chat loads a model again.
+
+The lock is one JSON object. `pipeline` is the flag stem. `pid` is the shell that ran `run` or `acquire --wait`, not the short-lived Python process. `command` is the short name of that test. Do not write a name, home directory, hostname, or device path.
+
+```json
+{"pipeline": "example-model", "pid": 12345, "command": "kernels"}
+```
 
 The file-agent and coding-agent commands reuse the listener on `127.0.0.1:8129` through `python -m favlo.smoke_lock attach`. They do not take the machine lock. When that pipeline is resident and its sources are newer than the worker, the model is unloaded before the run. Do not stop a daemon the user left running.
 
@@ -32,15 +52,7 @@ The model field is the pipeline name. A `:instruct` or `:thinking` id pins that 
 
 In-process, this package only. The reply collects 6 carrots. Temperature 0 is used only for greedy decode.
 
-Run the carrot file that imports only this package:
-
-| Pipeline | File |
-|---|---|
-| `qwen38_27b` | `tests/test_qwen38_27b_smoke.py` |
-| `qwen36_35b_a3b` | `tests/test_qwen36_35b_a3b_smoke.py` |
-| `gemma4_26b_a4b` | `tests/test_gemma4_26b_a4b_smoke.py` |
-
-`tests/test_qwen36_35b_a3b_smoke_16gb.py` is skipped for now. It would run the 35B file's cases with the runtime capped at 16GiB. Do not run that file until the skip is removed.
+Run the carrot file that imports only this package: `tests/test_<pipeline>_smoke.py`. A memory-capped variant of that file stays skipped until its skip is removed.
 
 The file covers, in order: greedy decode, the instruct card, the thinking card at the template default effort, then one case for each reasoning effort that template names (`low`, `medium`, `xhigh` when the template names them).
 

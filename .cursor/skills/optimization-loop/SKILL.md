@@ -30,7 +30,7 @@ The ceiling used for the 90% test is the kernel ceiling. The bandwidth ceiling i
 
 Change this pipeline's kernels or the forward that launches them. Update `docs/<pipeline>/` in the same change when the kernels, records, or cache change.
 
-Take the GPU with `uv run python -m favlo.smoke_lock run --pipeline <stem> --command <name> -- <command>` before any command that compiles shaders, dispatches Metal, loads a checkpoint, or quantizes in this process. `run` releases when the command exits, including failure and SIGINT. A stretch of several commands uses `acquire --wait` and one `release`. A harness that calls the listener uses `uv run python -m favlo.smoke_lock attach --pipeline <stem> --command <name> -- <command>`, or calls that listener itself. `attach` does not take the lock. When that pipeline is resident and its sources are newer than the worker, it unloads the model first. Do not wrap that harness in `run`. Do not kill a serve the user left running.
+Take the GPU with the smoke-testing skill before any command that compiles shaders, dispatches Metal, loads a checkpoint, or quantizes in this process. Do not copy those commands here. A harness that calls the listener uses `attach` from that skill and does not take the lock. Do not wrap that harness in `run`. Do not kill a serve the user left running.
 
 ## 3. Smoke
 

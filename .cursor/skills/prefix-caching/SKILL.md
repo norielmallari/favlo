@@ -69,4 +69,4 @@ Use the store directly, and keep this pipeline's own `align`, when a load or a f
 
 This pipeline's `docs/<pipeline>/` note says which regions it stores and whether an exact-length file is sampled. Do not add that layout to `ARCHITECTURE.md` or to another pipeline's note.
 
-A pack/unpack test uses numpy and imports only this package. It does not need the machine lock. A test that dispatches Metal or loads a checkpoint in this process uses `uv run python -m favlo.smoke_lock run --pipeline <stem> --command <name> -- <command>`. A harness that calls the listener uses `attach` with the same flags and does not take the lock. Do not invent a cache-hit token rate.
+A pack/unpack test uses numpy and imports only this package. It does not need the machine lock. A test that dispatches Metal or loads a checkpoint in this process, and a harness that calls the listener, uses the smoke-testing skill. Do not copy those commands here. Do not invent a cache-hit token rate.
