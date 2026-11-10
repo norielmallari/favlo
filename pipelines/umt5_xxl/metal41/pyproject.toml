@@ -1,0 +1,13 @@
+[project]
+name = "favlo-umt5-xxl-metal41"
+version = "0.0.0"
+description = "umt5_xxl metal41 runtime for Favlo"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["pyproject.toml"]

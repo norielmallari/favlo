@@ -1,0 +1,13 @@
+[project]
+name = "favlo-gemma4-26b-a4b-metal41"
+version = "0.0.0"
+description = "gemma4_26b_a4b metal41 runtime for Favlo"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["pyproject.toml"]

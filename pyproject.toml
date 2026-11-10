@@ -12,9 +12,7 @@ dependencies = [
     "jinja2>=3.1",
     "numpy>=2.1",
     "onnxruntime>=1.20",
-    "opencv-python-headless>=4.10",
-    "pyobjc-framework-coreml>=12.2.2",
-    "pyobjc-framework-Metal",
+    "pyobjc-framework-Metal; sys_platform == 'darwin'",
     "safetensors>=0.6",
     "sqlite-vec>=0.1.9",
     "fastapi>=0.115",
@@ -27,7 +25,6 @@ dependencies = [
     "agent-framework-ag-ui>=1.7.1",
     "sqlalchemy>=2.1.6",
     "alembic>=1.20.1",
-    "spandrel>=0.4.2",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +44,10 @@ harness = [
     "langdetect>=1.0.9",
     "nltk>=3.9",
 ]
+# OpenCV for portable customs (face_swap, relight) loaded via an extra plugin root.
+cv = [
+    "opencv-python-headless>=4.10",
+]
 
 [project.scripts]
 favlo = "favlo.cli:main"
@@ -57,6 +58,11 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 package = true
+
+# Sync from the checkout root: `uv sync --extra dev`.
+# Each pipelines/<id>/<runtime>/pyproject.toml declares that runtime's deps.
+# Those packages are not uv workspace members yet (imports stay via
+# `pythonpath = pipelines`). A cuda tree is omitted on Darwin until one exists.
 
 [tool.ruff]
 target-version = "py312"
