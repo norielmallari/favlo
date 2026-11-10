@@ -138,15 +138,16 @@ uv run python -m harness.coding --model qwen38-27b
 uv run python -m harness.needle --model qwen36-35b-a3b --tokens 65536
 uv run python -m harness.needle --model qwen36-35b-a3b --tokens 65536 --mode retrieve --depth 0.5
 uv run python -m harness.worktree --model qwen36-35b-a3b
-uv run python -m harness.image_smoke_agent
-uv run python -m harness.image_persona
-uv run python -m harness.video_smoke_agent
+uv run python -m harness.image_smoke_agent --pipeline z-image-turbo --tool generate_image
+uv run python -m harness.image_persona --pipeline z-image-turbo --tool generate_image
+uv run python -m harness.video_smoke_agent --pipeline wan22-i2v --tool generate_video
 uv run python -m harness.media_pipeline
 uv run python -m harness.language_pipeline
-uv run python -m harness.voice_smoke_agent
-uv run python -m harness.music_long_agent
+uv run python -m harness.voice_smoke_agent --pipeline voxcpm2 --tool generate_voice
+uv run python -m harness.music_long_agent --pipeline ace-step-15-turbo --tool generate_music
 uv run python -m harness.embeddings_agent
 uv run python -m harness.server status
 ```
+
 
 What the harness scores is [docs/harness.md](docs/harness.md). A pipeline's quantize, probe, and matmul commands are that pipeline's note.

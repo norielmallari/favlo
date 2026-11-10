@@ -168,64 +168,64 @@ Posts one chat completion to `qwen38-27b` with `tests/assets/favlo-horse.png`. T
 ### Image persona
 
 ```bash
-python -m harness.image_persona
+python -m harness.image_persona --pipeline <id> --tool generate_image [--size WIDTHxHEIGHT]
 ```
 
-The agent instructions are the horse persona. The user asks that horse to draw a picture of himself. The image prompt is a cute 2.5D horse with a white blaze and large blue eyes, sitting at a desk. The image call omits `model`, so the host uses the registry image folder. That folder is an int8 Turbo record, at the pipeline's maximum edge, seed 0. Prints the PNG byte count. The next turn asks whether the picture shows that stylized horse rather than a photograph. Exit 0 means the reply affirms it. The PNG is `artifacts/favlo-horse.png`. Uses the listener session. Not part of `pytest`.
+The agent instructions are the horse persona. The user asks that horse to draw a picture of himself. The image prompt is a cute 2.5D horse with a white blaze and large blue eyes, sitting at a desk. `--tool` may be repeated; the agent registers those published names through `MCPStreamableHTTPTool` and calls the first one. The image call omits `model`, so the host uses the registry image folder. An omitted `--size` uses `docs/<id>/smoke.json` width and height. Seed is 0. Prints the PNG byte count. The next turn asks whether the picture shows that stylized horse rather than a photograph. Exit 0 means the reply affirms it. The PNG is `artifacts/favlo-horse.png`. Uses the listener session. Not part of `pytest`.
 
 ## Video
 
 ### I2V smoke agent
 
 ```bash
-python -m harness.video_smoke_agent
+python -m harness.video_smoke_agent --pipeline <id> --tool generate_video
 ```
 
-The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to the clip size. The agent calls `wan22_i2v__generate_video` for the model in `docs/wan22-i2v/smoke.json`, using `video_prompt`, the smoke frame count, and that PNG as an image block. It reads `favlo://videos/{id}.mp4` into `artifacts/video-smoke-agent.mp4`. The same model reads frame 0, the middle frame, and the last frame and must affirm `prompt` in that file. Exit 0 means each frame was affirmed and the file has that geometry. Uses the listener session. Not part of `pytest`.
+The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to the clip size. `--tool` may be repeated. Those local names are the tools the pipeline already publishes. The agent registers exactly those published names through `MCPStreamableHTTPTool` and calls the first one with `video_prompt` (or `prompt`), the smoke frame count, and that PNG as an image block from `docs/<id>/smoke.json`. It reads the result into `artifacts/video-smoke-agent.mp4`. The same chat model reads frame 0, the middle frame, and the last frame and must affirm `prompt` in that file. Exit 0 means each frame was affirmed and the file has that geometry. Uses the listener session. Not part of `pytest`.
 
 ### TI2V smoke agent
 
 ```bash
-python -m harness.video_ti2v_agent
+python -m harness.video_ti2v_agent --pipeline <id> --tool generate_video_t2v --tool generate_video_i2v
 ```
 
-The text clip omits the still. The still clip passes `tests/assets/favlo-horse.png`, and the pipeline resizes it to `i2v_width` and `i2v_height` from `docs/wan22-ti2v-5b/smoke.json`. The agent calls `generate_video_t2v` with no still at `width` and `height`, then `generate_video_i2v` with the PNG. Outputs are `artifacts/video-ti2v-t2v.mp4` and `artifacts/video-ti2v-agent.mp4`. Vision checks frame 0, the middle frame, and the last frame of the still clip against the prompt. Exit 0 means both files match smoke sizes and frame count and each frame was affirmed. Uses the listener session. Not part of `pytest`.
+Pass the text tool first and the still tool second. The text clip omits the still. The still clip passes `tests/assets/favlo-horse.png`, and the pipeline resizes it to `i2v_width` and `i2v_height` from `docs/<id>/smoke.json`. Outputs are `artifacts/video-ti2v-t2v.mp4` and `artifacts/video-ti2v-agent.mp4`. Vision checks frame 0, the middle frame, and the last frame of the still clip against the prompt. Exit 0 means both files match smoke sizes and frame count and each frame was affirmed. Uses the listener session. Not part of `pytest`.
 
 ### Video quality comparison
 
 ```bash
-python -m harness.video_quality_agent
+python -m harness.video_quality_agent --pipeline <id> --tool generate_video
 ```
 
-The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to 416×240. Calls `wan22_i2v__generate_video` twice at `quality` `low` and then `max`, with no chat between tasks, and reads each MP4 into `artifacts/video-quality-low.mp4` and `artifacts/video-quality-max.mp4`. Exit 0 means both files are 5 frames at 416×240 and the max file is larger. Uses the listener session. Not part of `pytest`.
+The still is `tests/assets/favlo-horse.png`. The pipeline resizes it to 416×240. Calls the published tool twice at `quality` `low` and then `max`, with no chat between tasks, and reads each MP4 into `artifacts/video-quality-low.mp4` and `artifacts/video-quality-max.mp4`. Exit 0 means both files are 5 frames at 416×240 and the max file is larger. Uses the listener session. Not part of `pytest`.
 
 ## Music
 
 ### Music smoke agent
 
 ```bash
-python -m harness.music_smoke_agent
+python -m harness.music_smoke_agent --pipeline <id> --tool generate_music
 ```
 
-Calls `generate_music` for the model, prompt, lyrics, seconds, seed, bpm, keyscale, and timesignature in `docs/ace-step-15-turbo/smoke.json`. Reads `favlo://music/{id}.wav` into `artifacts/music-smoke-agent.wav`. `python -m harness.inspect_wav` writes the report and `artifacts/music-smoke-agent.inspect.png`. The report adds key, pitch, harmony, quiet slices, and tempo; optional flags compare to the request. Exit 0 means template seconds, key, and bpm match the smoke request and the file is 10 seconds, 48 kHz, stereo, with RMS above the silence floor. Uses the listener session. Not part of `pytest`.
+`--tool` may be repeated. The agent registers those published names through `MCPStreamableHTTPTool` and calls the first one with the model, prompt, lyrics, seconds, seed, bpm, keyscale, and timesignature in `docs/<id>/smoke.json`. Reads the WAV into `artifacts/music-smoke-agent.wav`. `python -m harness.inspect_wav` writes the report and `artifacts/music-smoke-agent.inspect.png`. The report adds key, pitch, harmony, quiet slices, and tempo; optional flags compare to the request. Exit 0 means template seconds, key, and bpm match the smoke request and the file is the note's duration, 48 kHz, stereo, with RMS above the silence floor. Uses the listener session. Not part of `pytest`.
 
 ### Music long agent
 
 ```bash
-python -m harness.music_long_agent
+python -m harness.music_long_agent --pipeline <id> --tool generate_music [--card long.json]
 ```
 
-Calls `generate_music` for the 3 minute request in `docs/ace-step-15-turbo/long.json` and reads the WAV into `artifacts/music-long-agent.wav`. The inspect report is checked like the 10 second smoke. Exit 0 also requires spectral flatness at or below 0.35, quiet slices at or below 15% of the half-second grid, a key margin of at least 0.02, and a one-second join no more than 15 times the median step beside it. Prints `seam_ratio`. Uses the listener session. Not part of `pytest`. `tests/test_music_long_agent.py` checks those gates without a listener.
+Calls the published tool for the request in `docs/<id>/<card>` (default `long.json`) and reads the WAV into `artifacts/music-long-agent.wav`. The inspect report is checked like the smoke agent. Exit 0 also requires spectral flatness at or below 0.35, quiet slices at or below 15% of the half-second grid, a key margin of at least 0.02, and a one-second join no more than 15 times the median step beside it. Prints `seam_ratio`. Uses the listener session. Not part of `pytest`. `tests/test_music_long_agent.py` checks those gates without a listener.
 
 ## Voice
 
 ### Voice smoke agent
 
 ```bash
-python -m harness.voice_smoke_agent
+python -m harness.voice_smoke_agent --pipeline <id> --tool generate_voice
 ```
 
-Calls `generate_voice` for the model, line, and instructions in `docs/voxcpm2/smoke.json`. Reads `favlo://voice/{id}.wav` into `artifacts/voice-smoke-agent.wav`. Exit 0 means mono at the note's sample rate, RMS above the silence floor, and duration inside `max_seconds`. Uses the listener session. Not part of `pytest`. `tests/test_voice_smoke_agent.py` checks the same format rule without a listener.
+`--tool` may be repeated. The agent registers those published names through `MCPStreamableHTTPTool` and calls the first one with the model, line, and instructions in `docs/<id>/smoke.json`. Reads the WAV into `artifacts/voice-smoke-agent.wav`. Exit 0 means mono at the note's sample rate, RMS above the silence floor, and duration inside `max_seconds`. Uses the listener session. Not part of `pytest`. `tests/test_voice_smoke_agent.py` checks the same format rule without a listener.
 
 ## Media preemption
 

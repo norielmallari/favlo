@@ -1,9 +1,11 @@
-"""Favlo draws a picture of himself at the largest edge the machine can hold.
+"""Favlo draws a picture of himself through a published image tool.
 
-The agent instructions are the horse persona. The user asks for a picture
-of that horse. The image prompt is the 2.5D mascot: a chestnut horse with a
-white blaze and large blue eyes, sitting at a desk. The image call uses
-``MAX_EDGE`` on each side. Exit 0 means the 35B vision check affirms it.
+The tool names come from the command. The listener already published them.
+A Microsoft Agent Framework ``MCPStreamableHTTPTool`` registers those names
+and no others. The agent instructions are the horse persona. The user asks
+for a picture of that horse. The image prompt is the 2.5D mascot. ``--size``
+sets the edge; when omitted, ``docs/<pipeline>/smoke.json`` width and height
+are used. Exit 0 means the vision check affirms it.
 """
 
 from __future__ import annotations
@@ -12,18 +14,15 @@ import argparse
 import asyncio
 import base64
 from pathlib import Path
-from typing import Annotated
 
-from agent_framework import Agent, tool
-from pydantic import Field
+from agent_framework import Agent
 
 from favlo.chat_client import open_chat_client
 from favlo.persona import PERSONA
 from harness.harness_model import judge_model
-from harness.image_smoke_agent import HOST, affirms, post_json
-from harness.mcp_media import generate, read_link
+from harness.image_smoke_agent import HOST, affirms, image_mcp, post_json, registered, smoke_note
+from harness.mcp_media import published_name
 from harness.server import close_listener, open_listener
-from z_image_turbo.scratch import MAX_EDGE
 
 IMAGE_PROMPT = (
     "A cute 2.5D stylized young horse, not a photograph and not a flat cartoon. "
@@ -69,76 +68,85 @@ def judge(port: int, png: bytes, model: str) -> str:
     return str(payload["choices"][0]["message"].get("content") or "")
 
 
-def image_tools(port: int, png: list[bytes]) -> list[object]:
-    @tool(approval_mode="never_require")
-    def generate_image(
-        prompt_text: Annotated[str, Field(description="What to draw.")],
-    ) -> str:
-        """Draw one 2.5D picture of the cute horse mascot."""
-        if prompt_text.strip() != IMAGE_PROMPT:
-            return f"use this prompt exactly: {IMAGE_PROMPT}"
-        result = generate(
-            port,
-            "generate_image",
-            {
-                "prompt": IMAGE_PROMPT,
-                "size": f"{MAX_EDGE}x{MAX_EDGE}",
-                "seed": 0,
-            },
-        )
-        png.append(read_link(port, result, "image/png"))
-        return "image ready"
-
-    return [generate_image]
-
-
-async def create_image(base_url: str, port: int, png: list[bytes], model: str) -> None:
+async def create_image(
+    base_url: str,
+    port: int,
+    names: list[str],
+    size: str,
+    model: str,
+) -> bytes:
+    png: list[bytes] = []
+    call = names[0]
     client = open_chat_client(model, base_url)
     client.function_invocation_configuration["max_iterations"] = 2
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
-    agent = Agent(
-        client=client,
-        name="favlo",
-        instructions=(
-            PERSONA
-            + " When someone asks for a picture of you, call generate_image once"
-            + " with this prompt exactly, then stop: "
-            + IMAGE_PROMPT
-        ),
-        tools=image_tools(port, png),
-        default_options={"temperature": 0},
-    )
-    await agent.run(
-        ASK,
-        options={
-            "temperature": 0,
-            "tool_choice": {"mode": "required", "required_function_name": "generate_image"},
-        },
-    )
+    async with image_mcp(port, names, png) as mcp:
+        registered(mcp, names)
+        agent = Agent(
+            client=client,
+            name="favlo",
+            instructions=(
+                PERSONA
+                + f" When someone asks for a picture of you, call {call} once"
+                + " with this prompt exactly, then stop: "
+                + IMAGE_PROMPT
+            ),
+            tools=mcp,
+            default_options={"temperature": 0},
+        )
+        await agent.run(
+            ASK,
+            options={
+                "temperature": 0,
+                "tool_choice": {"mode": "required", "required_function_name": call},
+                "additional_function_arguments": {
+                    "prompt": IMAGE_PROMPT,
+                    "size": size,
+                    "seed": 0,
+                },
+            },
+        )
+    if not png:
+        message = "the agent did not generate an image"
+        raise RuntimeError(message)
+    return png[-1]
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Favlo draws himself and the 35B checks it.")
+    parser = argparse.ArgumentParser(description="Favlo draws himself and the vision model checks it.")
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--pipeline", required=True, help="pipeline id")
+    parser.add_argument(
+        "--tool",
+        action="append",
+        required=True,
+        dest="tools",
+        help="local tool name the pipeline already publishes",
+    )
+    parser.add_argument(
+        "--size",
+        default=None,
+        help="WIDTHxHEIGHT; default is docs/<pipeline>/smoke.json width and height",
+    )
+    parser.add_argument("--judge", default=None, help="chat model id; default is the registry default")
     args = parser.parse_args(argv)
     root = args.root.resolve()
-    model = judge_model(root)
+    note = smoke_note(root, args.pipeline)
+    names = [published_name(args.pipeline, tool) for tool in args.tools]
+    size = args.size or f"{note['width']}x{note['height']}"
+    model = args.judge or judge_model(root)
     listener = None
-    png: list[bytes] = []
     try:
         listener = open_listener()
         port = listener.port
         base = f"http://{HOST}:{port}/v1"
-        print(f"generating on {port} size {MAX_EDGE}", flush=True)
-        asyncio.run(create_image(base, port, png, model))
-        if not png:
-            print("the agent did not generate an image", flush=True)
-            return 1
+        print(f"generating on {port} size {size}", flush=True)
+        png = asyncio.run(create_image(base, port, names, size, model))
         (root / "artifacts").mkdir(parents=True, exist_ok=True)
-        (root / "artifacts" / "favlo-horse.png").write_bytes(png[-1])
-        print(f"image bytes {len(png[-1])}", flush=True)
+        (root / "artifacts" / "favlo-horse.png").write_bytes(png)
+        print(f"image bytes {len(png)}", flush=True)
         print("checking", flush=True)
-        reply = judge(port, png[-1], model)
+        reply = judge(port, png, model)
         print(reply, flush=True)
         if affirms(reply):
             print("image matches", flush=True)

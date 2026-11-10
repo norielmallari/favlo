@@ -1,12 +1,12 @@
-"""Turn the horse still into two 240p clips, at low and max.
+"""Turn the horse still into two clips, at low and max quality.
 
 The still is ``tests/assets/favlo-horse.png``. The pipeline resizes it to
-416×240. ``wan22_i2v__generate_video`` then runs twice, at ``quality`` ``low`` and
-``max``, with no chat between them. Each result is read from
-``favlo://videos/{id}.mp4`` and saved as ``artifacts/video-quality-low.mp4``
+416×240. The published tool from ``--pipeline`` / ``--tool`` then runs twice,
+at ``quality`` ``low`` and ``max``, with no chat between them. Each result is
+read from the tool result and saved as ``artifacts/video-quality-low.mp4``
 and ``artifacts/video-quality-max.mp4``. Exit 0 means both files are 5 frames
 at 416×240 and the max file is larger. This command is not part of pytest.
-The 320p clip stays ``harness.video_smoke_agent``.
+The smoke clip stays ``harness.video_smoke_agent``.
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from harness.image_attachment import HORSE
-from harness.mcp_media import generate, read_link
+from harness.image_smoke_agent import smoke_note
+from harness.mcp_media import generate, published_name, read_link
 from harness.server import close_listener, open_listener
 from harness.video_mp4 import save_mp4
-from harness.video_smoke_agent import _image_block, smoke_paths
+from harness.video_smoke_agent import _image_block, video_body
 
 FRAMES = 5
 WIDTH = 416
@@ -30,20 +31,28 @@ QUALITIES = ("low", "max")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Turn the horse still into low and max clips.")
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--pipeline", required=True, help="pipeline id")
+    parser.add_argument(
+        "--tool",
+        required=True,
+        help="local tool name the pipeline already publishes",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="registry folder; omit for the note's model or the host default",
+    )
     args = parser.parse_args(argv)
     root = args.root.resolve()
-    video_note = smoke_paths(root)[1]
+    note = smoke_note(root, args.pipeline)
     still = root / HORSE
     if not still.is_file():
         print(f"missing {HORSE.as_posix()}", flush=True)
         return 1
-    video_body = {
-        "model": video_note["model"],
-        "prompt": video_note["video_prompt"],
-        "size": f"{WIDTH}x{HEIGHT}",
-        "frames": FRAMES,
-        "seed": video_note["seed"],
-    }
+    body = video_body(note, still, args.model)
+    body["size"] = f"{WIDTH}x{HEIGHT}"
+    body["frames"] = FRAMES
+    name = published_name(args.pipeline, args.tool)
     listener = None
     try:
         listener = open_listener()
@@ -52,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         for quality in QUALITIES:
             print(f"video {quality}", flush=True)
             try:
-                blob = _clip(port, video_body, still, quality)
+                blob = _clip(port, name, body, still, quality)
             except RuntimeError as exc:
                 print(exc, flush=True)
                 return 1
@@ -76,20 +85,19 @@ def main(argv: list[str] | None = None) -> int:
             close_listener(listener)
 
 
-def _clip(port: int, body: dict[str, Any], still: Path, quality: str) -> bytes:
-    result = generate(
-        port,
-        "generate_video",
-        {
-            "model": body["model"],
-            "prompt": body["prompt"],
-            "image": _image_block(still),
-            "size": body["size"],
-            "frames": body["frames"],
-            "seed": body["seed"],
-            "quality": quality,
-        },
-    )
+def _clip(port: int, name: str, body: dict[str, Any], still: Path, quality: str) -> bytes:
+    arguments = {
+        "prompt": body["prompt"],
+        "image": _image_block(still),
+        "size": body["size"],
+        "frames": body["frames"],
+        "seed": body["seed"],
+        "quality": quality,
+    }
+    folder = body.get("model")
+    if isinstance(folder, str) and folder:
+        arguments["model"] = folder
+    result = generate(port, name, arguments)
     return read_link(port, result, "video/mp4")
 
 

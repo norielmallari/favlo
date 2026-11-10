@@ -1,12 +1,14 @@
-"""Agent that turns the horse still into the shortest 320p clip.
+"""Agent that turns the horse still into the smoke clip.
 
-The still is ``tests/assets/favlo-horse.png``. The pipeline resizes it to the
-clip size. The Microsoft Agent Framework agent calls ``wan22_i2v__generate_video``
-and reads ``favlo://videos/{id}.mp4`` into ``artifacts/video-smoke-agent.mp4``.
-The vision tower then reads frame 0, the middle frame, and the last frame of
-that file and must affirm the still sentence. Exit 0 means each of those
-frames was affirmed and the file has the smoke.json frame count at 576×320.
-This command is not part of pytest.
+The tool names come from the command. The listener already published them.
+A Microsoft Agent Framework ``MCPStreamableHTTPTool`` registers those names
+and no others. The still is ``tests/assets/favlo-horse.png``. The pipeline
+resizes it to the clip size. The run calls the first name with the prompt,
+size, frames, and seed in ``docs/<pipeline>/smoke.json``. The MP4 is
+``artifacts/video-smoke-agent.mp4``. The vision tower then reads frame 0,
+the middle frame, and the last frame and must affirm the still sentence.
+Exit 0 means each of those frames was affirmed and the file has the smoke
+geometry. This command is not part of pytest.
 """
 
 from __future__ import annotations
@@ -20,23 +22,17 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from agent_framework import Agent, tool
+from agent_framework import Agent
 
 from favlo.chat_client import open_chat_client
 from harness.harness_model import judge_model
 from harness.image_attachment import HORSE
-from harness.image_smoke_agent import affirms
-from harness.mcp_media import generate, read_link
+from harness.image_smoke_agent import affirms, image_mcp, registered, smoke_note
+from harness.mcp_media import published_name
 from harness.server import close_listener, open_listener
 from harness.video_mp4 import frame_png, save_mp4
 
 HOST = "127.0.0.1"
-
-
-def smoke_paths(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    image = json.loads((root / "docs" / "z-image-turbo" / "smoke.json").read_text(encoding="utf-8"))
-    video = json.loads((root / "docs" / "wan22-i2v" / "smoke.json").read_text(encoding="utf-8"))
-    return image, video
 
 
 def post_json(port: int, route: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -61,71 +57,59 @@ def _image_block(path: Path) -> dict[str, str]:
     }
 
 
-def video_tools(
+def video_body(note: dict[str, Any], still: Path, model: str | None) -> dict[str, Any]:
+    """One I2V body. ``video_prompt`` is the motion line when present."""
+    prompt = note.get("video_prompt") or note["prompt"]
+    body: dict[str, Any] = {
+        "prompt": prompt,
+        "image": _image_block(still),
+        "size": f"{note['width']}x{note['height']}",
+        "frames": note["frames"],
+        "seed": note["seed"],
+    }
+    folder = model or note.get("model")
+    if isinstance(folder, str) and folder:
+        body["model"] = folder
+    return body
+
+
+async def create_video(
+    base_url: str,
     port: int,
-    video_body: dict[str, Any],
-    still: Path,
-    clip: list[bytes],
-) -> list[object]:
-    @tool(approval_mode="never_require")
-    def generate_video() -> str:
-        """Generate the 320p clip from the still."""
-        if not still.is_file():
-            return "image is missing"
-        result = generate(
-            port,
-            "generate_video",
-            {
-                "model": video_body["model"],
-                "prompt": video_body["prompt"],
-                "image": _image_block(still),
-                "size": video_body["size"],
-                "frames": video_body["frames"],
-                "seed": video_body["seed"],
+    names: list[str],
+    body: dict[str, Any],
+    model: str,
+) -> bytes:
+    clip: list[bytes] = []
+    call = names[0]
+    client = open_chat_client(model, base_url)
+    client.function_invocation_configuration["max_iterations"] = 2
+    client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
+    async with image_mcp(port, names, clip) as mcp:
+        registered(mcp, names)
+        agent = Agent(
+            client=client,
+            name="video-smoke-agent",
+            instructions=f"Call {call} once with the exact arguments. Then stop.",
+            tools=mcp,
+            default_options={"temperature": 0},
+        )
+        extra: dict[str, Any] = {"image": body["image"]}
+        folder = body.get("model")
+        if isinstance(folder, str) and folder:
+            extra["model"] = folder
+        await agent.run(
+            _ask(call, body),
+            options={
+                "temperature": 0,
+                "tool_choice": {"mode": "required", "required_function_name": call},
+                "additional_function_arguments": extra,
             },
         )
-        clip.append(read_link(port, result, "video/mp4"))
-        return "video ready"
-
-    return [generate_video]
-
-
-def _agent(
-    base_url: str,
-    tools: list[object],
-    name: str,
-    text: str,
-    model: str,
-    iterations: int = 2,
-) -> int:
-    try:
-        asyncio.run(_run(base_url, tools, name, text, model, iterations))
-    except Exception as exc:
-        print(exc, flush=True)
-        return 1
-    return 0
-
-
-async def _run(
-    base_url: str, tools: list[object], name: str, text: str, model: str, iterations: int = 2
-) -> None:
-    client = open_chat_client(model, base_url)
-    client.function_invocation_configuration["max_iterations"] = iterations
-    client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
-    agent = Agent(
-        client=client,
-        name="video-smoke-agent",
-        instructions="Call the named tool once. Then stop.",
-        tools=tools,
-        default_options={"temperature": 0},
-    )
-    await agent.run(
-        text,
-        options={
-            "temperature": 0,
-            "tool_choice": {"mode": "required", "required_function_name": name},
-        },
-    )
+    if not clip:
+        message = "the agent did not generate a video"
+        raise RuntimeError(message)
+    return clip[-1]
 
 
 def check_still(port: int, png: bytes, sentence: str, model: str) -> str:
@@ -165,60 +149,50 @@ def _png_size(blob: bytes) -> tuple[int, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Turn the horse still into the 320p clip.")
+    parser = argparse.ArgumentParser(description="Turn the horse still into the smoke clip.")
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--pipeline", required=True, help="pipeline id")
+    parser.add_argument(
+        "--tool",
+        action="append",
+        required=True,
+        dest="tools",
+        help="local tool name the pipeline already publishes",
+    )
     parser.add_argument(
         "--judge",
         default=None,
         help="chat model id; default is the registry default",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="registry folder; omit for the note's model or the host default",
+    )
     args = parser.parse_args(argv)
     root = args.root.resolve()
     judge_id = args.judge or judge_model(root)
-    video_note = smoke_paths(root)[1]
+    note = smoke_note(root, args.pipeline)
+    names = [published_name(args.pipeline, tool) for tool in args.tools]
     still = root / HORSE
     if not still.is_file():
         print(f"missing {HORSE.as_posix()}", flush=True)
         return 1
-    video_body = {
-        "model": video_note["model"],
-        "prompt": video_note["video_prompt"],
-        "size": f"{video_note['width']}x{video_note['height']}",
-        "frames": video_note["frames"],
-        "seed": video_note["seed"],
-    }
+    body = video_body(note, still, args.model)
     listener = None
     try:
         listener = open_listener()
         port = listener.port
         base = f"http://{HOST}:{port}/v1"
-        clip: list[bytes] = []
-        video_only = video_tools(port, video_body, still, clip)
-        print("video", flush=True)
-        failed = _agent(
-            base,
-            [video_only[0]],
-            "generate_video",
-            f"Generate the {video_note['frames']}-frame 320p video from the image.",
-            judge_id,
-            iterations=1,
-        )
-        if not clip:
-            if failed != 0:
-                return 1
-            print("video is missing", flush=True)
-            return 1
+        print(f"video on {port}", flush=True)
+        blob = asyncio.run(create_video(base, port, names, body, judge_id))
         out = root / "artifacts" / "video-smoke-agent.mp4"
-        saved = save_mp4(clip[-1], out)
+        saved = save_mp4(blob, out)
         print(f"wrote {out} frames {saved[0]} size {saved[1]}x{saved[2]}", flush=True)
-        expected = (
-            video_note["frames"],
-            video_note["width"],
-            video_note["height"],
-        )
+        expected = (int(note["frames"]), int(note["width"]), int(note["height"]))
         if saved != expected:
             return 1
-        sentence = str(video_note["prompt"])
+        sentence = str(note["prompt"])
         seen: list[int] = []
         for index in (0, (saved[0] - 1) // 2, saved[0] - 1):
             if index in seen:
@@ -235,6 +209,14 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if listener is not None:
             close_listener(listener)
+
+
+def _ask(tool: str, body: dict[str, Any]) -> str:
+    lines = [f"Call {tool} once with these arguments, then stop."]
+    for key in ("prompt", "size", "frames", "seed"):
+        if key in body:
+            lines.append(f"{key}: {body[key]}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

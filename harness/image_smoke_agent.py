@@ -74,7 +74,7 @@ def image_mcp(
         load_prompts=False,
         approval_mode="never_require",
         allowed_tools=names,
-        additional_tool_argument_names=["model"],
+        additional_tool_argument_names=["model", "image"],
         parse_tool_results=_capture(png),
         request_timeout=None,
     )

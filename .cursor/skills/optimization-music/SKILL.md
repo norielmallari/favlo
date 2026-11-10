@@ -37,7 +37,7 @@ After a modification, stop at the first failure, fix it, and rerun from that ste
 1. `uv run pytest` on the tests that import only this package, excluding a smoke that generates unless that is the next step.
 2. `uv run favlo --<pipeline> kernels` when that command exists.
 3. The pipeline's recorded generation smoke, when it has one.
-4. `python -m harness.music_smoke_agent` when this pipeline is the one that command generates. That harness checks the file and compares the request template with the inspect template. It does not judge the music. It is not the file agent or the coding agent.
+4. `python -m harness.music_smoke_agent --pipeline <id> --tool generate_music` when this pipeline is the one that command generates. That harness checks the file and compares the request template with the inspect template. It does not judge the music. It is not the file agent or the coding agent.
 
 ## 4. Commit
 

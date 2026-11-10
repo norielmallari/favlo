@@ -1,11 +1,12 @@
-"""Agent for the Wan2.2 TI2V-5B text clip and still clip.
+"""Agent for one TI2V pipeline's text clip and still clip.
 
-The text clip omits the still and uses ``width`` and ``height``. The still
-clip passes ``tests/assets/favlo-horse.png``. The pipeline resizes it to
-``i2v_width`` and ``i2v_height``. Exit 0 means both files match
-``docs/wan22-ti2v-5b/smoke.json`` and the vision tower affirms frame
-0, the middle frame, and the last frame of the still clip. This command is
-not part of pytest.
+The tool names come from the command. Pass the text tool first and the still
+tool second. A Microsoft Agent Framework ``MCPStreamableHTTPTool`` registers
+those published names and no others. The text clip omits the still. The still
+clip passes ``tests/assets/favlo-horse.png``. Sizes and frames come from
+``docs/<pipeline>/smoke.json``. Exit 0 means both files match that note and
+the vision tower affirms frame 0, the middle frame, and the last frame of the
+still clip. This command is not part of pytest.
 """
 
 from __future__ import annotations
@@ -18,22 +19,18 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from agent_framework import Agent, tool
+from agent_framework import Agent
 
 from favlo.chat_client import open_chat_client
 from harness.harness_model import judge_model
 from harness.image_attachment import HORSE
-from harness.image_smoke_agent import affirms
-from harness.mcp_media import generate, read_link
+from harness.image_smoke_agent import affirms, image_mcp, registered, smoke_note
+from harness.mcp_media import published_name
 from harness.server import close_listener, open_listener
 from harness.video_mp4 import frame_png, save_mp4
+from harness.video_smoke_agent import _image_block
 
 HOST = "127.0.0.1"
-
-
-def smoke_card(root: Path) -> dict[str, Any]:
-    path = root / "docs" / "wan22-ti2v-5b" / "smoke.json"
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def post_json(port: int, route: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -48,74 +45,6 @@ def post_json(port: int, route: str, body: dict[str, Any]) -> dict[str, Any]:
         message = "response is not an object"
         raise RuntimeError(message)
     return payload
-
-
-def _image_block(path: Path) -> dict[str, str]:
-    return {
-        "type": "image",
-        "data": base64.b64encode(path.read_bytes()).decode("ascii"),
-        "mimeType": "image/png",
-    }
-
-
-def video_tools(
-    port: int,
-    video_body: dict[str, Any],
-    still: Path,
-    text_clip: list[bytes],
-    still_clip: list[bytes],
-    still_size: str | None = None,
-) -> list[object]:
-    @tool(approval_mode="never_require")
-    def generate_text_video() -> str:
-        """Generate the text clip. Do not pass an image."""
-        result = generate(port, "generate_video_t2v", dict(video_body))
-        text_clip.append(read_link(port, result, "video/mp4"))
-        return "text video ready"
-
-    @tool(approval_mode="never_require")
-    def generate_still_video() -> str:
-        """Generate the clip from the still."""
-        if not still.is_file():
-            return "image is missing"
-        body = dict(video_body)
-        if still_size is not None:
-            body["size"] = still_size
-        body["image"] = _image_block(still)
-        result = generate(port, "generate_video_i2v", body)
-        still_clip.append(read_link(port, result, "video/mp4"))
-        return "still video ready"
-
-    return [generate_text_video, generate_still_video]
-
-
-def _agent(base_url: str, tools: list[object], name: str, text: str, model: str) -> int:
-    try:
-        asyncio.run(_run(base_url, tools, name, text, model))
-    except Exception as exc:
-        print(exc, flush=True)
-        return 1
-    return 0
-
-
-async def _run(base_url: str, tools: list[object], name: str, text: str, model: str) -> None:
-    client = open_chat_client(model, base_url)
-    client.function_invocation_configuration["max_iterations"] = 2
-    client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
-    agent = Agent(
-        client=client,
-        name="video-ti2v-agent",
-        instructions="Call the named tool once. Then stop.",
-        tools=tools,
-        default_options={"temperature": 0},
-    )
-    await agent.run(
-        text,
-        options={
-            "temperature": 0,
-            "tool_choice": {"mode": "required", "required_function_name": name},
-        },
-    )
 
 
 def check_frame(port: int, png: bytes, sentence: str, model: str) -> str:
@@ -146,58 +75,116 @@ def check_frame(port: int, png: bytes, sentence: str, model: str) -> str:
     return str(payload["choices"][0]["message"].get("content") or "")
 
 
+async def create_clip(
+    base_url: str,
+    port: int,
+    name: str,
+    body: dict[str, Any],
+    model: str,
+    *,
+    text: str,
+) -> bytes:
+    clip: list[bytes] = []
+    client = open_chat_client(model, base_url)
+    client.function_invocation_configuration["max_iterations"] = 2
+    client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
+    async with image_mcp(port, [name], clip) as mcp:
+        registered(mcp, [name])
+        agent = Agent(
+            client=client,
+            name="video-ti2v-agent",
+            instructions=f"Call {name} once with the exact arguments. Then stop.",
+            tools=mcp,
+            default_options={"temperature": 0},
+        )
+        options: dict[str, Any] = {
+            "temperature": 0,
+            "tool_choice": {"mode": "required", "required_function_name": name},
+        }
+        extra: dict[str, Any] = {}
+        if "image" in body:
+            extra["image"] = body["image"]
+        folder = body.get("model")
+        if isinstance(folder, str) and folder:
+            extra["model"] = folder
+        if extra:
+            options["additional_function_arguments"] = extra
+        await agent.run(_ask(name, body), options=options)
+    if not clip:
+        message = "the agent did not generate a video"
+        raise RuntimeError(message)
+    return clip[-1]
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Text clip and still clip for TI2V-5B.")
+    parser = argparse.ArgumentParser(description="Text clip and still clip for one TI2V pipeline.")
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--pipeline", required=True, help="pipeline id")
+    parser.add_argument(
+        "--tool",
+        action="append",
+        required=True,
+        dest="tools",
+        help="local tool name; pass text tool first, still tool second",
+    )
     parser.add_argument(
         "--judge",
         default=None,
         help="chat model id; default is the registry default",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="registry folder; omit for the note's model or the host default",
+    )
     args = parser.parse_args(argv)
+    if len(args.tools) < 2:
+        print("pass the text tool and the still tool", flush=True)
+        return 1
     root = args.root.resolve()
     judge_id = args.judge or judge_model(root)
-    card = smoke_card(root)
+    card = smoke_note(root, args.pipeline)
+    names = [published_name(args.pipeline, tool) for tool in args.tools]
     still = root / HORSE
     if not still.is_file():
         print(f"missing {HORSE.as_posix()}", flush=True)
         return 1
     text_size = f"{card['width']}x{card['height']}"
     still_size = f"{card['i2v_width']}x{card['i2v_height']}"
-    video_body = {
-        "model": card["model"],
+    folder = args.model or card.get("model")
+    base_body: dict[str, Any] = {
         "prompt": card["prompt"],
         "size": text_size,
         "frames": card["frames"],
         "seed": card["seed"],
-        "steps": 4,
+        "steps": card.get("steps", 4),
     }
+    if isinstance(folder, str) and folder:
+        base_body["model"] = folder
+    still_body = dict(base_body)
+    still_body["size"] = still_size
+    still_body["image"] = _image_block(still)
     listener = None
     try:
         listener = open_listener()
         port = listener.port
         base = f"http://{HOST}:{port}/v1"
-        text_clip: list[bytes] = []
-        still_clip: list[bytes] = []
-        tools = video_tools(port, video_body, still, text_clip, still_clip, still_size)
         print("text video", flush=True)
-        if _agent(base, [tools[0]], "generate_text_video", "Generate the text video.", judge_id):
-            return 1
+        text_blob = asyncio.run(
+            create_clip(base, port, names[0], base_body, judge_id, text="Generate the text video.")
+        )
         print("still video", flush=True)
-        still_text = "Generate the still video."
-        if _agent(base, [tools[1]], "generate_still_video", still_text, judge_id):
-            return 1
-        if not text_clip or not still_clip:
-            print("video is missing", flush=True)
-            return 1
+        still_blob = asyncio.run(
+            create_clip(base, port, names[1], still_body, judge_id, text="Generate the still video.")
+        )
         text_expected = (int(card["frames"]), int(card["width"]), int(card["height"]))
         still_expected = (int(card["frames"]), int(card["i2v_width"]), int(card["i2v_height"]))
         text_path = root / "artifacts" / "video-ti2v-t2v.mp4"
         still_path = root / "artifacts" / "video-ti2v-agent.mp4"
-        if save_mp4(text_clip[-1], text_path) != text_expected:
+        if save_mp4(text_blob, text_path) != text_expected:
             print("text clip geometry does not match", flush=True)
             return 1
-        if save_mp4(still_clip[-1], still_path) != still_expected:
+        if save_mp4(still_blob, still_path) != still_expected:
             print("still clip geometry does not match", flush=True)
             return 1
         print(f"wrote {still_path.name}", flush=True)
@@ -217,6 +204,14 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if listener is not None:
             close_listener(listener)
+
+
+def _ask(tool: str, body: dict[str, Any]) -> str:
+    lines = [f"Call {tool} once with these arguments, then stop."]
+    for key in ("prompt", "size", "frames", "seed", "steps"):
+        if key in body:
+            lines.append(f"{key}: {body[key]}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

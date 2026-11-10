@@ -1,12 +1,14 @@
-"""Agent that generates a 3 minute clip and checks that it holds together.
+"""Agent that generates a long music clip and checks that it holds together.
 
-The Microsoft Agent Framework agent calls ``generate_music`` on ``POST /mcp``
-and reads ``favlo://music/{id}.wav``. The saved file is analyzed by
-`harness/inspect_wav.py`. Exit 0 means the file is 3 minutes, 48 kHz, stereo,
-and above the silence floor, the inspect template matches the request, the
-key margin is settled, the spectrum is tonal, and the one-second tile joins
-are not louder than the surrounding samples. The command does not take the
-machine lock. The judge does not listen. This command is not part of pytest.
+The tool names come from the command. The listener already published them.
+A Microsoft Agent Framework ``MCPStreamableHTTPTool`` registers those names
+and no others. The body comes from ``docs/<pipeline>/<card>`` (default
+``long.json``). The saved file is analyzed by `harness/inspect_wav.py`.
+Exit 0 means the file matches the note duration, 48 kHz, stereo, and above
+the silence floor, the inspect template matches the request, the key margin
+is settled, the spectrum is tonal, and the one-second tile joins are not
+louder than the surrounding samples. The command does not take the machine
+lock. This command is not part of pytest.
 """
 
 from __future__ import annotations
@@ -19,14 +21,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from agent_framework import Agent, tool
+from agent_framework import Agent
 
 from favlo.chat_client import open_chat_client
-from harness.inspect_wav import inspect_file
-from harness.mcp_media import generate, read_link
-from harness.music_template import compare_templates, input_template, smoke_body
 from harness.harness_model import judge_model
+from harness.image_smoke_agent import image_mcp, registered
+from harness.inspect_wav import inspect_file
+from harness.mcp_media import published_name
+from harness.music_template import compare_templates, input_template, smoke_body
 from harness.server import close_listener, open_listener
+
 HOST = "127.0.0.1"
 RMS_FLOOR = 1e-4
 FLATNESS_CEILING = 0.35
@@ -34,23 +38,6 @@ QUIET_SHARE = 0.15
 KEY_MARGIN = 0.02
 SEAM_RATIO = 15.0
 TILE_SECONDS = 1
-
-
-def music_tool(port: int, body: dict[str, Any], out: Path, reports: list[str]) -> object:
-    @tool(approval_mode="never_require")
-    def generate_music() -> str:
-        """Generate the 3 minute clip. The harness inspects the file."""
-        result = generate(port, "generate_music", {**body, "response_format": "wav"})
-        payload = read_link(port, result, "audio/wav")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        temporary = out.with_name(out.name + ".tmp")
-        temporary.write_bytes(payload)
-        temporary.replace(out)
-        text = inspect_file(out, keyscale=str(body["keyscale"]), bpm=float(body["bpm"]))
-        reports.append(text)
-        return "music ready"
-
-    return generate_music
 
 
 def report_problems(text: str, seconds: float) -> list[str]:
@@ -119,6 +106,131 @@ def wav_mono(path: Path) -> tuple[np.ndarray, int]:
     return audio.mean(axis=1), rate
 
 
+async def create_music(
+    base_url: str,
+    port: int,
+    names: list[str],
+    body: dict[str, Any],
+    model: str,
+    out: Path,
+) -> str:
+    wav: list[bytes] = []
+    call = names[0]
+    client = open_chat_client(model, base_url)
+    client.function_invocation_configuration["max_iterations"] = 2
+    client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
+    async with image_mcp(port, names, wav) as mcp:
+        registered(mcp, names)
+        agent = Agent(
+            client=client,
+            name="music-long-agent",
+            instructions=f"Call {call} once with the exact arguments. Then stop.",
+            tools=mcp,
+            default_options={"temperature": 0},
+        )
+        options: dict[str, Any] = {
+            "temperature": 0,
+            "tool_choice": {"mode": "required", "required_function_name": call},
+        }
+        folder = body.get("model")
+        if isinstance(folder, str) and folder:
+            options["additional_function_arguments"] = {"model": folder}
+        await agent.run(_ask(call, body), options=options)
+    if not wav:
+        message = "the agent did not generate music"
+        raise RuntimeError(message)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    temporary = out.with_name(out.name + ".tmp")
+    temporary.write_bytes(wav[-1])
+    temporary.replace(out)
+    return inspect_file(out, keyscale=str(body["keyscale"]), bpm=float(body["bpm"]))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate a long music clip for one pipeline.")
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--pipeline", required=True, help="pipeline id")
+    parser.add_argument(
+        "--tool",
+        action="append",
+        required=True,
+        dest="tools",
+        help="local tool name the pipeline already publishes",
+    )
+    parser.add_argument(
+        "--card",
+        default="long.json",
+        help="docs/<pipeline>/<card>; default is long.json",
+    )
+    parser.add_argument("--judge", default=None, help="chat model id; default is the registry default")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="registry folder; omit for the note's model or the host default",
+    )
+    args = parser.parse_args(argv)
+    root = args.root.resolve()
+    note_path = root / "docs" / args.pipeline / args.card
+    note = json.loads(note_path.read_text(encoding="utf-8"))
+    names = [published_name(args.pipeline, tool) for tool in args.tools]
+    try:
+        incoming = input_template(note)
+    except (KeyError, TypeError, ValueError) as exc:
+        print(str(exc), flush=True)
+        return 1
+    body = smoke_body(note)
+    if args.model:
+        body["model"] = args.model
+    listener = None
+    try:
+        listener = open_listener()
+        port = listener.port
+        out = root / "artifacts" / "music-long-agent.wav"
+        print("music", flush=True)
+        model = args.judge or judge_model(root)
+        report = asyncio.run(
+            create_music(f"http://{HOST}:{port}/v1", port, names, body, model, out)
+        )
+        print(incoming, end="", flush=True)
+        print(report, end="", flush=True)
+        problems = report_problems(report, float(note["seconds"]))
+        mono, rate = wav_mono(out)
+        ratio = boundary_ratio(mono, rate)
+        print(f"seam_ratio {ratio:.4f}", flush=True)
+        if ratio > SEAM_RATIO:
+            problems.append(f"a tile join is {ratio:.1f} times the nearby step")
+        mismatches = compare_templates(incoming, report)
+        if mismatches:
+            problems.append("template mismatch")
+            problems.extend(mismatches)
+        for item in problems:
+            print(item, flush=True)
+        if problems:
+            return 1
+        print(f"wrote {out.name}", flush=True)
+        return 0
+    finally:
+        if listener is not None:
+            close_listener(listener)
+
+
+def _ask(tool: str, body: dict[str, Any]) -> str:
+    lines = [f"Call {tool} once with these arguments, then stop."]
+    for key in (
+        "prompt",
+        "lyrics",
+        "seconds",
+        "seed",
+        "bpm",
+        "keyscale",
+        "timesignature",
+        "response_format",
+    ):
+        if key in body:
+            lines.append(f"{key}: {body[key]}")
+    return "\n".join(lines)
+
+
 def _leading(text: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for line in text.splitlines():
@@ -157,75 +269,6 @@ def _quiet_share(text: str) -> float | None:
     if count < 1:
         return None
     return int(quiet) / count
-
-
-async def _run(base_url: str, music: object, model: str) -> None:
-    client = open_chat_client(model, base_url)
-    client.function_invocation_configuration["max_iterations"] = 2
-    client.function_invocation_configuration["max_consecutive_errors_per_request"] = 1
-    agent = Agent(
-        client=client,
-        name="music-long-agent",
-        instructions="Call generate_music once. Then stop.",
-        tools=[music],
-        default_options={"temperature": 0},
-    )
-    await agent.run(
-        "Generate the 3 minute music clip.",
-        options={
-            "temperature": 0,
-            "tool_choice": {"mode": "required", "required_function_name": "generate_music"},
-        },
-    )
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Generate a 3 minute music clip.")
-    parser.add_argument("--root", type=Path, default=Path("."))
-    parser.add_argument("--model", default=None, help="chat model id; default is the registry default")
-    args = parser.parse_args(argv)
-    root = args.root.resolve()
-    note_path = root / "docs" / "ace-step-15-turbo" / "long.json"
-    note = json.loads(note_path.read_text(encoding="utf-8"))
-    try:
-        incoming = input_template(note)
-    except (KeyError, TypeError, ValueError) as exc:
-        print(str(exc), flush=True)
-        return 1
-    body = smoke_body(note)
-    listener = None
-    try:
-        listener = open_listener()
-        port = listener.port
-        out = root / "artifacts" / "music-long-agent.wav"
-        reports: list[str] = []
-        print("music", flush=True)
-        model = args.model or judge_model(root)
-        asyncio.run(_run(f"http://{HOST}:{port}/v1", music_tool(port, body, out, reports), model))
-        if not reports:
-            print("music file was not written", flush=True)
-            return 1
-        print(incoming, end="", flush=True)
-        print(reports[-1], end="", flush=True)
-        problems = report_problems(reports[-1], float(note["seconds"]))
-        mono, rate = wav_mono(out)
-        ratio = boundary_ratio(mono, rate)
-        print(f"seam_ratio {ratio:.4f}", flush=True)
-        if ratio > SEAM_RATIO:
-            problems.append(f"a tile join is {ratio:.1f} times the nearby step")
-        mismatches = compare_templates(incoming, reports[-1])
-        if mismatches:
-            problems.append("template mismatch")
-            problems.extend(mismatches)
-        for item in problems:
-            print(item, flush=True)
-        if problems:
-            return 1
-        print(f"wrote {out.name}", flush=True)
-        return 0
-    finally:
-        if listener is not None:
-            close_listener(listener)
 
 
 if __name__ == "__main__":

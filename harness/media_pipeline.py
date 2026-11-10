@@ -534,7 +534,7 @@ async def _run(base_url: str, tools: list[object], name: str, text: str, model: 
 
 
 def _voice_bounds(root: Path) -> tuple[int, float]:
-    voice = json.loads((root / "docs" / "voxcpm2" / "smoke.json").read_text(encoding="utf-8"))
+    voice, _folder, _tool = _smoke(root, "voice")
     return int(voice["sample_rate"]), float(voice["max_seconds"])
 
 
