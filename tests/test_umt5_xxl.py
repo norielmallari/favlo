@@ -113,12 +113,32 @@ def test_hf_safetensors_reads_wan_layout_names(tmp_path: Path) -> None:
         reader.close()
 
 
-def test_commands_require_the_encoder_format() -> None:
+def test_commands_quantize_defaults_to_wan_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from umt5_xxl.metal41.commands import main
 
-    with pytest.raises(SystemExit) as raised:
-        main(["quantize"])
-    assert raised.value.code == 2
+    seen: dict[str, object] = {}
+
+    def quantize(
+        src: Path | None = None,
+        dest: Path | None = None,
+        *,
+        encoder_format: str,
+        tokenizer_src: Path | None = None,
+        drop_source: bool = True,
+    ) -> float:
+        del src, tokenizer_src, drop_source
+        seen["format"] = encoder_format
+        assert dest is not None
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / TOKENIZER_FILE).write_text("{}", encoding="utf-8")
+        return 0.0
+
+    monkeypatch.setattr("umt5_xxl.metal41.source.models_dir", lambda root=None: tmp_path / "models")
+    monkeypatch.setattr("umt5_xxl.metal41.quantize.quantize", quantize)
+    assert main(["quantize"]) == 0
+    assert seen["format"] == "wan"
 
 
 def test_commands_quantize_writes_the_pack(

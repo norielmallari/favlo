@@ -7,6 +7,8 @@ streaming partial are not produced. JPEG and WebP are not encoded.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import secrets
 import time
 from pathlib import Path
@@ -18,7 +20,7 @@ from z_image.metal41.png import REPORTED_QUALITY, pack_rgb, write_png
 from z_image.metal41.scratch import MAX_EDGE
 
 from favlo.images import load_image, store_source, sweep_images
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError, checkpoint
+from favlo.media_pipeline import MediaTool, MediaCall, MediaPaused, MediaPipeline, MediaRequestError, checkpoint
 from z_image_base.metal41.schedule import MAX_STEPS, sampler_defaults
 
 
@@ -156,9 +158,59 @@ class Pipeline(MediaPipeline):
             return _working(hold, request)
         return None
 
-handle_image = Pipeline()
 
+    def main(self, argv: Sequence[str]) -> int:
+        from z_image_base.metal41.commands import main as cli_main
 
+        return int(cli_main(argv))
+
+    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
+        from z_image_base.metal41.runtime import open_runtime as open_rt
+        from favlo.pipelines import bind_open_runtime
+
+        return bind_open_runtime(open_rt, path, **kwargs)
+
+    def mcp_tools(self) -> Sequence[MediaTool]:
+        return [
+            MediaTool(
+                name="generate_image",
+                description="Still PNG for an image or picture request only, not video.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "Image prompt."},
+                        "negative_prompt": {
+                            "type": "string",
+                            "description": "Unconditional caption when empty.",
+                        },
+                        "size": {"type": "string", "description": "WxH; auto is 1024x1024."},
+                        "quality": {"type": "string", "description": "Quality preset."},
+                        "seed": {"type": "integer", "description": "Omit for random."},
+                        "steps": {"type": "integer", "description": "Velocities from 1 to 100."},
+                        "guidance": {
+                            "type": "number",
+                            "description": "CFG scale. 0 skips the negative.",
+                        },
+                        "shift": {"type": "number", "description": "Flow-matching shift. Default 6."},
+                        "cfg_truncation": {
+                            "type": "number",
+                            "description": "Drop the negative after this 1-sigma.",
+                        },
+                        "cfg_normalization": {
+                            "type": "number",
+                            "description": "L2 cap times the positive norm.",
+                        },
+                    },
+                    "required": ["prompt"],
+                },
+                handler="handle_image",
+                result="image",
+                task=True,
+            )
+        ]
+
+pipeline = Pipeline()
+handle_image = pipeline
 def _draw(
     runtime: Any,
     fields: ImageFields,

@@ -1,9 +1,10 @@
-"""Shared umT5-XXL download and int8 pack."""
+"""Shared umT5-XXL download and int8 pack.
 
+Not a Favlo CLI pipeline. Wan packages own ``umt5 setup`` / ``umt5 quantize``
+and import this package. Registry ``parts.umt5`` points at the shared
+``models/google/umt5-xxl-int8`` directory.
+"""
 
-PIPELINE = "umt5_xxl"
+from __future__ import annotations
 
-
-from umt5_xxl.metal41.commands import main
-
-__all__ = ["main"]
+__all__: list[str] = []

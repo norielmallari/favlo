@@ -7,6 +7,8 @@ use the OpenAI logit update.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import json
 import queue
 import threading
@@ -18,6 +20,7 @@ from jinja2 import Environment
 from tokenizers import Tokenizer
 
 from favlo.language_pipeline import LanguagePipeline
+from . import sampling as _sampling_mod
 from favlo.responses import (
     RequestError,
     format_instruction,
@@ -295,6 +298,11 @@ def _forced_call(root: Path, tools: Any, required: str | None) -> tuple[list[int
 class Pipeline(LanguagePipeline):
     """One Responses generation for this package."""
 
+    variants = _sampling_mod.VARIANTS
+    default_variant = _sampling_mod.DEFAULT_VARIANT
+    default_thinking = _sampling_mod.DEFAULT_THINKING
+    default_reasoning_effort = _sampling_mod.DEFAULT_REASONING_EFFORT
+
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         super().on_open(runtime, reply, selection)
         runtime._halted = False
@@ -315,9 +323,20 @@ class Pipeline(LanguagePipeline):
         _respond(reply, runtime, body, selection, state)
 
 
-handle_responses = Pipeline()
 
+    def main(self, argv: Sequence[str]) -> int:
+        from qwen38_27b.metal41.commands import main as cli_main
 
+        return int(cli_main(argv))
+
+    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
+        from qwen38_27b.metal41.runtime import open_runtime as open_rt
+        from favlo.pipelines import bind_open_runtime
+
+        return bind_open_runtime(open_rt, path, **kwargs)
+
+pipeline = Pipeline()
+handle_responses = pipeline
 def _respond(
     reply: Any,
     runtime: Any,

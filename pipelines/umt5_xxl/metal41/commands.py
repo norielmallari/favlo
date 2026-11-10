@@ -1,4 +1,8 @@
-"""setup and quantize for the shared umT5 int8 pack."""
+"""setup and quantize for the shared umT5 int8 pack.
+
+Wan CLIs attach these subcommands under ``umt5``. This module is not a
+``favlo --umt5_xxl`` entry.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +14,13 @@ from umt5_xxl.metal41.source import pack_dir, repo_id
 from umt5_xxl.metal41.weights import FORMATS
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="favlo --umt5_xxl")
-    sub = parser.add_subparsers(dest="command", required=True)
+def attach_umt5_commands(
+    parser: argparse.ArgumentParser,
+    *,
+    dest: str = "umt5_command",
+) -> None:
+    """Add ``setup`` and ``quantize`` under ``parser``."""
+    sub = parser.add_subparsers(dest=dest, required=True)
     setup = sub.add_parser("setup", help="download the BF16 encoder and tokenizer")
     setup.add_argument(
         "--umt5",
@@ -24,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     quant.add_argument(
         "--format",
         choices=FORMATS,
-        required=True,
+        default="wan",
         help="wan is the official zip .pth; hf is a Hugging Face .safetensors encoder",
     )
     quant.add_argument("--src", type=Path, default=None, help="BF16 encoder file")
@@ -40,12 +48,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="leave the BF16 checkout after packing",
     )
-    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
-    if args.command == "setup":
+
+
+def dispatch_umt5(args: argparse.Namespace, *, dest: str = "umt5_command") -> int:
+    """Run the umT5 subcommand named on ``args``."""
+    command = getattr(args, dest, None)
+    if command == "setup":
         return _setup(args.umt5)
-    if args.command == "quantize":
+    if command == "quantize":
         return _quantize(args)
     return 2
+
+
+def main(argv: list[str] | None = None, *, prog: str = "favlo umt5") -> int:
+    """Library entry used by tests. Wan pipelines own the public CLI."""
+    parser = argparse.ArgumentParser(prog=prog)
+    attach_umt5_commands(parser, dest="command")
+    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    return dispatch_umt5(args, dest="command")
 
 
 def _setup(repo: str | None) -> int:

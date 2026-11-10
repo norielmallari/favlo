@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
 
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError, checkpoint
+from favlo.media_pipeline import MediaTool, MediaCall, MediaPipeline, MediaRequestError, checkpoint
 from favlo.memory import memory
 from voxcpm2.metal41.audio import encode_wav
 from voxcpm2.metal41.config import ModelConfig, load_config
@@ -278,4 +280,38 @@ class Pipeline(MediaPipeline):
         }
 
 
-handle_voice = Pipeline()
+
+    def main(self, argv: Sequence[str]) -> int:
+        from voxcpm2.metal41.commands import main as cli_main
+
+        return int(cli_main(argv))
+
+    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
+        from voxcpm2.metal41.runtime import open_runtime as open_rt
+        from favlo.pipelines import bind_open_runtime
+
+        return bind_open_runtime(open_rt, path, **kwargs)
+
+    def mcp_tools(self) -> Sequence[MediaTool]:
+        return [
+            MediaTool(
+                name="generate_voice",
+                description="Speak one line as mp3, wav, or flac.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "Line to speak."},
+                        "voice": {"type": "string", "description": "Empty speaks with no reference."},
+                        "instructions": {"type": "string", "description": "Style prefix."},
+                        "response_format": {"type": "string", "description": "mp3, wav, or flac."},
+                    },
+                    "required": ["input"],
+                },
+                handler="handle_voice",
+                result="audio",
+                task=True,
+            )
+        ]
+
+pipeline = Pipeline()
+handle_voice = pipeline

@@ -2,7 +2,7 @@
 
 Each file lands under ``models/<org>/<repo>/``, the repository it is fetched
 from. The VAE and the two experts are this pipeline's download. The shared
-umT5 pack is ``favlo --umt5_xxl``. The transfer uses the resolve URL and does
+umT5 pack is ``favlo --wan22_i2v umt5``. The transfer uses the resolve URL and does
 not read or write a hub cache. Sixteen connections share one file. A
 ``.parts`` map records finished ranges so a short file can continue.
 """

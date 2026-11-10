@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import time
 from pathlib import Path
 from typing import Any
@@ -16,7 +18,7 @@ from ace_step_15_turbo.metal41.request import MusicRequest, parse_music
 from ace_step_15_turbo.metal41.schedule import HOP, LYRIC_LIMIT, STEPS, TEXT_LIMIT, latent_frames
 from ace_step_15_turbo.metal41.tiles import tile_frames
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError, checkpoint
+from favlo.media_pipeline import MediaTool, MediaCall, MediaPipeline, MediaRequestError, checkpoint
 from favlo.memory import memory
 
 _UNITS = 28 + 8 + 4 + 32 * STEPS + 7
@@ -129,9 +131,46 @@ class Pipeline(MediaPipeline):
         store_wav(job["id"], result, home=home, music=table, output_format=request.output_format)
         return None
 
-handle_music = Pipeline()
 
+    def main(self, argv: Sequence[str]) -> int:
+        from ace_step_15_turbo.metal41.commands import main as cli_main
 
+        return int(cli_main(argv))
+
+    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
+        from ace_step_15_turbo.metal41.runtime import open_runtime as open_rt
+        from favlo.pipelines import bind_open_runtime
+
+        return bind_open_runtime(open_rt, path, **kwargs)
+
+    def mcp_tools(self) -> Sequence[MediaTool]:
+        return [
+            MediaTool(
+                name="generate_music",
+                description="One music clip as mp3, wav, or flac.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "Caption or style."},
+                        "response_format": {"type": "string", "description": "mp3, wav, or flac."},
+                        "lyrics": {"type": "string", "description": "Lyrics, when used."},
+                        "seconds": {"type": "number", "description": "Duration in seconds."},
+                        "seed": {"type": "integer", "description": "Omit for random."},
+                        "vocal_language": {"type": "string", "description": "Vocal language."},
+                        "bpm": {"type": "integer", "description": "Tempo."},
+                        "keyscale": {"type": "string", "description": "Key."},
+                        "timesignature": {"type": "string", "description": "Meter."},
+                    },
+                    "required": ["prompt"],
+                },
+                handler="handle_music",
+                result="audio",
+                task=True,
+            )
+        ]
+
+pipeline = Pipeline()
+handle_music = pipeline
 class Runtime:
     def __init__(
         self,

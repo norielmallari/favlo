@@ -27,10 +27,14 @@ _VAE_REPO = "Wan-AI/Wan2.2-TI2V-5B"
 
 
 def main(argv: list[str] | None = None) -> int:
+    from umt5_xxl.metal41.commands import attach_umt5_commands, dispatch_umt5
+
     parser = argparse.ArgumentParser(prog=f"favlo --{_PIPELINE}")
     sub = parser.add_subparsers(dest="command", required=True)
     setup = sub.add_parser("setup", help="download the VAE")
     setup.add_argument("--student-dir", type=Path, default=None)
+    umt5 = sub.add_parser("umt5", help="download and pack the shared umT5 encoder")
+    attach_umt5_commands(umt5)
     quant = sub.add_parser("quantize", help="pack a local DiT checkpoint")
     quant.add_argument("--weights", type=Path, required=True)
     quant.add_argument("--copy", default=None)
@@ -40,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "setup":
         return _setup(args.student_dir)
+    if args.command == "umt5":
+        return dispatch_umt5(args)
     if args.command == "quantize":
         quantize(args.weights, args.copy, repo_root())
         return 0

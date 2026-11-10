@@ -1,22 +1,18 @@
 """Wan2.2 TI2V-5B text-to-video and image-to-video."""
 
+from __future__ import annotations
+
+from typing import Any
+
+from wan22_ti2v_5b.metal41.runtime import handle_chat, pipeline
+from wan22_ti2v_5b.metal41.request import list_resolutions, video_modes
 
 PIPELINE = "wan22_ti2v_5b"
 
+handle_video = pipeline
+main = pipeline.main
+open_runtime = pipeline.open_runtime
 
-from typing import Any
-from wan22_ti2v_5b.metal41.commands import main
-from wan22_ti2v_5b.metal41.request import list_resolutions, video_modes
-from wan22_ti2v_5b.metal41.runtime import handle_chat, handle_video, open_runtime
-
-__all__ = [
-    "handle_chat",
-    "handle_video",
-    "list_resolutions",
-    "main",
-    "open_runtime",
-    "video_modes",
-]
 
 def _video(name: str, description: str, *, still: bool) -> dict[str, Any]:
     properties: dict[str, Any] = {
@@ -44,17 +40,17 @@ def _video(name: str, description: str, *, still: bool) -> dict[str, Any]:
     }
 
 
-def mcp_tools() -> list[dict[str, Any]]:
-    """Local tools. The host publishes the pipeline prefix. This loads no weights."""
-    return [
-        _video(
-            "generate_video_t2v",
-            "MP4 from text when the user asked for video or motion, not a still.",
-            still=False,
-        ),
-        _video(
-            "generate_video_i2v",
-            "MP4 from a still when the user asked for video or motion, not a still.",
-            still=True,
-        ),
-    ]
+def mcp_tools():
+    return pipeline.mcp_tools()
+
+
+__all__ = [
+    "pipeline",
+    "handle_chat",
+    "handle_video",
+    "list_resolutions",
+    "main",
+    "mcp_tools",
+    "open_runtime",
+    "video_modes",
+]

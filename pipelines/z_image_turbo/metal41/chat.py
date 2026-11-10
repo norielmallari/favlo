@@ -7,6 +7,8 @@ streaming partial are not produced. JPEG and WebP are not encoded.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import secrets
 import time
 from pathlib import Path
@@ -15,7 +17,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from favlo.images import load_image, store_source, sweep_images
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, MediaRequestError, checkpoint
+from favlo.media_pipeline import MediaTool, MediaCall, MediaPaused, MediaPipeline, MediaRequestError, checkpoint
 from z_image_turbo.metal41.hold import ImageHold, ImageJob
 from z_image_turbo.metal41.png import REPORTED_QUALITY, pack_rgb, write_png
 from z_image_turbo.metal41.schedule import STEPS
@@ -144,9 +146,41 @@ class Pipeline(MediaPipeline):
             return _working(hold, request)
         return None
 
-handle_image = Pipeline()
 
+    def main(self, argv: Sequence[str]) -> int:
+        from z_image_turbo.metal41.commands import main as cli_main
 
+        return int(cli_main(argv))
+
+    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
+        from z_image_turbo.metal41.runtime import open_runtime as open_rt
+        from favlo.pipelines import bind_open_runtime
+
+        return bind_open_runtime(open_rt, path, **kwargs)
+
+    def mcp_tools(self) -> Sequence[MediaTool]:
+        return [
+            MediaTool(
+                name="generate_image",
+                description="Still PNG for an image or picture request only, not video.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "Image prompt."},
+                        "size": {"type": "string", "description": "WxH; auto is 1024x1024."},
+                        "quality": {"type": "string", "description": "Quality preset."},
+                        "seed": {"type": "integer", "description": "Omit for random."},
+                    },
+                    "required": ["prompt"],
+                },
+                handler="handle_image",
+                result="image",
+                task=True,
+            )
+        ]
+
+pipeline = Pipeline()
+handle_image = pipeline
 def _draw(
     runtime: Any,
     fields: ImageFields,

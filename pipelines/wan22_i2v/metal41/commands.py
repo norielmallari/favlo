@@ -19,9 +19,13 @@ _INT8 = "Wan2.2-I2V-A14B-int8"
 
 
 def main(argv: list[str] | None = None) -> int:
+    from umt5_xxl.metal41.commands import attach_umt5_commands, dispatch_umt5
+
     parser = argparse.ArgumentParser(prog="favlo --wan22_i2v")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("setup", help="download the VAE and the two experts")
+    umt5 = sub.add_parser("umt5", help="download and pack the shared umT5 encoder")
+    attach_umt5_commands(umt5)
     sub.add_parser("kernels", help="dispatch the fp4, fp8, and int8 matmul")
     quant = sub.add_parser("quantize", help="pack the high-noise and low-noise experts")
     quant.add_argument("--high", type=Path, required=True)
@@ -53,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         print(high, flush=True)
         print(low, flush=True)
         return 0
+    if args.command == "umt5":
+        return dispatch_umt5(args)
     if args.command == "kernels":
         return kernels()
     if args.command == "quantize":

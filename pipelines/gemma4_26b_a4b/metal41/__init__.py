@@ -1,18 +1,23 @@
 """Gemma 4 26B-A4B text pipeline.
 
 Names load on first use so a stream process can import this package without
-opening the Metal runtime.
+opening the Metal runtime — except ``pipeline``, which is the typed export.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
+from gemma4_26b_a4b.metal41.chat import pipeline
 
 PIPELINE = "gemma4_26b_a4b"
 
-
-from typing import Any
+handle_responses = pipeline
+main = pipeline.main
+open_runtime = pipeline.open_runtime
 
 __all__ = [
+    "pipeline",
     "CONTEXT_LENGTH",
     "DEFAULT_VARIANT",
     "VARIANTS",
@@ -23,17 +28,6 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name == "main":
-        from gemma4_26b_a4b.metal41.commands import main
-
-        return main
-    if name in {"handle_responses", "open_runtime"}:
-        from gemma4_26b_a4b.metal41.runtime import handle_responses, open_runtime
-
-        return {
-            "handle_responses": handle_responses,
-            "open_runtime": open_runtime,
-        }[name]
     if name in {"CONTEXT_LENGTH", "DEFAULT_VARIANT", "VARIANTS"}:
         from gemma4_26b_a4b.metal41 import sampling
 

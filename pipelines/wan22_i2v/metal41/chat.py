@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import base64
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
 
-from favlo.media_pipeline import MediaCall, MediaPipeline, MediaRequestError, checkpoint
+from favlo.media_pipeline import MediaTool, MediaCall, MediaPipeline, MediaRequestError, checkpoint
 from favlo.videos import reported_quality, store_source, sweep_videos
 from wan22_i2v.metal41.hold import ClipHold
 from wan22_i2v.metal41.png import decode_png, resize_rgb
@@ -171,9 +173,46 @@ class Pipeline(MediaPipeline):
         progress.close(progress.summary())
 
 
-handle_video = Pipeline()
 
+    def main(self, argv: Sequence[str]) -> int:
+        from wan22_i2v.metal41.commands import main as cli_main
 
+        return int(cli_main(argv))
+
+    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
+        from wan22_i2v.metal41.runtime import open_runtime as open_rt
+        from favlo.pipelines import bind_open_runtime
+
+        return bind_open_runtime(open_rt, path, **kwargs)
+
+    def mcp_tools(self) -> Sequence[MediaTool]:
+        return [
+            MediaTool(
+                name="generate_video",
+                description="MP4 from a still when the user asked for video or motion, not a still.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "Motion prompt; still is frame 0."},
+                        "size": {"type": "string", "description": "Required WIDTHxHEIGHT."},
+                        "image": {"description": "image_ id, PNG, or file://."},
+                        "duration": {"type": "number", "description": "Length in seconds."},
+                        "seed": {"type": "integer", "description": "Omit for random."},
+                        "quality": {"type": "string", "description": "auto, low, medium, high, xhigh, max."},
+                        "negative_prompt": {"type": "string", "description": "Empty uses the sample negative."},
+                        "guidance_scale": {"description": "Number or [low, high]; default 1."},
+                        "steps": {"type": "integer", "description": "Euler 1-40; 0 uses 4."},
+                    },
+                    "required": ["prompt", "size", "image"],
+                },
+                handler="handle_video",
+                result="video",
+                task=True,
+            )
+        ]
+
+pipeline = Pipeline()
+handle_video = pipeline
 def video_fields(body: dict[str, Any]) -> VideoFields:
     """One clip request. Omitted size is 320p. Omitted length is 81 frames."""
     prompt = body.get("prompt")

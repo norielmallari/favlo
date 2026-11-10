@@ -1,8 +1,8 @@
 """Packed umT5 encoder for a clip.
 
 Linears are per-channel int8. The token embedding, RMSNorm weights, and
-relative buckets stay half. ``favlo --umt5_xxl quantize`` writes the shared
-pack under ``models/google``. The tokenizer lives in that pack.
+relative buckets stay half. ``favlo --wan22_i2v umt5 quantize`` writes the
+shared pack under ``models/google``. The tokenizer lives in that pack.
 """
 
 from __future__ import annotations

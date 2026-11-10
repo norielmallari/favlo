@@ -66,16 +66,13 @@ def test_setup_guides_load_by_pipeline_id() -> None:
     assert "uv run favlo --z_image_turbo setup" in image
     assert "--weights models/example-model.safetensors" in image
     video = read_setup("wan22_i2v")
-    assert "uv run favlo --umt5_xxl setup" in video
-    assert "uv run favlo --umt5_xxl quantize" in video
+    assert "uv run favlo --wan22_i2v umt5 setup" in video
+    assert "uv run favlo --wan22_i2v umt5 quantize" in video
     assert "uv run favlo --wan22_i2v setup" in video
     ti2v = read_setup("wan22_ti2v_5b")
-    assert "uv run favlo --umt5_xxl setup" in ti2v
-    assert "uv run favlo --umt5_xxl quantize" in ti2v
+    assert "uv run favlo --wan22_ti2v_5b umt5 setup" in ti2v
+    assert "uv run favlo --wan22_ti2v_5b umt5 quantize" in ti2v
     assert "uv run favlo --wan22_ti2v_5b setup" in ti2v
-    umt5 = read_setup("umt5_xxl")
-    assert "uv run favlo --umt5_xxl setup" in umt5
-    assert "uv run favlo --umt5_xxl quantize" in umt5
     music = read_setup("ace_step_15_turbo")
     assert "uv run favlo --ace_step_15_turbo setup" in music
     assert "uv run favlo --ace_step_15_turbo quantize" in music

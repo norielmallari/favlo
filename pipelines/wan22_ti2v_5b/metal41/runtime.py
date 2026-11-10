@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import json
 from pathlib import Path
 
 from favlo.cli import repo_root
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline
+from favlo.media_pipeline import MediaTool, MediaCall, MediaPaused, MediaPipeline
 from favlo.memory import memory
 from favlo.registry import models_dir
 from wan22_ti2v_5b.metal41.clip import Clip, ClipHold
@@ -187,9 +189,47 @@ class Pipeline(MediaPipeline):
         return None
 
 
-handle_video = Pipeline()
 
+    def main(self, argv: Sequence[str]) -> int:
+        from wan22_ti2v_5b.metal41.commands import main as cli_main
 
+        return int(cli_main(argv))
+
+    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
+        from wan22_ti2v_5b.metal41.runtime import open_runtime as open_rt
+        from favlo.pipelines import bind_open_runtime
+
+        return bind_open_runtime(open_rt, path, **kwargs)
+
+    def mcp_tools(self) -> Sequence[MediaTool]:
+        from wan22_ti2v_5b.metal41 import _video
+
+        rows = [
+            _video(
+                "generate_video_t2v",
+                "MP4 from text when the user asked for video or motion, not a still.",
+                still=False,
+            ),
+            _video(
+                "generate_video_i2v",
+                "MP4 from a still when the user asked for video or motion, not a still.",
+                still=True,
+            ),
+        ]
+        return [
+            MediaTool(
+                name=str(row["name"]),
+                description=str(row.get("description") or ""),
+                parameters=row.get("parameters") or {"type": "object", "properties": {}},
+                handler=str(row["handler"]),
+                result=str(row.get("result") or "video"),
+                task=bool(row.get("task", True)),
+            )
+            for row in rows
+        ]
+
+pipeline = Pipeline()
+handle_video = pipeline
 def handle_chat(reply, runtime, body, selection, args, state) -> None:
     del runtime, body, selection, args, state
     reply.json(400, {"error": "wan22_ti2v_5b does not complete a chat"})
