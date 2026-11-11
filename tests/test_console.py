@@ -769,6 +769,92 @@ def test_json_ticks_while_a_phase_is_still_open() -> None:
             ui.close()
 
 
+def test_json_host_emits_begin_before_ticks_and_end() -> None:
+    """The protocol stream keeps begin → tick → end even with the host consumer."""
+    stream = io.StringIO()
+    ui = Console("json", pipeline="favlo", stream=stream, start_thread=True)
+    try:
+        prefill = ui.begin("prefill", total=100, unit="tok", request=1)
+        ui.count(prefill, 40)
+        ui.count(prefill, 100)
+        ui.end(prefill, "prefill 200.00 tok/s (100 tok in 0.50s)")
+        decode = ui.begin("decode", total=0, unit="tok", request=1)
+        ui.count(decode, 8)
+        ui.end(decode, "decode 40.00 tok/s (8 tok in 0.20s)")
+        ui.flush()
+
+        def finished(raw: io.StringIO = stream) -> bool:
+            rows = [json.loads(line) for line in raw.getvalue().splitlines() if line.strip()]
+            ends = [row for row in rows if row.get("type") == "end" and row.get("phase") == "decode"]
+            return bool(ends)
+
+        assert _wait_until(finished)
+        rows = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+        phase_rows = [row for row in rows if row.get("type") in {"begin", "tick", "end"}]
+        open_phases: set[str] = set()
+        for row in phase_rows:
+            phase = row.get("phase")
+            assert isinstance(phase, str)
+            kind = row["type"]
+            if kind == "begin":
+                open_phases.add(phase)
+                continue
+            assert phase in open_phases, f"{kind} for {phase} before begin: {phase_rows}"
+            if kind == "end":
+                open_phases.discard(phase)
+        assert [row["type"] for row in phase_rows if row.get("phase") == "prefill"][0] == "begin"
+        assert [row["type"] for row in phase_rows if row.get("phase") == "decode"][0] == "begin"
+    finally:
+        ui.close()
+
+
+def test_mirrored_events_keep_begin_before_ticks() -> None:
+    """Daemon apply_event must not re-queue mirrored begins behind later ticks."""
+    stream = io.StringIO()
+    ui = Console("pretty", pipeline="", stream=stream, color=0, start_thread=True)
+    try:
+        ui.apply_event(
+            {
+                "type": "begin",
+                "phase": "prefill",
+                "total": 100,
+                "unit": "tok",
+                "source": 7,
+                "request": 1,
+                "ts": 10.0,
+            }
+        )
+        ui.apply_event(
+            {
+                "type": "tick",
+                "phase": "prefill",
+                "done": 41,
+                "total": 100,
+                "unit": "tok",
+                "source": 7,
+                "request": 1,
+                "elapsed": 0.8,
+            }
+        )
+        ui.apply_event(
+            {
+                "type": "end",
+                "phase": "prefill",
+                "summary": "prefill 51.25 tok/s (41 tok in 0.80s)",
+                "source": 7,
+                "request": 1,
+            }
+        )
+
+        def settled(raw: io.StringIO = stream) -> bool:
+            return "prefill 51.25 tok/s" in raw.getvalue()
+
+        assert _wait_until(settled)
+        assert "41" in stream.getvalue() or "prefill 51.25 tok/s" in stream.getvalue()
+    finally:
+        ui.close()
+
+
 def test_begin_end_note_return_before_the_write() -> None:
     """The GPU thread must not wait on the console pipe."""
     stream = io.StringIO()

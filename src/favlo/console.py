@@ -495,7 +495,6 @@ class Console:
         )
         progress.ui = self
         with self._lock:
-            self._handles.append(progress)
             self._turn_due = None
         if self._host is not None:
             self._host.begin(progress)
@@ -580,6 +579,18 @@ class Console:
         self.sample()
 
     def _emit_begin(self, progress: Progress) -> None:
+        """Announce a phase. The handle joins ``_handles`` here, not in ``begin``.
+
+        The JSON child console samples open handles for idle ticks. Appending in
+        ``begin`` before this write let those ticks leave the process ahead of
+        the begin event, so the daemon sanitizer dropped the live counts. A
+        phase that already closed on the caller still announces once so end
+        cannot outrun begin on the wire.
+        """
+        with self._lock:
+            if progress in self._handles:
+                return
+            self._handles.append(progress)
         if self.mode != "plain":
             self._note_prompt_displaced()
         if self.mode == "json":
@@ -802,6 +813,11 @@ class Console:
         return (source, name, request_id)
 
     def _mirror_begin(self, event: dict[str, Any]) -> None:
+        """Open a mirrored row on this thread. Do not re-enter ``HostProgress``.
+
+        Daemon ``apply_event`` already runs on the console queue. Posting through
+        ``begin`` again reordered begin behind later ticks and ends on the wire.
+        """
         phase = event.get("phase")
         unit = event.get("unit")
         if phase not in PHASES or unit not in UNITS:
@@ -809,20 +825,27 @@ class Console:
         key = self._mirror_key(event)
         previous = self._remote.get(key)
         if previous is not None and not previous.closed:
-            self.end(previous, "")
+            previous.closed = True
+            self._emit_end(previous, "")
         total = event.get("total")
         request = event.get("request")
         detail = event.get("detail")
-        progress = self.begin(
-            phase,
-            total=total if isinstance(total, int) else 0,
+        started = _event_stamp(event)
+        progress = Progress(
+            phase=phase,
+            total=total if isinstance(total, int) and not isinstance(total, bool) else 0,
             unit=unit,
             detail=detail if isinstance(detail, str) else "",
-            request=request if isinstance(request, int) else None,
+            request=request if isinstance(request, int) and not isinstance(request, bool) else None,
             gauge=_event_gauge(event.get("gauge")),
-            started=_event_stamp(event),
+            pipeline=self.pipeline,
+            started=self._clock() if started is None else started,
         )
+        progress.ui = self
+        with self._lock:
+            self._turn_due = None
         self._remote[key] = progress
+        self._emit_begin(progress)
 
     def _mirror_tick(self, event: dict[str, Any]) -> None:
         progress = self._remote.get(self._mirror_key(event))
@@ -850,7 +873,9 @@ class Console:
             if summary:
                 self.log(summary)
             return
-        self.end(progress, summary)
+        progress.summary = summary
+        progress.closed = True
+        self._emit_end(progress, summary)
 
     def _boundary(self, kind: str, progress: Progress) -> dict[str, Any]:
         event: dict[str, Any] = {
@@ -1033,8 +1058,8 @@ class Console:
         if gauge is not None:
             label, value = gauge
             parts.append(f"{label} {value:,}")
-        elapsed = now - progress.started
-        if elapsed >= 0:
+        elapsed = self._elapsed(progress, now)
+        if elapsed >= 0 and math.isfinite(elapsed):
             parts.append(f"{elapsed:.1f}s")
         return _join_parts(parts)
 
