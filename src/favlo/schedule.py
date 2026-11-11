@@ -2,15 +2,15 @@
 
 Two queues. The foreground queue is embeddings, then chats that have not
 started. The media queue runs only when the foreground queue is empty.
-Which kinds preempt, drop a disconnected waiter, and debounce live on
-``LanguagePipeline``, ``EmbeddingsPipeline``, and ``MediaPipeline``. This
-module runs the queues. A chat preempts media at its next safe point and
-leaves ``preempt`` set until the chat queue has drained. After a chat
-releases, a short debounce keeps media from admitting so the next model
-call can reuse the resident language model. An embedding does not set
-``preempt`` and does not preempt a chat that already holds the GPU.
-``flush`` drops every waiter. The request that holds admission stays until
-it releases.
+Which kinds preempt, drop a disconnected waiter, debounce, and wait on a
+memory hold live on ``LanguagePipeline``, ``EmbeddingsPipeline``, and
+``MediaPipeline``. This module runs the queues. A chat preempts media at
+its next safe point and leaves ``preempt`` set until the chat queue has
+drained. After a chat releases, a short debounce keeps media from admitting
+so the next model call can reuse the resident language model. An embedding
+does not set ``preempt``, does not preempt a chat that already holds the
+GPU, and does not wait on a memory hold. ``flush`` drops every waiter. The
+request that holds admission stays until it releases.
 """
 
 from __future__ import annotations
@@ -122,17 +122,18 @@ class Scheduler:
             raise ValueError(message)
         ticket = _Ticket(kind)
         noted = False
+        waits_for_memory = bool(getattr(seam_for(kind), "waits_for_memory", True))
         self._cond.acquire()
         try:
             self._queue(kind).append(ticket)
             self._sync_preempt()
-            while self._holding or not self._is_next(ticket):
+            while (waits_for_memory and self._holding) or not self._is_next(ticket):
                 if id(ticket) in self._dropped or (cancel is not None and cancel.is_set()):
                     self._dropped.discard(id(ticket))
                     raise ClientClosed()
                 if not noted:
                     noted = True
-                    holding = self._holding > 0
+                    holding = waits_for_memory and self._holding > 0
                     holder = self._memory_holder() if holding else ""
                     self._cond.release()
                     try:

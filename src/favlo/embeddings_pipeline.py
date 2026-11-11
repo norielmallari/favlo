@@ -24,7 +24,9 @@ class EmbeddingsPipeline(Pipeline):
     """One string in, one dense vector out.
 
     The scheduler reads these flags. This seam does not set ``preempt`` and
-    opens beside the resident model.
+    opens beside the resident model. It does not wait on a memory hold or on
+    ``wait_released``, and its process does not take that hold while it loads
+    or unloads.
     """
 
     kind = "embed"
@@ -33,6 +35,7 @@ class EmbeddingsPipeline(Pipeline):
     drop_if_disconnected = False
     debounce_after_release = False
     resident = "beside"
+    waits_for_memory = False
 
     context_length: ClassVar[int | None] = None
     variants: ClassVar[Mapping[str, Mapping[str, Any]]] = {}

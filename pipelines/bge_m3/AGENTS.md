@@ -4,7 +4,7 @@ This package is an embeddings pipeline. It inherits `EmbeddingsPipeline`. The cl
 
 A change to `embed` or the list object loads the seam-checks skill. Do not paste those commands here.
 
-Admission is `embed`. An embeddings request sits ahead of chats that have not started and does not set `preempt`. `resident` is `beside`. A lazy `open_for` keeps the second process in `_open_embed_for` when this model is not already resident, and parks the resident when it is. `embeddings_ttl_seconds` stays in settings.
+Admission is `embed`. An embeddings request sits ahead of chats that have not started and does not set `preempt`. `resident` is `beside`. `waits_for_memory` is false: the request does not wait on a memory hold or on `wait_released`, and its process does not take that hold while it loads or unloads. A lazy `open_for` keeps the second process in `_open_embed_for` when this model is not already resident, and parks the resident when it is. `embeddings_ttl_seconds` stays in settings.
 
 Bind `handle_embed` to the one `Pipeline` instance. `embed` returns the vector and the token count. The class writes `usage.prompt_tokens`. Do not copy the list object into this package. Do not catch `ValueError` around the reply builder.
 
@@ -22,4 +22,4 @@ A new abstract method on `EmbeddingsPipeline` updates every served embedding pac
 
 The one knob is the passage length. Weights plus one passage at the length the call named must fit in `room()` before the first commit. Read the budget at open and again before a later call that can use a longer passage. A larger answer may raise the limit. Do not shrink it while a request is in flight. When one passage at the named length does not fit, raise `RuntimeError` and name that length. Do not truncate the input, drop layers, or change the packed quant. 16 GB is the product floor. It is not free memory and it is not `budget()`.
 
-Spans go through `device_buffer(owner, nbytes)`. `close` sweeps the owner. The daemon does not admit the next call while an allocation or a release is still open.
+Spans go through `device_buffer(owner, nbytes)`. `close` sweeps the owner. A chat or media call still waits on a memory hold. This embeddings process does not.

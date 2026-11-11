@@ -92,6 +92,7 @@ class MediaPipeline(Pipeline):
     drop_if_disconnected = False
     debounce_after_release = False
     resident = "exclusive"
+    waits_for_memory = True
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

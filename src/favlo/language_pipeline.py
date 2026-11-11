@@ -28,6 +28,7 @@ class LanguagePipeline(Pipeline):
     drop_if_disconnected = True
     debounce_after_release = True
     resident = "exclusive"
+    waits_for_memory = True
 
     context_length: ClassVar[int | None] = None
     variants: ClassVar[Mapping[str, Mapping[str, Any]]] = {}

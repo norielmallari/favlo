@@ -52,6 +52,30 @@ def test_a_console_stores_the_loaded_record_name() -> None:
     assert ui.load_detail == "bge-m3-int8"
 
 
+def test_open_embed_skips_the_memory_wait(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from favlo.pipelines import open_embed
+
+    seen: dict[str, bool] = {}
+    child = SimpleNamespace(
+        counts={},
+        selection=SimpleNamespace(pipeline="bge_m3", alias="bge-m3-int8", folder="bge-m3-int8"),
+        proxy=None,
+    )
+
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
+        seen["waits_for_memory"] = waits_for_memory
+        return child
+
+    monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
+    monkeypatch.setattr("favlo.pipelines.pipelines.add", lambda *args, **kwargs: None)
+    args = SimpleNamespace(console_ui=None, max_memory=None)
+    selection = SimpleNamespace(pipeline="bge_m3", alias="bge-m3-int8", folder="bge-m3-int8")
+    assert open_embed({}, args, selection) is child
+    assert seen["waits_for_memory"] is False
+
+
 def test_open_embed_restores_the_loaded_record_name(monkeypatch) -> None:
     from types import SimpleNamespace
 

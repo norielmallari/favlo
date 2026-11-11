@@ -25,7 +25,8 @@ class Pipelines:
     """Runtimes opened in this process.
 
     One chat or media model stays resident. An embeddings process can sit
-    beside it and stays warm for ``embeddings_ttl_seconds`` after a request.
+    beside it without waiting on the memory hold or ``wait_released``, and
+    stays warm for ``embeddings_ttl_seconds`` after a request.
     """
 
     def __init__(self) -> None:
@@ -311,20 +312,29 @@ def close_runtime(runtime: Any, owners: Any = None) -> None:
         _sweep_owners(owners)
 
 
-def start_pipeline(selection: Any, args: Any, schedule: Any = None) -> Any:
+def start_pipeline(
+    selection: Any,
+    args: Any,
+    schedule: Any = None,
+    *,
+    waits_for_memory: bool = True,
+) -> Any:
     """Open the pipeline in its own process. The manager keeps the handle.
 
-    The previous runtime has already been closed. The child is spawned after
-    the ledger reports that release.
+    When ``waits_for_memory`` is true, the previous runtime has already been
+    closed and the child is spawned after the ledger reports that release.
+    Embeddings pass false and open beside the resident model without that wait.
     """
     from favlo.memory import memory
     from favlo.pipeline_worker import PipelineChild
 
-    memory.wait_released()
+    if waits_for_memory:
+        memory.wait_released()
     child = PipelineChild(
         selection,
         getattr(args, "max_memory", None),
         console=getattr(args, "console_ui", None),
+        waits_for_memory=waits_for_memory,
     )
     child.admission = schedule
     child.open()
@@ -540,7 +550,11 @@ def _restore_console(ui: Any, saved: Any) -> None:
 
 
 def open_embed(state: dict[str, Any], args: Any, selection: Any) -> Any:
-    """Open an embeddings process beside the resident model. That model stays."""
+    """Open an embeddings process beside the resident model. That model stays.
+
+    Does not wait for ``memory.wait_released`` and does not take the scheduler
+    memory hold while the child loads.
+    """
     from favlo.listener import _log
     from favlo.memory import memory
 
@@ -553,7 +567,7 @@ def open_embed(state: dict[str, Any], args: Any, selection: Any) -> Any:
     schedule = admission(state)
     before = memory.owners()
     try:
-        child = start_pipeline(selection, args, schedule)
+        child = start_pipeline(selection, args, schedule, waits_for_memory=False)
     except Exception:
         _sweep_new(before)
         _restore_console(ui, saved)

@@ -41,10 +41,13 @@ def test_each_seam_owns_its_admission_flags() -> None:
     assert EmbeddingsPipeline.drop_if_disconnected is False
     assert EmbeddingsPipeline.debounce_after_release is False
     assert EmbeddingsPipeline.resident == "beside"
+    assert EmbeddingsPipeline.waits_for_memory is False
     assert MediaPipeline.preempts_media is False
     assert MediaPipeline.drop_if_disconnected is False
     assert MediaPipeline.debounce_after_release is False
     assert MediaPipeline.resident == "exclusive"
+    assert LanguagePipeline.waits_for_memory is True
+    assert MediaPipeline.waits_for_memory is True
 
 
 def test_disconnect_event_is_only_for_a_language_waiter() -> None:

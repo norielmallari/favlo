@@ -30,7 +30,7 @@ Allocate the input path and the output path first. The input path is the key/val
 
 ## Model switch
 
-One chat or media package is resident. A request that names a different folder or package closes that runtime before the next one opens. The same folder and the same package stay resident. An embeddings request does not close the resident runtime. It opens its own process for that request and closes it when the request returns.
+One chat or media package is resident. A request that names a different folder or package closes that runtime before the next one opens. The same folder and the same package stay resident. An embeddings request does not close the resident runtime. It opens its own process for that request without waiting on a memory hold or on `wait_released`, does not take that hold while it loads or unloads, and closes when the request returns.
 
 `close` returns only after that package's device memory is released. That includes its key/value cache, prefill workspace, decode path, command queue, and open record. A prefix flush may finish first. After `close` returns, the previous runtime holds no Metal buffer.
 

@@ -708,7 +708,7 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
         opened.append(runtime)
         return runtime
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del args, schedule
         return opener(selection, None)
 
@@ -749,7 +749,7 @@ def test_a_different_pipeline_closes_the_resident_runtime(monkeypatch) -> None:
 def test_a_changed_pipeline_reopens_the_resident_runtime(monkeypatch) -> None:
     opened: list[_Runtime] = []
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del args, schedule
         runtime = _Runtime()
         runtime.counts = {}
@@ -781,7 +781,7 @@ def test_a_changed_pipeline_reopens_the_resident_runtime(monkeypatch) -> None:
 def test_an_unchanged_pipeline_keeps_the_resident_runtime(monkeypatch) -> None:
     opened: list[_Runtime] = []
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del args, schedule
         runtime = _Runtime()
         runtime.counts = {}
@@ -849,7 +849,7 @@ def test_an_embedding_request_leaves_the_resident_runtime(monkeypatch) -> None:
         assert resident.closed is False
         reply.json(200, {"object": "list", "data": []})
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del args, schedule
         child = _Runtime()
         child.counts = {}
@@ -901,7 +901,7 @@ def test_an_embedding_child_stays_warm_for_the_ttl_window(monkeypatch) -> None:
         assert runtime is opened[0]
         reply.json(200, {"object": "list", "data": []})
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del args, schedule
         child = _Runtime()
         child.counts = {}
@@ -974,7 +974,7 @@ def test_a_warm_embedding_child_is_reused_within_ttl(monkeypatch) -> None:
         del body, selection, args, request_state
         reply.json(200, {"object": "list", "data": []})
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del args, schedule
         child = _Runtime()
         child.counts = {}
@@ -1050,7 +1050,7 @@ def test_an_embedding_child_exit_keeps_the_resident_runtime(monkeypatch) -> None
         del reply, runtime, body, selection, args, request_state
         raise ChildExited("embeddings process exited")
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del args, schedule
         child = _Runtime()
         child.counts = {}
@@ -1102,7 +1102,7 @@ def test_the_resident_embeddings_model_closes_when_the_request_returns(monkeypat
     state["pipeline"] = "bge_m3"
     state["module"] = resident
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del selection, args, schedule
         raise AssertionError("a second embeddings process opened")
 
@@ -1144,7 +1144,7 @@ def test_an_embedding_request_uses_the_registry_default_when_model_is_omitted(mo
         del runtime, body, selection, args, request_state
         reply.json(200, {"object": "list", "data": []})
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del args, schedule
         child = _Runtime()
         child.selection = selection
@@ -1179,7 +1179,7 @@ def test_an_embedding_request_without_a_default_is_not_found(monkeypatch) -> Non
     resident = _Runtime()
     state = _embed_state(resident)
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del selection, args, schedule
         raise AssertionError("an embeddings process opened without a model")
 
@@ -1200,7 +1200,7 @@ def test_an_embedding_request_refuses_a_model_that_does_not_embed(monkeypatch) -
     resident = _Runtime()
     state = _embed_state(resident)
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del selection, args, schedule
         raise AssertionError("a model that does not embed was opened")
 
@@ -1235,7 +1235,7 @@ def test_an_image_request_does_not_enter_the_chat_runtime(monkeypatch) -> None:
     state = _embed_state(resident)
     state["module"] = SimpleNamespace(handle_responses=lambda *_args: None)
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del selection, args, schedule
         raise AssertionError("the chat runtime was opened for an image")
 
@@ -1277,7 +1277,7 @@ def test_an_image_request_opens_the_image_runtime(monkeypatch) -> None:
         assert selection.pipeline == "z_image_turbo"
         reply.json(200, {"data": [{"id": "image_ok"}]})
 
-    def start(selection, args, schedule=None):
+    def start(selection, args, schedule=None, *, waits_for_memory=True):
         del args, schedule
         child = _Runtime()
         child.counts = {}
@@ -1407,8 +1407,8 @@ def test_a_failed_open_sweeps_spans_from_that_attempt(monkeypatch) -> None:
         message = "open failed"
         raise RuntimeError(message)
 
-    def start(selection, bound_args, schedule=None):
-        del schedule
+    def start(selection, bound_args, schedule=None, *, waits_for_memory=True):
+        del schedule, waits_for_memory
         return opener(selection, None, getattr(bound_args, "max_memory", None))
 
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
@@ -1443,8 +1443,8 @@ def test_close_sweeps_the_owner_recorded_at_open(monkeypatch) -> None:
         runtime.proxy = SimpleNamespace()
         return runtime
 
-    def start(selection, bound_args, schedule=None):
-        del schedule
+    def start(selection, bound_args, schedule=None, *, waits_for_memory=True):
+        del schedule, waits_for_memory
         return opener(selection, None, getattr(bound_args, "max_memory", None))
 
     monkeypatch.setattr("favlo.pipelines.start_pipeline", start)
@@ -2367,7 +2367,7 @@ def test_mcp_voice_writes_a_wav_and_the_link_reads_it(tmp_path) -> None:
     assert blob["uri"] == "favlo://voice/voice_smoke.wav"
     assert blob["mimeType"] == "audio/wav"
     assert blob["blob"]
-    assert (tmp_path / "voice" / "voice_smoke.wav").is_file()
+    assert (tmp_path / "audio" / "voice_smoke.wav").is_file()
 
 
 class _EmbedOrder:

@@ -100,10 +100,12 @@ class PipelineChild:
         *,
         console: Any = None,
         stub: bool = False,
+        waits_for_memory: bool = True,
     ) -> None:
         self.selection = selection
         self.max_memory = max_memory
         self.stub = stub
+        self.waits_for_memory = waits_for_memory
         self._ui = console
         self.counts: dict[str, int] = {}
         self.kinds: set[str] = set()
@@ -429,11 +431,15 @@ class PipelineChild:
         self._held = max(dropped, sum(self.counts.values()))
 
     def _hold_memory(self) -> None:
+        if not self.waits_for_memory:
+            return
         hold = getattr(self.admission, "hold_memory", None)
         if callable(hold):
             hold(self._pipeline_label())
 
     def _release_memory(self) -> None:
+        if not self.waits_for_memory:
+            return
         release = getattr(self.admission, "release_memory", None)
         if callable(release):
             release()
@@ -465,7 +471,7 @@ class PipelineChild:
         self._hold_memory()
         try:
             code = proc.returncode if proc is not None else None
-            if before is not None and code is not None:
+            if self.waits_for_memory and before is not None and code is not None:
                 if not memory.confirm_released(before, held):
                     _log_line("reclaimable pages stopped short")
                     memory.note_shortfall(before, held)

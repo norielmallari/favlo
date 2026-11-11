@@ -110,6 +110,21 @@ def test_a_call_waits_until_the_memory_hold_lifts() -> None:
     assert worker.is_alive() is False
 
 
+def test_an_embedding_does_not_wait_for_a_memory_hold(monkeypatch) -> None:
+    lines: list[str] = []
+    monkeypatch.setattr("favlo.listener._log", lines.append)
+    schedule = Scheduler()
+    order: list[str] = []
+    schedule.hold_memory("z_image_turbo")
+    worker = threading.Thread(target=_run, args=(schedule, "embed", order))
+    worker.start()
+    worker.join(2)
+    assert order == ["embed"]
+    assert worker.is_alive() is False
+    assert lines == []
+    schedule.release_memory()
+
+
 def test_waiting_for_memory_names_the_pipeline(monkeypatch) -> None:
     lines: list[str] = []
     monkeypatch.setattr("favlo.listener._log", lines.append)
@@ -154,12 +169,13 @@ def test_waiting_work_runs_embeddings_then_chats_then_media_fifo() -> None:
     for thread in threads:
         thread.start()
     _wait_until(
-        lambda: schedule.waiting("embed") == 2
+        lambda: order.count("embed") == 2
         and schedule.waiting("chat") == 2
         and schedule.waiting("media") == 2
     )
     assert schedule.foreground() is True
     assert schedule.preempt.is_set() is False
+    assert order == ["embed", "embed"]
     schedule.release_memory()
     for thread in threads:
         thread.join(2)

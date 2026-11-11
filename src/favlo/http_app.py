@@ -9,9 +9,10 @@ waits while an embedding is queued or running. A chat preempts media and
 leaves ``preempt`` set until the chat queue is empty. A chat whose client
 leaves before that model is opened does not open a runtime. A chat that
 leaves without a reply is not reported as a pipeline failure. An embedding
-does not set ``preempt``. It opens beside the resident model and closes when
-the request returns. Image, video, music, and voice run on the MCP queue. The
-manager opens the runtime that serves the request.
+does not set ``preempt``. It opens beside the resident model without waiting
+on a memory hold or ``wait_released``, and closes when the request returns.
+Image, video, music, and voice run on the MCP queue. The manager opens the
+runtime that serves the request.
 """
 
 from __future__ import annotations
