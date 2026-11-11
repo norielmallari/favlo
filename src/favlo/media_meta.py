@@ -24,8 +24,8 @@ from favlo.media_metadata import (
 _FOLDERS = {
     "image": "images",
     "video": "videos",
-    "music": "music",
-    "voice": "voice",
+    "music": "audio",
+    "voice": "audio",
 }
 _FILE = {
     "image": "png",

@@ -55,7 +55,7 @@ Favlo media tools are one switch per registered pipeline, plus Media tasks and M
 
 ## Stored media
 
-A `favlo://` image, video, or audio link names a file the listener already stored. `GET /media/{kind}/{filename}` streams that file. Kinds are `images`, `videos`, `voice`, and `music`. The app shows the file in the chat. The screen is [../web-spa/README.md](../web-spa/README.md).
+A `favlo://` image, video, or audio link names a file the listener already stored. `GET /media/{kind}/{filename}` streams that file. Kinds are `images`, `videos`, `voice`, and `music`. Voice and music bytes are the files in `audio/`. The app shows the file in the chat. The screen is [../web-spa/README.md](../web-spa/README.md).
 
 ## Workspaces
 

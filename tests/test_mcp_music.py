@@ -7,7 +7,7 @@ from favlo.mcp_server import stored_music
 
 def test_wav_job_is_not_read_back_as_mp3(tmp_path) -> None:
     music_id = "music_clip"
-    folder = tmp_path / "music"
+    folder = tmp_path / "audio"
     folder.mkdir()
     (folder / f"{music_id}.wav").write_bytes(b"RIFF")
     state = {

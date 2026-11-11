@@ -21,7 +21,7 @@ Save the file, then stream that file. Do not add an HTTP media route so a client
 
 ## Order
 
-1. Save the uncompressed file under `~/.favlo/<kind>/<id>.<ext>`. Write a sibling `.tmp`, then replace the final path. The id is the job id. Refuse an id that contains a path separator, `.`, or `..`.
+1. Save the uncompressed file under `~/.favlo/<kind>/<id>.<ext>`. Music and voice share `~/.favlo/audio/`. Write a sibling `.tmp`, then replace the final path. The id is the job id. Refuse an id that contains a path separator, `.`, or `..`.
 2. Write the served file from that saved file. A compressed download is a second file beside it. The content response reads the served file.
 3. Stream the served file, with its media type. A missing file is 404.
 4. The job JSON names the id. It carries no filesystem path and no media bytes.
@@ -34,7 +34,7 @@ A kept file expires through one integer in `~/.favlo/settings.json`. The sweep m
 
 Video: save `~/.favlo/videos/<id>.avi`, encode `<id>.mp4` from that file, then `resources/read` of `favlo://videos/{id}` reads the MP4 as `video/mp4`.
 
-The same shape for a PNG or an audio clip: one directory per kind, one extension, one read of the saved file.
+The same shape for a PNG. An audio clip uses the shared `audio` directory, one extension, and one read of the saved file.
 
 Wrong: keep the served bytes only on the request state and send those bytes.
 

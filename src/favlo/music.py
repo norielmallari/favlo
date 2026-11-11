@@ -1,6 +1,6 @@
 """Stored music clips. The process entry owns this module.
 
-Each clip keeps ``<home>/music/<id>.wav``. The served file is that WAV, or
+Each clip keeps ``<home>/audio/<id>.wav``. The served file is that WAV, or
 an MP3 or FLAC encoded from it. ``~/.favlo/settings.json`` key
 ``music_ttl_seconds`` is how long they stay. The default is one day. A sweep
 at startup and after each stored clip moves an older file to Trash and drops
@@ -15,16 +15,17 @@ import time
 from pathlib import Path
 from typing import Any
 
+from favlo.audio import audio_dir
 from favlo.logs import favlo_home, load_settings, music_ttl_seconds
 from favlo.trash import trash_path
 
-_DIR = "music"
 _FORMATS = {"wav": "audio/wav", "mp3": "audio/mpeg", "flac": "audio/flac"}
 _encode_lock = threading.Lock()
 
 
 def music_dir(home: Path) -> Path:
-    return home / _DIR
+    """The shared audio folder. Music ids start with ``music_``."""
+    return audio_dir(home)
 
 
 def store_wav(
@@ -109,7 +110,7 @@ def sweep_music(
         return
     ttl = music_ttl_seconds(load_settings(root))
     clock = time.time() if now is None else now
-    for path in folder.glob("*.wav"):
+    for path in folder.glob("music_*.wav"):
         try:
             modified = path.stat().st_mtime
         except OSError:
