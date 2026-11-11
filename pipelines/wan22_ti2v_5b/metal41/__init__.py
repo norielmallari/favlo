@@ -27,7 +27,7 @@ def _video(name: str, description: str, *, still: bool) -> dict[str, Any]:
     }
     required = ["prompt", "size"]
     if still:
-        properties["image"] = {"description": "image_ id, PNG, or file://."}
+        properties["image"] = {"description": "image_ id, PNG, file://, or name."}
         properties["prompt"] = {"type": "string", "description": "Motion prompt; still is frame 0."}
         required.append("image")
     return {

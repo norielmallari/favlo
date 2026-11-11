@@ -72,7 +72,8 @@ _IMAGE_EXT = frozenset({"png"})
 _VIDEO_EXT = frozenset({"mp4"})
 _STILL = (
     "image is an id starting with image_, "
-    '{"type": "image", "data": "<base64 png>"}, or an absolute file:// URI. '
+    '{"type": "image", "data": "<base64 png>"}, an absolute file:// URI, '
+    "or a filename in the kind folder. "
     "A bare path and a favlo:// URI are refused."
 )
 # Only these keys are stills. A prompt with a slash (f/1.8) is not a path.
@@ -496,6 +497,10 @@ def _still(image: Any, state: dict[str, Any]) -> str:
         if not isinstance(loaded, str) or not loaded:
             raise RuntimeError(_STILL)
         return loaded
+    if isinstance(image, str):
+        named = _named_file(image, state)
+        if named is not None:
+            return named
     if isinstance(image, dict):
         if image.get("type") != "image":
             raise RuntimeError(_STILL)
@@ -513,6 +518,41 @@ def _still(image: Any, state: dict[str, Any]) -> str:
             raise RuntimeError("stored image is missing")
         return base64.b64encode(raw).decode("ascii")
     return image
+
+
+def _named_file(image: str, state: dict[str, Any]) -> str | None:
+    """Base64 of a bare filename in the kind folder. ``None`` when it is not one."""
+    from favlo.media_name import MissingMediaFile, is_plain_filename, read_plain_filename
+
+    if not is_plain_filename(image):
+        return None
+    try:
+        raw = read_plain_filename(image, home=_filename_home(state, image))
+    except MissingMediaFile as exc:
+        raise RuntimeError(str(exc)) from exc
+    if raw is None:
+        return None
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _filename_home(state: dict[str, Any], image: str) -> Path | None:
+    from favlo.media_name import kind_folders
+
+    keys = {
+        "images": "image_home",
+        "videos": "video_home",
+        "audio": "music_home",
+        "voice": "voice_home",
+    }
+    for folder in kind_folders(image):
+        home = _home(state, keys[folder])
+        if home is not None:
+            return home
+    for key in keys.values():
+        home = _home(state, key)
+        if home is not None:
+            return home
+    return None
 
 
 def _is_path(value: str) -> bool:

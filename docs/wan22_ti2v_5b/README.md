@@ -85,7 +85,7 @@ uv run favlo media --pipeline wan22-ti2v-5b prompt="A horse gallops at speed. Fi
 uv run favlo media --pipeline wan22-ti2v-5b prompt="A horse gallops at speed. Fixed camera." image=file:///absolute/still.png size=832x480 frames=9
 ```
 
-`prompt` and `size` are required. An omitted `image` is text-to-video. A provided `image` is a `file://` URI or a base64 PNG and is image-to-video. `frames` defaults from the tool duration when omitted. This is the command that writes the clip. The pipeline command does not.
+`prompt` and `size` are required. An omitted `image` is text-to-video. A provided `image` is a `file://` URI, a base64 PNG, or a filename in `images`, and is image-to-video. `frames` defaults from the tool duration when omitted. This is the command that writes the clip. The pipeline command does not.
 
 ## Papers
 

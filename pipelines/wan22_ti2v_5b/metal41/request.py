@@ -166,14 +166,21 @@ def _image(value: object, width: int, height: int) -> np.ndarray | None:
     if not isinstance(value, str):
         message = "image must be base64 png"
         raise VideoRequestError(message)
+    from favlo.media_name import MissingMediaFile
+
     try:
         if value.startswith("file://"):
             from favlo.local_uri import read_file_uri
 
             raw = read_file_uri(value)
         else:
-            raw = base64.b64decode(value, validate=False)
+            from favlo.media_name import read_plain_filename
+
+            named = read_plain_filename(value)
+            raw = named if named is not None else base64.b64decode(value, validate=False)
         image = decode_png(raw)
+    except MissingMediaFile as exc:
+        raise VideoRequestError(str(exc)) from exc
     except (OSError, ValueError, TypeError) as exc:
         message = "image must be a png"
         raise VideoRequestError(message) from exc

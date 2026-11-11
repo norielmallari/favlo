@@ -195,7 +195,7 @@ class Pipeline(MediaPipeline):
                     "properties": {
                         "prompt": {"type": "string", "description": "Motion prompt; still is frame 0."},
                         "size": {"type": "string", "description": "Required WIDTHxHEIGHT."},
-                        "image": {"description": "image_ id, PNG, or file://."},
+                        "image": {"description": "image_ id, PNG, file://, or name."},
                         "duration": {"type": "number", "description": "Length in seconds."},
                         "seed": {"type": "integer", "description": "Omit for random."},
                         "quality": {"type": "string", "description": "auto, low, medium, high, xhigh, max."},
@@ -281,12 +281,24 @@ def _image_bytes(body: dict[str, Any]) -> bytes:
             return read_file_uri(ref)
         except (OSError, ValueError) as exc:
             raise VideoRequestError("input_reference must be a PNG", "input_reference") from exc
+    named = _named_file(ref)
+    if named is not None:
+        return named
     if ref.startswith("data:"):
         _header, _sep, ref = ref.partition(",")
     try:
         return base64.b64decode(ref)
     except (ValueError, TypeError) as exc:
         raise VideoRequestError("input_reference must be a PNG", "input_reference") from exc
+
+
+def _named_file(value: str) -> bytes | None:
+    from favlo.media_name import MissingMediaFile, read_plain_filename
+
+    try:
+        return read_plain_filename(value)
+    except MissingMediaFile as exc:
+        raise VideoRequestError(str(exc), "input_reference") from exc
 
 
 def _frames(body: dict[str, Any]) -> int:

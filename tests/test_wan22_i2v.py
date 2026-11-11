@@ -163,6 +163,20 @@ def test_tied_block_keeps_the_lower_index() -> None:
     assert block_winners(scores, 1) == [1]
 
 
+def test_image_bytes_read_a_filename_in_the_images_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wan22_i2v.metal41.chat import _image_bytes
+
+    monkeypatch.setattr("favlo.logs.favlo_home", lambda: tmp_path)
+    folder = tmp_path / "images"
+    folder.mkdir()
+    (folder / "still.png").write_bytes(b"png-bytes")
+    assert _image_bytes({"image": "still.png"}) == b"png-bytes"
+    with pytest.raises(VideoRequestError, match="missing"):
+        _image_bytes({"image": "gone.png"})
+
+
 def test_video_mode_is_image_to_video() -> None:
     assert video_modes() == ("i2v",)
 

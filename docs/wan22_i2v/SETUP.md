@@ -90,7 +90,7 @@ Start the listener:
 uv run favlo serve
 ```
 
-The daemon listens on `http://127.0.0.1:8129`. The model id is `Wan2.2-I2V-A14B-int8`. A video client calls `wan22_i2v__generate_video`. The still is an image id from `generate_image`, a PNG block, or a `file://` URI. `size` is required. Landscape and portrait sizes for 240p, 320p, 480p, and 720p are accepted. An omitted duration is 81 frames. A frame count is `4n+1`. The shortest moving clip is 5 frames. The default step count is 4.
+The daemon listens on `http://127.0.0.1:8129`. The model id is `Wan2.2-I2V-A14B-int8`. A video client calls `wan22_i2v__generate_video`. The still is an image id from `generate_image`, a PNG block, a `file://` URI, or a filename in `images`. `size` is required. Landscape and portrait sizes for 240p, 320p, 480p, and 720p are accepted. An omitted duration is 81 frames. A frame count is `4n+1`. The shortest moving clip is 5 frames. The default step count is 4.
 
 ```bash
 uv run favlo media --pipeline wan22-i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5

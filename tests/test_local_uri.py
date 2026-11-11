@@ -34,6 +34,23 @@ def test_a_file_uri_is_a_still(tmp_path: Path) -> None:
         _still(str(path), {})
 
 
+def test_a_plain_filename_is_a_still(tmp_path: Path) -> None:
+    from favlo.mcp_server import _still
+
+    raw = b"\xff" * 8
+    images = tmp_path / "images"
+    videos = tmp_path / "videos"
+    images.mkdir()
+    videos.mkdir()
+    (images / "face.png").write_bytes(raw)
+    (videos / "clip.mp4").write_bytes(b"mp4")
+    encoded = base64.b64encode(raw).decode("ascii")
+    assert _still("face.png", {"image_home": tmp_path}) == encoded
+    assert _still("clip.mp4", {"image_home": tmp_path}) == base64.b64encode(b"mp4").decode("ascii")
+    with pytest.raises(RuntimeError, match="missing"):
+        _still("gone.png", {"image_home": tmp_path})
+
+
 def test_a_prompt_with_a_slash_is_not_a_still() -> None:
     from favlo.mcp_server import _argument
     from fastmcp.exceptions import ToolError
