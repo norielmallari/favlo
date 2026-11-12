@@ -360,9 +360,18 @@ class Pipeline(LanguagePipeline):
     default_variant = _sampling_mod.DEFAULT_VARIANT
     default_thinking = _sampling_mod.DEFAULT_THINKING
 
+    def has_vision(self) -> bool:
+        return True
+
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         super().on_open(runtime, reply, selection)
         runtime._halted = False
+
+    def on_finish(self, runtime: Any, selection: Any, *, complete: bool) -> None:
+        from qwen35_4b.metal41.vision import release_vision
+
+        release_vision(runtime)
+        super().on_finish(runtime, selection, complete=complete)
 
     def client_closed(self, exc: OSError) -> bool:
         return str(exc) == "client closed"

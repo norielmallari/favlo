@@ -82,3 +82,37 @@ def test_an_image_past_the_hit_is_the_only_one_embedded(monkeypatch: pytest.Monk
     assert index.tolist()[:8] == [0xFFFFFFFF] * 8
     assert index[8] == 0
     assert index[9] == 1
+
+
+def test_row_file_is_the_only_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from favlo import vision_cache
+    from qwen35_4b.metal41 import vision
+    from qwen35_4b.metal41.chat import Pipeline
+    from qwen35_4b.metal41.vision import release_vision
+
+    monkeypatch.setattr(vision_cache, "cache_dir", lambda pipeline: tmp_path / pipeline)
+    assert not hasattr(vision, "_ROW_CACHE")
+    key = ("record", b"\x11" * 32, 32, 64)
+    rows = np.arange(6, dtype=np.float32).reshape(3, 2)
+    vision._store_vision_disk(key, rows, 4, 6)
+    loaded = vision._load_vision_disk(key)
+    assert loaded is not None
+    embedded, grid_h, grid_w = loaded
+    assert embedded.shape == (3, 2)
+    assert float(embedded[2, 1]) == 5.0
+    assert grid_h == 4 and grid_w == 6
+    assert list((tmp_path / "qwen35_4b").glob("*.npz"))
+    assert Pipeline().has_vision() is True
+    runtime = type("Runtime", (), {})()
+    runtime._vision_rows = object()
+    runtime._vision_index = object()
+    runtime._rope_device = object()
+    runtime._rope_length = 4
+    runtime._rope_delta = 1
+    runtime._vision_plan = [object()]
+    release_vision(runtime)
+    assert runtime._vision_rows is None
+    assert runtime._vision_index is None
+    assert runtime._rope_device is None
+    assert runtime._rope_length == 0
+    assert runtime._vision_plan is None

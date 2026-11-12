@@ -6,9 +6,10 @@ LayerNorm, full attention, and a tanh GELU MLP. The merger LayerNorms each
 patch, concatenates the block, and applies erf GELU. The prompt expands each still to its merged grid before the prefix check.
 Prefill overwrites only the image-pad rows past that hit. A span already in
 the loaded prefix logs ``vision cached`` and uploads no rows. A span past the
-hit reuses rows under ``~/.favlo/vision-cache/qwen35_4b/`` and logs
-``vision cache``, or runs the tower and logs ``vision patches`` and
-``vision merged``.
+hit reads ``~/.favlo/vision-cache/qwen35_4b/`` and logs ``vision cache``,
+or runs the tower and logs ``vision patches`` and ``vision merged``.
+The process does not keep those rows. The turn releases the device copy
+when it finishes.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import base64
 import hashlib
 import ipaddress
 import socket
-import struct
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -60,60 +60,7 @@ _FETCH_SECONDS = 30.0
 EPS = np.float32(1e-6)
 THETA = 10000.0
 _EMPTY = 0xFFFFFFFF
-
-_ROW_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, int, int]] = {}
-_ROW_LIMIT = 8
-
-
-def _vision_cache_dir() -> Path:
-    from favlo.logs import favlo_home
-
-    path = favlo_home() / "vision-cache" / "qwen35_4b"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _vision_cache_path(key: tuple[Any, ...]) -> Path:
-    root, digest, min_pixels, max_pixels = key
-    material = hashlib.sha256()
-    material.update(str(root).encode())
-    material.update(digest if isinstance(digest, bytes) else bytes(digest))
-    material.update(struct.pack("<ii", int(min_pixels), int(max_pixels)))
-    return _vision_cache_dir() / f"{material.hexdigest()}.npz"
-
-
-def _load_vision_disk(
-    key: tuple[Any, ...],
-) -> tuple[np.ndarray, int, int] | None:
-    path = _vision_cache_path(key)
-    if not path.is_file():
-        return None
-    try:
-        payload = np.load(path)
-        embedded = np.ascontiguousarray(payload["embedded"], dtype=np.float32)
-        grid_h = int(payload["grid_h"])
-        grid_w = int(payload["grid_w"])
-    except (OSError, ValueError, KeyError):
-        return None
-    return embedded, grid_h, grid_w
-
-
-def _store_vision_disk(
-    key: tuple[Any, ...], embedded: np.ndarray, grid_h: int, grid_w: int
-) -> None:
-    path = _vision_cache_path(key)
-    tmp = path.with_name(path.stem + ".tmp.npz")
-    try:
-        np.savez(
-            tmp,
-            embedded=np.ascontiguousarray(embedded, dtype=np.float32),
-            grid_h=np.int32(grid_h),
-            grid_w=np.int32(grid_w),
-        )
-        tmp.replace(path)
-    except OSError:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
+_PIPELINE = "qwen35_4b"
 
 
 def smart_size(
@@ -387,8 +334,11 @@ def bind_vision(runtime: Any, hit: int) -> None:
     for count in covered:
         _note(runtime, f"vision cached {count}")
     if not pending:
+        rows = getattr(runtime, "_vision_rows", None)
+        index = getattr(runtime, "_vision_index", None)
         runtime._vision_rows = None
         runtime._vision_index = None
+        _drop_device([rows, index])
         return
     rows: list[np.ndarray] = []
     spans: list[int] = []
@@ -681,6 +631,28 @@ def _dequant_positions(runtime: Any, ws: _Workspace) -> None:
     session.end(wait=True)
 
 
+def release_vision(runtime: Any) -> None:
+    """Drop the device copy of the last image rows and position table."""
+    rows = getattr(runtime, "_vision_rows", None)
+    index = getattr(runtime, "_vision_index", None)
+    rope = getattr(runtime, "_rope_device", None)
+    runtime._vision_rows = None
+    runtime._vision_index = None
+    runtime._rope_device = None
+    runtime._rope_length = 0
+    runtime._rope_delta = 0
+    runtime._vision_plan = None
+    _drop_device([rows, index, rope])
+
+
+def _drop_device(buffers: list[Any]) -> None:
+    from favlo.memory import memory
+
+    for buf in buffers:
+        if buf is not None:
+            memory.release(buf)
+
+
 def _vision_row(
     runtime: Any,
     blob: bytes,
@@ -688,18 +660,14 @@ def _vision_row(
     min_pixels: int,
     max_pixels: int,
 ) -> tuple[np.ndarray, int, int]:
-    """The merged rows for these bytes. A later serve reuses the stored rows."""
+    """The merged rows for these bytes. A repeat reads the stored file."""
     key = (
         str(getattr(runtime, "root", "")),
         hashlib.sha256(blob).digest(),
         int(min_pixels),
         int(max_pixels),
     )
-    cached = _ROW_CACHE.get(key)
-    if cached is None:
-        cached = _load_vision_disk(key)
-        if cached is not None:
-            _ROW_CACHE[key] = cached
+    cached = _load_vision_disk(key)
     if cached is not None:
         embedded, grid_h, grid_w = cached
         _note(runtime, f"vision cache {embedded.shape[0]}")
@@ -707,17 +675,50 @@ def _vision_row(
     embedded, grid_h, grid_w = embed_image(
         runtime, blob, min_pixels=min_pixels, max_pixels=max_pixels
     )
-    _ROW_CACHE[key] = (embedded, grid_h, grid_w)
     _store_vision_disk(key, embedded, grid_h, grid_w)
-    while len(_ROW_CACHE) > _ROW_LIMIT:
-        _ROW_CACHE.pop(next(iter(_ROW_CACHE)))
     return embedded, grid_h, grid_w
 
 
+def _vision_cache_path(key: tuple[Any, ...]) -> Path:
+    from favlo.vision_cache import cache_path
+
+    root, digest, min_pixels, max_pixels = key
+    return cache_path(_PIPELINE, str(root), digest, int(min_pixels), int(max_pixels))
+
+
+def _load_vision_disk(
+    key: tuple[Any, ...],
+) -> tuple[np.ndarray, int, int] | None:
+    from favlo.vision_cache import load_cache
+
+    body = load_cache(_vision_cache_path(key))
+    if body is None or "embedded" not in body or "grid_h" not in body or "grid_w" not in body:
+        return None
+    return body["embedded"], int(body["grid_h"]), int(body["grid_w"])
+
+
+def _store_vision_disk(
+    key: tuple[Any, ...], embedded: np.ndarray, grid_h: int, grid_w: int
+) -> None:
+    from favlo.vision_cache import store_cache
+
+    store_cache(
+        _vision_cache_path(key),
+        {
+            "embedded": np.ascontiguousarray(embedded, dtype=np.float32),
+            "grid_h": np.int32(grid_h),
+            "grid_w": np.int32(grid_w),
+        },
+    )
+
+
 def _install_rope(runtime: Any, positions: np.ndarray) -> None:
+    previous = getattr(runtime, "_rope_device", None)
     packed = np.ascontiguousarray(positions, dtype=np.uint32)
     runtime._rope_device = runtime.session.upload(packed.tobytes())
     runtime._rope_length = int(packed.shape[1])
+    if previous is not None:
+        _drop_device([previous])
 
 
 def _install_rows(
@@ -737,8 +738,13 @@ def _install_rows(
             slot, slot + int(flat.shape[0]), dtype=np.uint32
         )
         slot += int(flat.shape[0])
+    previous = (
+        getattr(runtime, "_vision_rows", None),
+        getattr(runtime, "_vision_index", None),
+    )
     runtime._vision_rows = runtime.session.upload(bytes(blob))
     runtime._vision_index = runtime.session.upload(index.tobytes())
+    _drop_device([buf for buf in previous if buf is not None])
 
 
 def _reject_video(messages: list[dict[str, Any]]) -> None:
