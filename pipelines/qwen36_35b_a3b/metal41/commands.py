@@ -147,6 +147,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="firing.sqlite path when --promote firing",
     )
     quant.add_argument(
+        "--since",
+        default=None,
+        help=(
+            "with --promote firing, keep hits finished at or after this bound: "
+            "Go duration (24h, 1h30m), RFC 3339, or unix seconds"
+        ),
+    )
+    quant.add_argument(
         "--keep-bf16",
         action="store_true",
         help="leave the BF16 checkout under models/ after a successful quantize",
@@ -363,6 +371,9 @@ def _quantize(args: argparse.Namespace) -> int:
     else:
         output = Path("models") / record_name(Path(src), percent)
         alias = _ALIAS
+    if args.since is not None and args.promote != "firing":
+        sys.stderr.write("--since needs --promote firing\n")
+        return 1
     try:
         quantize(
             src,
@@ -370,6 +381,7 @@ def _quantize(args: argparse.Namespace) -> int:
             expert_fp8=percent,
             promote=args.promote,
             firing_db=args.firing,
+            firing_since=args.since,
         )
         register_quantized(
             output.name,

@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 
 import numpy as np
 from qwen36_35b_a3b.metal41 import firing
 from qwen36_35b_a3b.metal41.firing import (
+    EXPERTS,
     FiringStore,
+    LAYERS,
     RouteScratch,
     finish_request,
+    flat_hit_scores,
+    hit_totals,
     idle_heartbeat,
     open_request,
+    parse_duration,
+    parse_since,
     relative_score,
 )
 
@@ -24,6 +31,61 @@ def test_a_uniform_expert_scores_one() -> None:
     assert relative_score(4, 4 * 256) == 1
     assert relative_score(0, 0) == 0
     assert relative_score(8, 8, experts=256) == 256
+
+
+def test_parse_since_accepts_go_duration_and_rfc3339() -> None:
+    assert parse_duration("24h") == 86400.0
+    assert parse_duration("1h30m") == 5400.0
+    assert parse_since("24h", now=1_000_000) == 1_000_000 - 86400
+    assert parse_since("1735689600") == 1735689600
+    assert parse_since("2025-01-01T00:00:00+00:00") == 1735689600
+
+
+def test_hit_totals_respects_since(tmp_path) -> None:
+    db = tmp_path / "firing.sqlite"
+    with sqlite3.connect(db) as con:
+        con.executescript(
+            """
+            CREATE TABLE request (
+                id INTEGER PRIMARY KEY,
+                finished_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE layer_hits (
+                request_id INTEGER NOT NULL,
+                layer INTEGER NOT NULL,
+                prefill BLOB NOT NULL,
+                decode BLOB NOT NULL,
+                PRIMARY KEY (request_id, layer)
+            );
+            """
+        )
+        old = np.zeros(EXPERTS, dtype=np.uint32)
+        new = np.zeros(EXPERTS, dtype=np.uint32)
+        old[0] = 7
+        new[1] = 9
+        con.execute("INSERT INTO request (id, finished_at) VALUES (1, 100)")
+        con.execute("INSERT INTO request (id, finished_at) VALUES (2, 200)")
+        zero = np.zeros(EXPERTS, dtype=np.uint32).tobytes()
+        for layer in range(LAYERS):
+            pref = old.tobytes() if layer == 0 else zero
+            con.execute(
+                "INSERT INTO layer_hits (request_id, layer, prefill, decode) VALUES (1, ?, ?, ?)",
+                (layer, pref, zero),
+            )
+            pref = new.tobytes() if layer == 0 else zero
+            con.execute(
+                "INSERT INTO layer_hits (request_id, layer, prefill, decode) VALUES (2, ?, ?, ?)",
+                (layer, pref, zero),
+            )
+    all_hits = hit_totals(db)
+    assert int(all_hits[0, 0]) == 7
+    assert int(all_hits[0, 1]) == 9
+    recent = hit_totals(db, since=150)
+    assert int(recent[0, 0]) == 0
+    assert int(recent[0, 1]) == 9
+    scores = flat_hit_scores(db, since=150)
+    assert scores[1] == 9.0
+    assert scores[0] == 0.0
 
 
 def test_prefill_bins_router_ids_once() -> None:

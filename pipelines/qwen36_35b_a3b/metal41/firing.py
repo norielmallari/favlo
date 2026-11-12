@@ -6,9 +6,11 @@ It does not change an expert's width.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,18 @@ _lock = threading.Lock()
 # record, finished plane (None when host-only), optional pre-pulled snap
 _pending: dict[int, list[tuple[str, int | None, RouteScratch | None]]] = {}
 
+# Longer unit spellings first so ``ms`` is not read as ``m`` + ``s``.
+_DURATION_PART = re.compile(r"(?i)(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)")
+_DURATION_UNITS = {
+    "ns": 1e-9,
+    "us": 1e-6,
+    "µs": 1e-6,
+    "ms": 1e-3,
+    "s": 1.0,
+    "m": 60.0,
+    "h": 3600.0,
+}
+
 
 def relative_score(hits: int, layer_hits: int, experts: int = EXPERTS) -> float:
     """Score against the experts in one layer. A uniform expert scores 1."""
@@ -31,11 +45,81 @@ def relative_score(hits: int, layer_hits: int, experts: int = EXPERTS) -> float:
     return hits / (layer_hits / experts)
 
 
-def hit_totals(path: Path, *, layers: int = LAYERS, experts: int = EXPERTS) -> np.ndarray:
-    """Sum prefill and decode hits from a firing log. Shape is ``(layers, experts)``."""
+def parse_duration(text: str) -> float:
+    """Go ``time.ParseDuration`` subset: concatenated ``h``, ``m``, ``s``, ``ms``, ``us``, ``ns``."""
+    raw = text.strip()
+    if not raw:
+        message = "duration is empty"
+        raise ValueError(message)
+    total = 0.0
+    pos = 0
+    while pos < len(raw):
+        match = _DURATION_PART.match(raw, pos)
+        if match is None:
+            message = f"duration {text!r} is not a Go duration such as 24h or 1h30m"
+            raise ValueError(message)
+        total += float(match.group(1)) * _DURATION_UNITS[match.group(2).lower().replace("µs", "us")]
+        pos = match.end()
+    if total <= 0:
+        message = f"duration {text!r} must be positive"
+        raise ValueError(message)
+    return total
+
+
+def parse_since(text: str, *, now: float | None = None) -> int:
+    """Lower bound as unix seconds.
+
+    Accepts a Go duration relative to ``now`` (``24h``, ``1h30m``), an RFC 3339
+    timestamp, or a unix-seconds integer. Docker ``--since`` uses the same mix.
+    """
+    raw = text.strip()
+    if not raw:
+        message = "since is empty"
+        raise ValueError(message)
+    if re.fullmatch(r"\d{9,}", raw):
+        return int(raw)
+    try:
+        seconds = parse_duration(raw)
+    except ValueError:
+        seconds = None
+    else:
+        clock = time.time() if now is None else float(now)
+        return int(clock - seconds)
+    try:
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        message = (
+            f"since {text!r} is not a Go duration (24h), RFC 3339 timestamp, "
+            "or unix seconds"
+        )
+        raise ValueError(message) from exc
+    return int(stamp.timestamp())
+
+
+def hit_totals(
+    path: Path,
+    *,
+    layers: int = LAYERS,
+    experts: int = EXPERTS,
+    since: int | None = None,
+) -> np.ndarray:
+    """Sum prefill and decode hits from a firing log. Shape is ``(layers, experts)``.
+
+    ``since`` keeps requests whose ``finished_at`` is at or after that unix second.
+    Omitting it sums every stored request.
+    """
     totals = np.zeros((layers, experts), dtype=np.uint64)
     with sqlite3.connect(path) as db:
-        rows = db.execute("SELECT layer, prefill, decode FROM layer_hits")
+        if since is None:
+            rows = db.execute("SELECT layer, prefill, decode FROM layer_hits")
+        else:
+            rows = db.execute(
+                "SELECT layer_hits.layer, layer_hits.prefill, layer_hits.decode"
+                " FROM layer_hits"
+                " JOIN request ON request.id = layer_hits.request_id"
+                " WHERE request.finished_at >= ?",
+                (int(since),),
+            )
         for layer, prefill, decode in rows:
             if layer < 0 or layer >= layers:
                 continue
@@ -48,9 +132,15 @@ def hit_totals(path: Path, *, layers: int = LAYERS, experts: int = EXPERTS) -> n
     return totals
 
 
-def flat_hit_scores(path: Path, *, layers: int = LAYERS, experts: int = EXPERTS) -> dict[int, float]:
+def flat_hit_scores(
+    path: Path,
+    *,
+    layers: int = LAYERS,
+    experts: int = EXPERTS,
+    since: int | None = None,
+) -> dict[int, float]:
     """Flat index ``layer * experts + expert`` to total hits for promote ranking."""
-    totals = hit_totals(path, layers=layers, experts=experts)
+    totals = hit_totals(path, layers=layers, experts=experts, since=since)
     return {
         layer * experts + expert: float(totals[layer, expert])
         for layer in range(layers)

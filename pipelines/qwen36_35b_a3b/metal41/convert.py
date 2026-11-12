@@ -277,13 +277,19 @@ def _promoted_sets(
     *,
     promote: str = "error",
     firing_db: Path | None = None,
+    firing_since: str | None = None,
 ) -> tuple[set[tuple[int, int]], set[int]]:
     language_count = promote_count(percent, LANGUAGE_EXPERTS)
     # MTP stays unpacked. mtp-fp8 is the command that stores those weights.
     if language_count == 0:
         return set(), set()
     if promote == "firing":
-        return _promoted_sets_firing(output, percent, language_count, firing_db), set()
+        return (
+            _promoted_sets_firing(
+                output, percent, language_count, firing_db, firing_since=firing_since
+            ),
+            set(),
+        )
     if promote != "error":
         message = f"promote path {promote!r} is not error or firing"
         raise ValueError(message)
@@ -328,9 +334,11 @@ def _promoted_sets_firing(
     percent: float,
     language_count: int,
     firing_db: Path | None,
+    *,
+    firing_since: str | None = None,
 ) -> set[tuple[int, int]]:
     """Promote by total prefill+decode hits. Does not score weight planes."""
-    from qwen36_35b_a3b.metal41.firing import flat_hit_scores
+    from qwen36_35b_a3b.metal41.firing import flat_hit_scores, parse_since
 
     path = output / "expert_firing.json"
     progress = output / "quantize_progress.json"
@@ -341,6 +349,13 @@ def _promoted_sets_firing(
             raise RuntimeError(message)
         if body.get("promote") != "firing":
             message = "expert_firing.json is not a firing promote list"
+            raise RuntimeError(message)
+        stored_since = body.get("since")
+        if (stored_since or None) != (firing_since or None):
+            message = (
+                f"expert_firing.json since {stored_since!r} does not match "
+                f"{firing_since!r}"
+            )
             raise RuntimeError(message)
         return _language_set(body, language_count)
     if progress.is_file():
@@ -353,15 +368,21 @@ def _promoted_sets_firing(
     if not db.is_file():
         message = f"firing log is missing: {db}"
         raise FileNotFoundError(message)
-    language_scores = flat_hit_scores(db)
+    since_unix = None if firing_since is None else parse_since(firing_since)
+    language_scores = flat_hit_scores(db, since=since_unix)
     if len(language_scores) != LANGUAGE_EXPERTS:
         message = f"firing log covers {len(language_scores)} experts, not {LANGUAGE_EXPERTS}"
+        raise RuntimeError(message)
+    if since_unix is not None and sum(language_scores.values()) <= 0:
+        message = f"firing log has no hits since {firing_since!r}"
         raise RuntimeError(message)
     language_ids = promoted_indices(language_scores, language_count)
     body = {
         "percent": percent,
         "promote": "firing",
         "firing": str(db),
+        "since": firing_since,
+        "since_unix": since_unix,
         "language": {
             "pool": LANGUAGE_EXPERTS,
             "count": language_count,
@@ -514,12 +535,14 @@ def quantize(
     expert_fp8: float = 20.0,
     promote: str = "error",
     firing_db: Path | None = None,
+    firing_since: str | None = None,
 ) -> Path:
     """Pack ``src``. A finished manifest with the same percentage stays.
 
     ``promote`` ``error`` ranks experts by fp4 restoration RMS.
     ``promote`` ``firing`` ranks them by total hits in a firing log and does
-    not score weight planes.
+    not score weight planes. ``firing_since`` limits that sum to requests at
+    or after the bound (Go duration, RFC 3339, or unix seconds).
     """
 
     def _notify(detail: str) -> None:
@@ -554,6 +577,7 @@ def quantize(
         percent,
         promote=promote,
         firing_db=firing_db,
+        firing_since=firing_since,
     )
     dense_fp8 = percent > 0
     progress_path = output / "quantize_progress.json"
