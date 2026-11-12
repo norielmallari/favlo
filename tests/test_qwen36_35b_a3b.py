@@ -1216,6 +1216,32 @@ def test_byte_arena_reuses_a_freed_image() -> None:
     assert arena.alloc(100) == 0
 
 
+def test_sequential_windows_cover_a_short_gap() -> None:
+    from qwen36_35b_a3b.metal41.atlas import _PIECE, sequential_windows
+
+    piece = _PIECE
+    assert sequential_windows([(0, 100), (200, 100)], piece * 4) == [(0, 300)]
+    assert sequential_windows([(0, 100), (piece + 100, 100)], piece * 4) == [
+        (0, 100),
+        (piece + 100, 100),
+    ]
+
+def test_a_short_expert_read_fills_the_piece(tmp_path: Path) -> None:
+    import os
+
+    from qwen36_35b_a3b.metal41.atlas import _PIECE, _pread_into
+
+    blob = bytes([index % 251 for index in range(_PIECE)])
+    path = tmp_path / "layer.bin"
+    path.write_bytes(blob)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        out = bytearray(_PIECE)
+        _pread_into(fd, memoryview(out), 0)
+    finally:
+        os.close(fd)
+    assert bytes(out) == blob
+
 def test_s3_evicts_a_one_hit_before_a_reused_expert() -> None:
     from qwen36_35b_a3b.metal41.atlas import S3Fifo
 

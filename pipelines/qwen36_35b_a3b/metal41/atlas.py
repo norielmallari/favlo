@@ -34,8 +34,11 @@ LAYERS = 40
 EXPERTS = 256
 # One token routes eight experts. The atlas can shrink to that set.
 MIN_IMAGES = 8
+# Same floor as the resident-file read. A shorter syscall stays off the SSD peak.
+_PIECE = 8 << 20
 _Image = tuple[int, int]
 _FREQ_CAP = 3
+_Placed = tuple[int, int, int]  # file offset, size, destination offset
 
 
 def atlas_slots(max_memory: int, file_bytes: int, reserved: int, *, layers: int = LAYERS) -> int:
@@ -319,6 +322,81 @@ class S3Fifo:
             self._ghost_set.discard(old)
 
 
+def sequential_windows(
+    spans: list[tuple[int, int]],
+    file_size: int,
+    *,
+    piece: int = _PIECE,
+) -> list[tuple[int, int]]:
+    """Cover ``(file_off, size)`` spans with the exact bytes of each run.
+
+    A gap shorter than ``piece`` stays in the same run. The window is that
+    run, not a padded read past the last byte.
+    """
+    if not spans:
+        return []
+    if piece < 1 or file_size < 1:
+        message = "a sequential window needs a positive piece and file"
+        raise ValueError(message)
+    ordered = sorted(spans)
+    groups: list[list[tuple[int, int]]] = [[ordered[0]]]
+    end = ordered[0][0] + ordered[0][1]
+    for off, size in ordered[1:]:
+        if off < end:
+            message = f"expert span {off} overlaps a span that ends at {end}"
+            raise ValueError(message)
+        if off - end < piece:
+            groups[-1].append((off, size))
+            end = max(end, off + size)
+            continue
+        groups.append([(off, size)])
+        end = off + size
+    windows: list[tuple[int, int]] = []
+    for group in groups:
+        start = group[0][0]
+        stop = group[-1][0] + group[-1][1]
+        if stop > file_size or start < 0 or stop <= start:
+            message = f"expert window {start}:{stop} is outside {file_size}"
+            raise ValueError(message)
+        windows.append((start, stop - start))
+    return windows
+
+
+_LIBC = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
+_LIBC.pread.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int64]
+_LIBC.pread.restype = ctypes.c_ssize_t
+
+
+def _pread_into(fd: int, view: memoryview, file_off: int) -> None:
+    """Read ``view`` from ``file_off``. A long view is split into 8 MiB pieces."""
+    offset = 0
+    total = len(view)
+    while offset < total:
+        step = min(_PIECE, total - offset)
+        chunk = view[offset : offset + step]
+        holder = ctypes.c_char.from_buffer(chunk)
+        try:
+            address = ctypes.addressof(holder)
+            got = 0
+            while got < step:
+                rc = _LIBC.pread(
+                    ctypes.c_int(fd),
+                    ctypes.c_void_p(address + got),
+                    ctypes.c_size_t(step - got),
+                    ctypes.c_int64(file_off + offset + got),
+                )
+                if rc < 0:
+                    err = ctypes.get_errno()
+                    raise OSError(err, os.strerror(err))
+                if rc == 0:
+                    message = f"expert read stopped at {file_off + offset + got}"
+                    raise OSError(message)
+                got += int(rc)
+        finally:
+            del holder
+        offset += step
+
+
 def _read_file(buffer: Any, path: Path, nbytes: int, note: Any = None) -> None:
     view = memoryview(buffer.contents().as_buffer(nbytes))
     with path.open("rb") as handle:
@@ -503,6 +581,7 @@ class ExpertAtlas:
         self._fds = [
             os.open(self.root / "experts" / f"{layer}.bin", os.O_RDONLY) for layer in range(LAYERS)
         ]
+        self._scratch = bytearray(_PIECE)
 
     def _load_layers(self, session: Any, nbytes: int) -> bool:
         """Read every layer file. The kernels index that buffer by file slot."""
@@ -594,38 +673,40 @@ class ExpertAtlas:
                     eviction.hit(key)
         for expert in counts:
             if (layer, expert) not in self._resident:
-                self._load(layer, expert, protect)
+                self._stage_missing(layer, [item for item in counts if (layer, item) not in self._resident], protect)
+                break
         self._shed(protect)
 
-    def _load(self, layer: int, expert: int, protect: set[_Image]) -> None:
-        if self.layout.mixed:
-            self._load_mixed(layer, expert, protect)
-            return
-        slot = self._claim(protect)
-        blob = os.pread(self._fds[layer], EXPERT_IMAGE, expert * EXPERT_IMAGE)
-        if len(blob) != EXPERT_IMAGE:
-            message = f"expert {layer}:{expert} stopped at {len(blob)} of {EXPERT_IMAGE}"
-            raise OSError(message)
-        view = self._atlas_view
-        if view is None:
-            message = "expert atlas has no buffer"
-            raise RuntimeError(message)
-        offset = slot * EXPERT_IMAGE
-        view[offset : offset + EXPERT_IMAGE] = blob
-        self._resident[(layer, expert)] = slot
+    def _stage_missing(self, layer: int, experts: list[int], protect: set[_Image]) -> None:
+        """Reserve every miss, then read those bytes as sequential pieces."""
+        placed: list[tuple[int, int, int, int]] = []
+        for expert in experts:
+            if self.layout.mixed:
+                size = expert_bytes(int(self.layout.widths[layer, expert]))
+                file_off = int(self.layout.offsets[layer, expert])
+                dest = self._claim_bytes(size, protect)
+            else:
+                size = EXPERT_IMAGE
+                file_off = expert * EXPERT_IMAGE
+                dest = self._claim(protect) * EXPERT_IMAGE
+            placed.append((file_off, size, dest, expert))
+        self._read_placed(layer, [(off, size, dest) for off, size, dest, _expert in placed])
         eviction = self._eviction
         if eviction is None:
             message = "expert atlas has no eviction queue"
             raise RuntimeError(message)
-        eviction.insert((layer, expert))
+        for _off, size, dest, expert in placed:
+            if self.layout.mixed:
+                self._resident[(layer, expert)] = dest
+                eviction.insert((layer, expert), size)
+            else:
+                self._resident[(layer, expert)] = dest // EXPERT_IMAGE
+                eviction.insert((layer, expert))
 
-    def _load_mixed(self, layer: int, expert: int, protect: set[_Image]) -> None:
-        size = expert_bytes(int(self.layout.widths[layer, expert]))
-        file_off = int(self.layout.offsets[layer, expert])
+    def _claim_bytes(self, size: int, protect: set[_Image]) -> int:
         arena = self._arena
         eviction = self._eviction
-        view = self._atlas_view
-        if arena is None or eviction is None or view is None:
+        if arena is None or eviction is None:
             message = "expert atlas has no buffer"
             raise RuntimeError(message)
         while True:
@@ -634,19 +715,53 @@ class ExpertAtlas:
                 self._compact()
                 at = arena.alloc(size)
             if at is not None:
-                break
+                return at
             key = eviction.victim(protect)
             if key is None:
                 message = "expert atlas cannot hold the routed images"
                 raise RuntimeError(message)
             self._release(key)
-        blob = os.pread(self._fds[layer], size, file_off)
-        if len(blob) != size:
-            message = f"expert {layer}:{expert} stopped at {len(blob)} of {size}"
-            raise OSError(message)
-        view[at : at + size] = blob
-        self._resident[(layer, expert)] = at
-        eviction.insert((layer, expert), size)
+
+    def _read_placed(self, layer: int, placed: list[_Placed]) -> None:
+        view = self._atlas_view
+        if view is None:
+            message = "expert atlas has no buffer"
+            raise RuntimeError(message)
+        fd = self._fds[layer]
+        file_size = int(self.layout.file_bytes[layer])
+        ordered = sorted(placed)
+        windows = sequential_windows([(off, size) for off, size, _dest in ordered], file_size)
+        for start, length in windows:
+            covered = [
+                item
+                for item in ordered
+                if item[0] >= start and item[0] + item[1] <= start + length
+            ]
+            if len(covered) == 1 and covered[0][0] == start and covered[0][1] == length:
+                dest = covered[0][2]
+                _pread_into(fd, view[dest : dest + length], start)
+                continue
+            if _packed_dest(covered, start, length):
+                dest = covered[0][2]
+                _pread_into(fd, view[dest : dest + length], start)
+                continue
+            cursor = 0
+            while cursor < length:
+                step = min(_PIECE, length - cursor)
+                scratch = memoryview(self._scratch)[:step]
+                _pread_into(fd, scratch, start + cursor)
+                lo = start + cursor
+                hi = lo + step
+                for file_off, size, dest in covered:
+                    if file_off >= hi or file_off + size <= lo:
+                        continue
+                    src_lo = max(file_off, lo)
+                    src_hi = min(file_off + size, hi)
+                    view[dest + (src_lo - file_off) : dest + (src_hi - file_off)] = scratch[
+                        src_lo - lo : src_hi - lo
+                    ]
+                cursor += step
+
 
     def _compact(self) -> None:
         view = self._atlas_view
@@ -720,3 +835,17 @@ class ExpertAtlas:
         self._eviction = None
         self._resident.clear()
         self._free.clear()
+
+def _packed_dest(covered: list[_Placed], start: int, length: int) -> bool:
+    """True when ``covered`` is one contiguous copy of ``start`` for ``length`` bytes."""
+    if not covered:
+        return False
+    cursor = start
+    dest = covered[0][2]
+    for file_off, size, at in covered:
+        if file_off != cursor or at != dest + (file_off - start):
+            return False
+        cursor += size
+    return cursor - start == length
+
+
