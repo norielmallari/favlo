@@ -26,7 +26,16 @@ from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
 from qwen36_35b_a3b.metal41.sampling import VARIANTS
 from qwen36_35b_a3b.metal41.tools import split_thinking
 
-_ROOT = Path("models/Qwen3.6-35B-A3B-fp8-e20")
+def _installed_record() -> Path:
+    """The packed folder this machine can smoke. e30 is the current record."""
+    for name in ("Qwen3.6-35B-A3B-fp8-e30", "Qwen3.6-35B-A3B-fp8-e20"):
+        path = Path("models") / name
+        if (path / "manifest.json").is_file():
+            return path
+    return Path("models/Qwen3.6-35B-A3B-fp8-e20")
+
+
+_ROOT = _installed_record()
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768
 # The test forces the close so the carrot reply is in the scored text.
