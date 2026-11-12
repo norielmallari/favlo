@@ -17,7 +17,16 @@ def test_a_record_round_trips(tmp_path) -> None:
         tmp_path,
         "image",
         "image_one",
-        {"prompt": "a cat", "seed": 4, "size": "720x1280"},
+        {
+            "prompt": "a cat",
+            "seed": 4,
+            "size": "720x1280",
+            "image": ["file:///a.png", "file:///b.png"],
+            "crop": [[10, 20, 100, 200], None],
+            "scale": [0.5, None],
+            "steps": 8,
+            "true_cfg_scale": 1.0,
+        },
         "example-model",
     )
     assert saved["source"] == "generate"
@@ -25,6 +34,11 @@ def test_a_record_round_trips(tmp_path) -> None:
     assert saved["generation"]["model"] == "example-model"
     assert saved["generation"]["seed"] == 4
     assert saved["generation"]["prompt"] == "a cat"
+    assert saved["generation"]["image"] == ["file:///a.png", "file:///b.png"]
+    assert saved["generation"]["crop"] == [[10, 20, 100, 200], None]
+    assert saved["generation"]["scale"] == [0.5, None]
+    assert saved["generation"]["steps"] == 8
+    assert saved["generation"]["true_cfg_scale"] == 1.0
     assert saved["description"] == "a cat"
     side = tmp_path / "images" / f"{media_relative('image', 'image_one')}.json"
     assert side.is_file()

@@ -322,19 +322,56 @@ def _clamp_generation(raw: Any) -> dict[str, Any] | None:
             continue
         if isinstance(value, bool):
             found[key] = value
-    # Preserve extra generation keys the pipeline stored (capped strings/numbers).
+    # Preserve extra generation keys the pipeline stored (JSON scalars and lists).
     for key, value in raw.items():
         if key in found or not isinstance(key, str) or key.startswith("_"):
             continue
-        if isinstance(value, str):
-            found[key] = _clip(value, 240)
-        elif isinstance(value, bool):
-            found[key] = value
-        elif isinstance(value, int) and not isinstance(value, bool):
-            found[key] = value
-        elif isinstance(value, float):
-            found[key] = value
+        encoded = _generation_value(value)
+        if encoded is _GEN_SKIP:
+            continue
+        found[key] = encoded
     return found or None
+
+
+_GEN_SKIP = object()
+
+
+def _generation_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _clip(value, 4000)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        items = []
+        for item in value:
+            if item is None:
+                items.append(None)
+                continue
+            encoded = _generation_value(item)
+            if encoded is _GEN_SKIP:
+                return _GEN_SKIP
+            items.append(encoded)
+        return items
+    if isinstance(value, dict):
+        found: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or key.startswith("_"):
+                continue
+            if item is None:
+                found[key] = None
+                continue
+            encoded = _generation_value(item)
+            if encoded is _GEN_SKIP:
+                return _GEN_SKIP
+            found[key] = encoded
+        return found
+    return _GEN_SKIP
 
 
 def _relative(relative: str) -> Path:

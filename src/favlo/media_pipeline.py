@@ -387,7 +387,7 @@ class MediaPipeline(Pipeline):
         body["seed"] = secrets.randbits(31)
 
     def parameters(self, request: Any) -> dict[str, Any]:
-        """JSON fields the forward used. Arrays and missing values stay out."""
+        """JSON fields the forward used. Missing top-level values stay out; list nulls stay."""
         raw: dict[str, Any] = {}
         if isinstance(request, dict):
             raw.update(request)
@@ -424,7 +424,7 @@ class MediaPipeline(Pipeline):
         root = home if isinstance(home, Path) else favlo_home()
         fields = self.parameters(request)
         if isinstance(job, dict):
-            for key in ("seconds", "size", "response_format"):
+            for key in ("seconds", "size", "response_format", "seed"):
                 if key in fields:
                     continue
                 encoded = _jsonable(job.get(key))
@@ -531,6 +531,9 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         items = []
         for item in value:
+            if item is None:
+                items.append(None)
+                continue
             encoded = _jsonable(item)
             if encoded is _SKIP:
                 return _SKIP
@@ -539,6 +542,9 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         found = {}
         for key, item in value.items():
+            if item is None:
+                found[str(key)] = None
+                continue
             encoded = _jsonable(item)
             if encoded is _SKIP:
                 return _SKIP
