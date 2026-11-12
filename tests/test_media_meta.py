@@ -9,7 +9,7 @@ import pytest
 
 from favlo.images import sweep_images
 from favlo.media_meta import drop_media, load_media, media_relative, save_media
-from favlo.media_metadata import METADATA_DIR, merge_analyzed, prompt_text
+from favlo.media_metadata import merge_analyzed, prompt_text
 
 
 def test_a_record_round_trips(tmp_path) -> None:
@@ -26,14 +26,9 @@ def test_a_record_round_trips(tmp_path) -> None:
     assert saved["generation"]["seed"] == 4
     assert saved["generation"]["prompt"] == "a cat"
     assert saved["description"] == "a cat"
-    side = (
-        tmp_path
-        / "images"
-        / METADATA_DIR
-        / f"{media_relative('image', 'image_one')}.json"
-    )
+    side = tmp_path / "images" / f"{media_relative('image', 'image_one')}.json"
     assert side.is_file()
-    assert not (tmp_path / "images" / "image_one.png.json").exists()
+    assert side.parent == tmp_path / "images"
     assert load_media("image_one", home=tmp_path) == saved
     assert load_media("missing", home=tmp_path) is None
     prompt = prompt_text(saved)
@@ -97,10 +92,10 @@ def test_a_legacy_image_record_still_loads(tmp_path) -> None:
     assert loaded["generation"]["prompt"] == "a cat"
     saved = save_media(tmp_path, "image", "image_old", {"prompt": "a dog", "seed": 5}, "")
     assert saved["generation"]["seed"] == 5
-    assert (
-        tmp_path / "images" / METADATA_DIR / "image_old.png.json"
-    ).is_file()
-    assert not (folder / "image_old.png.json").exists()
+    assert (folder / "image_old.png.json").is_file()
+    again = load_media("image_old", home=tmp_path)
+    assert again is not None
+    assert again["generation"]["prompt"] == "a dog"
 
 
 def test_a_dotted_id_is_refused(tmp_path) -> None:
@@ -113,7 +108,7 @@ def test_sweep_drops_the_record(tmp_path) -> None:
     save_media(tmp_path, "music", "music_old", {"prompt": "solo", "seed": 3, "lyrics": ""}, "")
     folder = tmp_path / "images"
     png = folder / "image_old.png"
-    meta = folder / METADATA_DIR / "image_old.png.json"
+    meta = folder / "image_old.png.json"
     png.write_bytes(b"png")
     old = time.time() - 90_000
     os.utime(png, (old, old))

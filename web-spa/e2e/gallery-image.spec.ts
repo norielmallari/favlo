@@ -34,7 +34,7 @@ test('an attached strip image is embedded once across later messages', async ({ 
       await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8012\/?$/);
       await createGalleryWorkspace(page, name, root);
       await expect
-        .poll(() => fs.existsSync(path.join(root, '.favlo_metadata', 'frame.png.json')))
+        .poll(() => fs.existsSync(path.join(root, 'frame.png.json')))
         .toBe(true);
     });
 

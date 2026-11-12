@@ -1208,13 +1208,11 @@ def test_selection_metadata_rides_the_model_suffix(tmp_path: Path) -> None:
     root = Path(_loc(tmp_path, "cue-root"))
     (root / "horse.png").write_bytes(PNG)
     (root / "zebra.png").write_bytes(PNG)
-    meta = root / ".favlo_metadata"
-    meta.mkdir()
-    (meta / "horse.png.json").write_text(
+    (root / "horse.png.json").write_text(
         '{"version":1,"filename":"horse.png","kind":"image","description":"A painted horse."}\n',
         encoding="utf-8",
     )
-    (meta / "zebra.png.json").write_text(
+    (root / "zebra.png.json").write_text(
         '{"version":1,"filename":"zebra.png","kind":"image","description":"A striped zebra."}\n',
         encoding="utf-8",
     )
@@ -1317,7 +1315,7 @@ def test_gallery_creation_captions_before_the_greeting(client: TestClient, tmp_p
         time.sleep(0.05)
     assert row["provisioning_state"] == "provisioned"
     assert calls == ["qwen36_35b_a3b:thinking"]
-    side = json.loads((root / ".favlo_metadata" / "a.png.json").read_text())
+    side = json.loads((root / "a.png.json").read_text())
     assert side["description"] == "A painted horse in a field."
     snap = client.get(f"/sessions/{body['session_id']}").json()
     items = snap["state"]["favlo_workspace"]["elements"][1]["props"]["items"]
@@ -1357,7 +1355,7 @@ def test_create_provisions_then_shows_the_failure_in_chat(client: TestClient, tm
             break
         time.sleep(0.05)
     assert row["provisioning_state"] == "provisioning"
-    assert (root / ".favlo_metadata" / "a.png.json").is_file()
+    assert (root / "a.png.json").is_file()
     snap = client.get(f"/sessions/{body['session_id']}").json()
     assert [item["role"] for item in snap["messages"]] == ["assistant"]
     assert "model" in snap["messages"][0]["body"].lower()
@@ -1491,7 +1489,7 @@ def test_update_metadata_changes_only_the_named_fields(client: TestClient, tmp_p
     assert schema["required"] == ["path"]
     assert "description" in schema["properties"]
     deadline = time.time() + 5
-    while time.time() < deadline and not (root / ".favlo_metadata" / "horse.png.json").is_file():
+    while time.time() < deadline and not (root / "horse.png.json").is_file():
         time.sleep(0.05)
     empty = _tool_json(tool, {"path": "horse.png"})
     assert empty["error"] == "missing_fields"
@@ -1537,7 +1535,7 @@ def test_get_metadata_and_load_image(client: TestClient, tmp_path: Path, monkeyp
     assert created.status_code == 201
     workspace_id = created.json()["id"]
     deadline = time.time() + 5
-    while time.time() < deadline and not (root / ".favlo_metadata" / "horse.png.json").is_file():
+    while time.time() < deadline and not (root / "horse.png.json").is_file():
         time.sleep(0.05)
     meta = next(
         item

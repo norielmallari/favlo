@@ -165,8 +165,8 @@ def test_run_once_writes_path_sidecar_without_chat_model(tmp_path: Path, monkeyp
     assert worked >= 2
     assert read_sidecar(root, "still.png") is not None
     assert read_sidecar(root, "track.mp3") is not None
-    assert (root / METADATA_DIR / "still.png.json").is_file()
-    assert not (root / "still.png.json").exists()
+    assert (root / "still.png.json").is_file()
+    assert not (root / METADATA_DIR).exists()
 
 
 def test_gallery_vision_uses_the_agent_model_or_the_global_default(tmp_path: Path) -> None:
@@ -345,7 +345,7 @@ def test_vision_waits_120_seconds_for_a_new_generated_image(tmp_path: Path, monk
 
     assert run_once(store, workspace_id=workspace["id"]) >= 1
     assert calls == []
-    side = json.loads((root / METADATA_DIR / "shot.png.json").read_text())
+    side = json.loads((root / "shot.png.json").read_text())
     assert side["source"] == "generate"
 
     stamped = time.time() - 121

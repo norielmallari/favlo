@@ -53,18 +53,12 @@ def local_root(store: Any, session_id: str) -> Path | None:
 
 def remember_source(root: Path, filename: str, link: str) -> None:
     """Remember the ``favlo://`` link written under this file name."""
-    from favlo.media_metadata import METADATA_DIR
-
-    side = root / METADATA_DIR
-    side.mkdir(parents=True, exist_ok=True)
-    (side / f"{filename}.uri").write_text(link.strip() + "\n", encoding="utf-8")
+    (root / f"{filename}.uri").write_text(link.strip() + "\n", encoding="utf-8")
 
 
 def source_link(root: Path, filename: str) -> str:
     """The ``favlo://`` link stored for this file name, or empty."""
-    from favlo.media_metadata import METADATA_DIR
-
-    path = root / METADATA_DIR / f"{filename}.uri"
+    path = root / f"{filename}.uri"
     if not path.is_file():
         return ""
     return path.read_text(encoding="utf-8").strip()

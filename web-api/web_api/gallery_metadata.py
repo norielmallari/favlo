@@ -1,4 +1,4 @@
-"""Gallery media metadata under ``.favlo_metadata``.
+"""Gallery media metadata beside each media file.
 
 Schema and creators live in ``favlo.media_metadata``. This module re-exports
 them for gallery callers.
@@ -18,8 +18,6 @@ from favlo.media_metadata import (  # noqa: F401
     move_sidecar,
     prompt_text,
     read_sidecar,
-    relocate_metadata_prefix,
-    remove_metadata_prefix,
     remove_sidecar,
     sidecar_path,
     write_sidecar,

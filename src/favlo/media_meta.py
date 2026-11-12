@@ -1,10 +1,9 @@
 """Standard metadata for one generated media id.
 
-Each kind folder stores the sidecar under that folder's
-``.favlo_metadata/<filename>.json``.
-An image record is ``images/.favlo_metadata/<id>.png.json``. Other kinds use
-``<id>.mp4.json`` or ``<id>.wav.json``. Generation parameters live under
-``generation``. A sweep moves that sidecar to Trash with the media.
+The sidecar sits beside the media file. An image record is
+``images/<id>.png.json``. Video uses ``<id>.mp4.json`` and audio uses
+``<id>.wav.json``. Generation parameters live under ``generation``. A sweep
+moves that sidecar to Trash with the media.
 """
 
 from __future__ import annotations
@@ -180,7 +179,11 @@ def _load_legacy(folder: Path, kind: str, name: str) -> dict[str, Any] | None:
 def _drop_legacy(folder: Path, kind: str, name: str) -> None:
     from favlo.trash import trash_path
 
+    suffix = _FILE.get(kind)
+    keep = folder / f"{name}.{suffix}.json" if suffix is not None else None
     for path in _legacy_paths(folder, kind, name):
+        if keep is not None and path == keep:
+            continue
         try:
             trash_path(path)
         except OSError:
@@ -188,7 +191,12 @@ def _drop_legacy(folder: Path, kind: str, name: str) -> None:
 
 
 def _legacy_paths(folder: Path, kind: str, name: str) -> tuple[Path, ...]:
-    """Older adjacent job-parameter paths."""
+    """Older flat job-parameter paths beside the kind folder.
+
+    ``<id>.<suffix>.json`` is also the standardized sidecar. ``load_media``
+    reads it as a sidecar when it has that shape, and as this flat record
+    otherwise. A save leaves that file in place.
+    """
     suffix = _FILE.get(kind)
     paths = [folder / f"{name}.json"]
     if suffix is not None:

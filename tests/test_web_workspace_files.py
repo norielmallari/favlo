@@ -47,6 +47,7 @@ def test_reserve_refuses_a_bad_name(tmp_path: Path) -> None:
 
 def test_a_source_link_is_stored_beside_the_file(tmp_path: Path) -> None:
     remember_source(tmp_path, "star.png", "favlo://images/image_abc.png")
+    assert (tmp_path / "star.png.uri").is_file()
     assert source_link(tmp_path, "star.png") == "favlo://images/image_abc.png"
     assert source_link(tmp_path, "missing.png") == ""
 

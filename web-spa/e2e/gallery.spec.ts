@@ -44,9 +44,9 @@ test('a gallery guide binds a folder, places a strip, and browses without AG-UI'
       await expect(page.getByRole('button', { name: 'New workspace for Favlo' })).toBeVisible();
       gallery = await createGalleryWorkspace(page, name, root);
       await expect(gallery.getByLabel(/said:/).first()).toBeVisible();
-      assertCaption(path.join(root, '.favlo_metadata', 'horse.png.json'));
-      assertCaption(path.join(root, '.favlo_metadata', 'cat.png.json'));
-      assertCaption(path.join(albums, '.favlo_metadata', 'zebra.png.json'));
+      assertCaption(path.join(root, 'horse.png.json'));
+      assertCaption(path.join(root, 'cat.png.json'));
+      assertCaption(path.join(albums, 'zebra.png.json'));
       expect(aguiCount).toBe(beforeBind);
     });
 

@@ -1,9 +1,9 @@
-"""Standard media metadata under per-folder ``.favlo_metadata``.
+"""Standard media metadata beside each media file.
 
-Each directory that holds media files owns its own ``.favlo_metadata`` next to
-those files. One sidecar schema for generated files and gallery media.
-Generation pipelines store parameters in a nested ``generation`` object. An
-analyzer fills the semantic fields and must not overwrite ``generation``.
+``photos/shot.png`` keeps ``photos/shot.png.json`` in the same directory.
+One sidecar schema for generated files and gallery media. Generation
+pipelines store parameters in a nested ``generation`` object. An analyzer
+fills the semantic fields and must not overwrite ``generation``.
 """
 
 from __future__ import annotations
@@ -21,8 +21,6 @@ KIND_SUFFIXES = {
     "audio": {".mp3", ".wav"},
     "video": {".mp4"},
 }
-
-_MEDIA_SUFFIXES = {suffix for group in KIND_SUFFIXES.values() for suffix in group}
 
 _GENERATION_KEYS = (
     "model",
@@ -54,14 +52,10 @@ def is_media(path: str | Path) -> bool:
 
 
 def sidecar_path(root: str | Path, relative: str) -> Path:
-    """``photos/shot.png`` → ``<root>/photos/.favlo_metadata/shot.png.json``.
-
-    Each media folder owns its ``.favlo_metadata`` directory. Root files use
-    ``<root>/.favlo_metadata/<name>.json``.
-    """
+    """``photos/shot.png`` → ``<root>/photos/shot.png.json``."""
     base = Path(root)
     rel = _relative(relative)
-    return base / rel.parent / METADATA_DIR / f"{rel.name}.json"
+    return base / rel.parent / f"{rel.name}.json"
 
 
 def prompt_text(sidecar: dict[str, Any]) -> str:
@@ -257,15 +251,21 @@ def clamp(raw: dict[str, Any]) -> dict[str, Any]:
 def read_sidecar(root: str | Path, relative: str) -> dict[str, Any] | None:
     side = sidecar_path(root, relative)
     if not side.is_file():
-        legacy = _legacy_sidecar_path(root, relative)
-        side = legacy if legacy is not None and legacy.is_file() else side
-    if not side.is_file():
         return None
     try:
         loaded = json.loads(side.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    return clamp(loaded) if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict):
+        return None
+    if not (
+        "version" in loaded
+        or "filename" in loaded
+        or "generation" in loaded
+        or "description" in loaded
+    ):
+        return None
+    return clamp(loaded)
 
 
 def write_sidecar(root: str | Path, relative: str, payload: dict[str, Any]) -> Path:
@@ -279,66 +279,21 @@ def remove_sidecar(root: str | Path, relative: str) -> None:
     from favlo.trash import trash_path
 
     side = sidecar_path(root, relative)
-    if not side.is_file():
-        legacy = _legacy_sidecar_path(root, relative)
-        if legacy is not None and legacy.is_file():
-            side = legacy
     if side.is_file():
         trash_path(side)
-    _drop_empty_metadata_dir(side.parent)
 
 
 def move_sidecar(root: str | Path, old_relative: str, new_relative: str) -> None:
     src = sidecar_path(root, old_relative)
     if not src.is_file():
-        # Legacy mirror: ``<root>/.favlo_metadata/<old_relative>.json``.
-        legacy = _legacy_sidecar_path(root, old_relative)
-        if legacy is None or not legacy.is_file():
-            return
-        src = legacy
+        return
     dest = sidecar_path(root, new_relative)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if src.resolve() == dest.resolve():
+        return
     if dest.exists():
         dest.unlink()
     shutil.move(str(src), str(dest))
-    _drop_empty_metadata_dir(src.parent)
-
-
-def relocate_metadata_prefix(root: str | Path, old_relative: str, new_relative: str) -> None:
-    """After a folder rename/move, migrate any legacy mirrored metadata.
-
-    Per-folder ``.favlo_metadata`` already moved with the directory. A leftover
-    ``<root>/.favlo_metadata/<old>/`` tree is copied into ``<new>/.favlo_metadata/``.
-    """
-    base = Path(root)
-    new_rel = new_relative.strip().strip("/")
-    if not new_rel:
-        return
-    legacy = _prefix_dir(base, old_relative)
-    if legacy is None or not legacy.exists():
-        return
-    dest = base / new_rel / METADATA_DIR
-    dest.mkdir(parents=True, exist_ok=True)
-    for child in list(legacy.iterdir()):
-        target = dest / child.name
-        if target.exists():
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-        shutil.move(str(child), str(target))
-    meta_root = (base / METADATA_DIR).resolve()
-    _prune_empty(legacy, meta_root)
-
-
-def remove_metadata_prefix(root: str | Path, relative: str) -> None:
-    """Drop a legacy ``<root>/.favlo_metadata/<relative>/`` tree after folder delete."""
-    base = Path(root)
-    target = _prefix_dir(base, relative)
-    if target is None or not target.exists():
-        return
-    shutil.rmtree(target)
-    _prune_empty(target.parent, base / METADATA_DIR)
 
 
 def _clamp_generation(raw: Any) -> dict[str, Any] | None:
@@ -382,39 +337,6 @@ def _clamp_generation(raw: Any) -> dict[str, Any] | None:
     return found or None
 
 
-def _prefix_dir(root: Path, relative: str) -> Path | None:
-    """Legacy mirrored tree under ``<root>/.favlo_metadata/<relative>/``."""
-    cleaned = relative.strip().strip("/")
-    if not cleaned:
-        return None
-    meta_root = (root / METADATA_DIR).resolve()
-    candidate = (root / METADATA_DIR / Path(cleaned)).resolve()
-    if candidate == meta_root or meta_root not in candidate.parents:
-        return None
-    return candidate
-
-
-def _legacy_sidecar_path(root: str | Path, relative: str) -> Path | None:
-    """Former layout: ``<root>/.favlo_metadata/<relative>.json``."""
-    try:
-        rel = _relative(relative)
-    except ValueError:
-        return None
-    return (Path(root) / METADATA_DIR / rel).with_name(rel.name + ".json")
-
-
-def _drop_empty_metadata_dir(path: Path) -> None:
-    """Remove an empty ``.favlo_metadata`` directory after its last sidecar leaves."""
-    try:
-        if path.name != METADATA_DIR:
-            return
-        if any(path.iterdir()):
-            return
-        path.rmdir()
-    except OSError:
-        return
-
-
 def _relative(relative: str) -> Path:
     cleaned = relative.strip().replace("\\", "/").strip("/")
     if not cleaned or cleaned in {".", ".."} or ".." in Path(cleaned).parts:
@@ -425,25 +347,6 @@ def _relative(relative: str) -> Path:
     if any(part.startswith(".") for part in parts):
         raise ValueError("A media-relative path is required.")
     return Path(cleaned)
-
-
-def _prune_empty(start: Path, stop: Path) -> None:
-    stop_resolved = stop.resolve()
-    current = start
-    while True:
-        try:
-            resolved = current.resolve()
-        except OSError:
-            return
-        if resolved == stop_resolved or stop_resolved not in resolved.parents:
-            return
-        try:
-            if any(current.iterdir()):
-                return
-            current.rmdir()
-        except OSError:
-            return
-        current = current.parent
 
 
 def _humanize(stem: str) -> str:

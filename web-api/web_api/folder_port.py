@@ -10,13 +10,10 @@ from typing import Any
 
 from web_api.gallery_metadata import (
     KIND_SUFFIXES,
-    METADATA_DIR,
     kind_for,
     move_sidecar,
-    relocate_metadata_prefix,
-    remove_metadata_prefix,
+    read_sidecar,
     remove_sidecar,
-    sidecar_path,
 )
 from web_api.store import Rejected
 
@@ -164,7 +161,6 @@ class LocalFolder:
         path = self.resolve(relative, file=True)
         media_kind = kind_for(path) or "image"
         rel = self._relative(path)
-        side = sidecar_path(self.root, rel)
         return {
             "path": rel,
             "name": path.name,
@@ -173,7 +169,7 @@ class LocalFolder:
             "size": path.stat().st_size,
             "revision": _revision(path),
             "note": _note(path),
-            "has_sidecar": side.is_file(),
+            "has_sidecar": read_sidecar(self.root, rel) is not None,
         }
 
     def walk_media(
@@ -270,7 +266,6 @@ class LocalFolder:
                 raise Rejected("That folder already exists.")
             raise Rejected("That path is a file.")
         path.mkdir(parents=False)
-        (path / METADATA_DIR).mkdir(exist_ok=True)
         return {"path": self._relative(path), "name": path.name, "kind": "folder"}
 
     def rename_folder(self, relative: str, name: str) -> dict[str, str]:
@@ -285,10 +280,8 @@ class LocalFolder:
             raise Rejected("That name is not allowed.")
         if target.exists():
             raise Rejected("That folder already exists.")
-        old_rel = self._relative(path)
         path.rename(target)
         new_rel = self._relative(target)
-        relocate_metadata_prefix(self.root, old_rel, new_rel)
         return {"path": new_rel, "name": target.name, "kind": "folder"}
 
     def move_folder(self, relative: str, destination: str) -> dict[str, str]:
@@ -307,10 +300,8 @@ class LocalFolder:
         target.parent.mkdir(parents=False, exist_ok=True)
         if not target.parent.is_dir():
             raise Rejected("The parent folder does not exist.")
-        old_rel = self._relative(path)
         shutil.move(str(path), str(target))
         new_rel = self._relative(target)
-        relocate_metadata_prefix(self.root, old_rel, new_rel)
         return {"path": new_rel, "name": target.name, "kind": "folder"}
 
     def move(self, relative: str, destination: str) -> dict[str, Any]:
@@ -351,9 +342,7 @@ class LocalFolder:
             raise Rejected("The local folder cannot be deleted.")
         if _occupied(path):
             raise Rejected("That folder is not empty.")
-        rel = self._relative(path)
         shutil.rmtree(path)
-        remove_metadata_prefix(self.root, rel)
         return {"path": relative.strip("/")}
 
     def resolve(
@@ -438,4 +427,8 @@ def _note(path: Path) -> dict[str, Any] | None:
         payload = json.loads(sidecar.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    if "version" in payload or "filename" in payload or "generation" in payload:
+        return None
+    return payload
