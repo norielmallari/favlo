@@ -36,6 +36,10 @@ class LanguagePipeline(Pipeline):
     default_thinking: ClassVar[bool] = True
     default_reasoning_effort: ClassVar[str | None] = None
 
+    def has_vision(self) -> bool:
+        """True when this pipeline embeds a still. The default does no vision work."""
+        return False
+
     def handle(
         self,
         reply: Any,
@@ -46,6 +50,18 @@ class LanguagePipeline(Pipeline):
         state: dict[str, Any],
     ) -> None:
         self.on_open(runtime, reply, selection)
+        if not self.has_vision() and _request_has_image(body):
+            reply.json(
+                400,
+                {
+                    "error": {
+                        "message": "this model does not accept images",
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
+            self.on_finish(runtime, selection, complete=False)
+            return
         from favlo.response_chain import ChainError, finish_turn, present, recording_reply
 
         try:
@@ -122,3 +138,23 @@ class LanguagePipeline(Pipeline):
         """Always runs after ``prepare``, including when ``prepare`` raises."""
         del selection, complete
         runtime._stop = None
+
+
+def _request_has_image(body: dict[str, Any]) -> bool:
+    """True when a Responses body carries a still."""
+    raw = body.get("input")
+    items = raw if isinstance(raw, list) else ([] if raw is None else [raw])
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "input_image" or "image_url" in item:
+            return True
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("input_image", "image_url") or "image_url" in part:
+                return True
+    return False

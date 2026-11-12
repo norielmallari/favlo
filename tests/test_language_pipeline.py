@@ -190,3 +190,82 @@ def test_an_embedding_without_a_selection_has_an_empty_model() -> None:
     reply = _Reply()
     _embed_pipe(embed).handle(reply, None, {"input": "hello", "model": "other"}, None, None, {})
     assert reply.payload["model"] == ""
+
+
+def test_has_vision_defaults_to_false_and_refuses_a_still() -> None:
+    class Pipe(LanguagePipeline):
+        def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
+            del reply, runtime, body, selection, args, state
+            raise AssertionError("vision host work ran")
+
+        def main(self, argv):
+            del argv
+            return 0
+
+        def open_runtime(self, path, **kwargs):
+            del path, kwargs
+            raise RuntimeError("unused")
+
+    assert Pipe().has_vision() is False
+    reply = _Reply()
+    runtime = SimpleNamespace(_stop=True)
+    body = {"input": [{"type": "input_image", "image_url": "file:///still.png"}]}
+    Pipe().handle(reply, runtime, body, None, None, {})
+    assert reply.status == 400
+    assert reply.payload["error"]["message"] == "this model does not accept images"
+    assert runtime._stop is None
+
+
+def test_has_vision_lets_a_still_reach_the_pipeline() -> None:
+    seen: list[dict] = []
+
+    class Pipe(LanguagePipeline):
+        def has_vision(self) -> bool:
+            return True
+
+        def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
+            del reply, runtime, selection, args, state
+            seen.append(body)
+
+        def main(self, argv):
+            del argv
+            return 0
+
+        def open_runtime(self, path, **kwargs):
+            del path, kwargs
+            raise RuntimeError("unused")
+
+    reply = _Reply()
+    runtime = SimpleNamespace(_stop=True)
+    body = {
+        "store": False,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "look"},
+                    {"type": "input_image", "image_url": "file:///still.png"},
+                ],
+            }
+        ],
+    }
+    Pipe().handle(reply, runtime, body, None, None, {})
+    assert seen and seen[0]["input"][0]["content"][1]["type"] == "input_image"
+    assert runtime._stop is None
+
+
+def test_vision_cache_round_trip(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+
+    from favlo import vision_cache
+
+    monkeypatch.setattr(vision_cache, "cache_dir", lambda pipeline: tmp_path / pipeline)
+    path = vision_cache.cache_path("qwen36_35b_a3b", "record", b"digest", 1, 2)
+    rows = np.ones((2, 3), dtype=np.float32)
+    vision_cache.store_cache(
+        path, {"embedded": rows, "grid_h": np.int32(2), "grid_w": np.int32(3)}
+    )
+    loaded = vision_cache.load_cache(path)
+    assert loaded is not None
+    assert loaded["embedded"].shape == (2, 3)
+    assert int(loaded["grid_h"]) == 2

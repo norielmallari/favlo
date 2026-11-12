@@ -317,6 +317,9 @@ class Pipeline(LanguagePipeline):
     default_variant = _sampling_mod.DEFAULT_VARIANT
     default_thinking = _sampling_mod.DEFAULT_THINKING
 
+    def has_vision(self) -> bool:
+        return True
+
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         from qwen36_35b_a3b.metal41.firing import open_request
 

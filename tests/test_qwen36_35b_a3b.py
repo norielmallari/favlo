@@ -558,16 +558,29 @@ def test_a_repeated_image_reuses_the_vision_rows(monkeypatch: pytest.MonkeyPatch
         return np.ones((4, 8), dtype=np.float32), 4, 4
 
     monkeypatch.setattr(vision, "embed_image", embed)
-    monkeypatch.setattr(vision, "_load_vision_disk", lambda _key: None)
-    monkeypatch.setattr(vision, "_store_vision_disk", lambda *_args, **_kwargs: None)
-    vision._ROW_CACHE.clear()
+    disk: dict[tuple, tuple] = {}
+
+    def load(key: tuple) -> tuple | None:
+        return disk.get(key)
+
+    def store(key: tuple, embedded: np.ndarray, grid_h: int, grid_w: int) -> None:
+        disk[key] = (embedded.copy(), grid_h, grid_w)
+
+    monkeypatch.setattr(vision, "_load_vision_disk", load)
+    monkeypatch.setattr(vision, "_store_vision_disk", store)
     runtime = SimpleNamespace(root="example-model")
     first = vision._vision_row(runtime, b"png", min_pixels=1, max_pixels=2)
     reloaded = SimpleNamespace(root="example-model")
     second = vision._vision_row(reloaded, b"png", min_pixels=1, max_pixels=2)
     assert calls == [b"png"]
-    assert second[0] is first[0]
+    assert np.array_equal(second[0], first[0])
+    assert second[0] is not first[0]
     assert second[1:] == (4, 4)
+
+def test_qwen36_reports_vision() -> None:
+    from qwen36_35b_a3b.metal41.chat import Pipeline
+
+    assert Pipeline().has_vision() is True
 
 
 def test_stream_delta_holds_a_partial_character() -> None:
