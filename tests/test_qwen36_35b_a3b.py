@@ -1242,6 +1242,45 @@ def test_a_short_expert_read_fills_the_piece(tmp_path: Path) -> None:
         os.close(fd)
     assert bytes(out) == blob
 
+def test_grow_releases_the_previous_planes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen36_35b_a3b.metal41 import forward as fwd
+    from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
+
+    monkeypatch.setattr(fwd, "kv_buffer_bytes", lambda mode, positions: 64)
+    monkeypatch.setattr(fwd, "_reserved_bytes", lambda *args: 0)
+    monkeypatch.setattr(fwd, "atlas_slots", lambda *args, **kwargs: 8)
+    released: list[object] = []
+    runtime = Qwen36Runtime.__new__(Qwen36Runtime)
+    old_k, old_v = object(), object()
+    runtime.refresh_budget = lambda: None
+    runtime._drop_pending = lambda: None
+    runtime._plane_bytes = lambda buf, pos: b"x"
+    runtime._free_device = lambda bufs: released.extend(bufs)
+    runtime._placed_plane = lambda *args, **kwargs: "plane"
+    runtime._remember = lambda: None
+    runtime._note = lambda *args, **kwargs: None
+    runtime._plane_at = lambda positions: 0
+    runtime.atlas = SimpleNamespace(
+        layout=SimpleNamespace(mixed=False),
+        slots=8,
+        retune=lambda session, reserved: None,
+    )
+    runtime.session = SimpleNamespace(wait_inflight=lambda: None)
+    runtime.max_pos = 4096
+    runtime.filled = 10
+    runtime._context_limit = 131072
+    runtime.kv_cache = "half"
+    runtime._resident_bytes = 0
+    runtime._mtp_extra = 0
+    runtime.max_memory = 10**12
+    runtime.k_cache = [old_k]
+    runtime.v_cache = [old_v]
+    assert runtime._grow(5000) is True
+    assert released == [old_k, old_v]
+    assert runtime.k_cache == ["plane"]
+    assert runtime.v_cache == ["plane"]
+    assert runtime.max_pos == 8192
+
 def test_s3_evicts_a_one_hit_before_a_reused_expert() -> None:
     from qwen36_35b_a3b.metal41.atlas import S3Fifo
 

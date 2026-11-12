@@ -1474,13 +1474,15 @@ class Qwen36Runtime:
         if images < MIN_IMAGES:
             return False
         self._drop_pending()
+        self.session.wait_inflight()
         count = min(self.filled, self.max_pos)
         old_pos = self.max_pos
         keys = [self._plane_bytes(buf, old_pos) for buf in self.k_cache]
         values = [self._plane_bytes(buf, old_pos) for buf in self.v_cache]
-        self._release_held([*self.k_cache, *self.v_cache, *self.atlas.buffers])
+        previous = [*self.k_cache, *self.v_cache]
         self.k_cache = []
         self.v_cache = []
+        self._free_device(previous)
         self.atlas.retune(self.session, reserved)
         self.k_cache = [
             self._placed_plane(blob, old_pos, target, count, new_bytes, "key") for blob in keys
