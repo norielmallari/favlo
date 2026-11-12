@@ -577,6 +577,7 @@ def test_a_repeated_image_reuses_the_vision_rows(monkeypatch: pytest.MonkeyPatch
     assert second[0] is not first[0]
     assert second[1:] == (4, 4)
 
+
 def test_qwen36_reports_vision() -> None:
     from qwen36_35b_a3b.metal41.chat import Pipeline
 
@@ -1239,6 +1240,7 @@ def test_sequential_windows_cover_a_short_gap() -> None:
         (piece + 100, 100),
     ]
 
+
 def test_a_short_expert_read_fills_the_piece(tmp_path: Path) -> None:
     import os
 
@@ -1254,6 +1256,7 @@ def test_a_short_expert_read_fills_the_piece(tmp_path: Path) -> None:
     finally:
         os.close(fd)
     assert bytes(out) == blob
+
 
 def test_grow_releases_the_previous_planes(monkeypatch: pytest.MonkeyPatch) -> None:
     from qwen36_35b_a3b.metal41 import forward as fwd
@@ -1293,6 +1296,7 @@ def test_grow_releases_the_previous_planes(monkeypatch: pytest.MonkeyPatch) -> N
     assert runtime.k_cache == ["plane"]
     assert runtime.v_cache == ["plane"]
     assert runtime.max_pos == 8192
+
 
 def test_s3_evicts_a_one_hit_before_a_reused_expert() -> None:
     from qwen36_35b_a3b.metal41.atlas import S3Fifo
