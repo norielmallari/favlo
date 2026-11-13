@@ -36,6 +36,8 @@ Work on `main`. Do not create a branch unless the user asks for one.
 
 Run Python through `uv run` so the command uses this checkout's environment. A module is `uv run python -m <module>`. A script is `uv run python <path>`. Pytest is `uv run pytest`. Do not call `python` or `python3` from `PATH`.
 
+**One-at-a-time rule:** Never run multiple `favlo media` or `favlo` CLI invocations in parallel. Each CLI call loads model weights into Metal VRAM; concurrent calls race for the same GPU context and corrupt state. Always queue them serially — finish or kill the previous invocation before launching the next. Use background terminal sessions with explicit sequencing or run them sequentially in Python loops.
+
 Changes stay in this repository. Edit another repository only when the user asks for that repository.
 
 The open product in this repository is the listener, the web app, and the web API. A hosted build of the same app calls another process that implements the same HTTP contract. That process is not part of this repository, and this repository does not name it. When a sibling checkout of the hosted product is present, read it only for a hosted task. When it is absent, stay in this repository.
