@@ -50,8 +50,8 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 | `variants.thinking` | open | `temperature` 1.0, `top_p` 0.95, `top_k` 20, `presence_penalty` 1.5, `reasoning_effort` `high`. |
 | `variants.instruct` | open | `temperature` 0.7, `top_p` 0.8, `top_k` 20, `presence_penalty` 1.5, `reasoning_effort` `none`. |
 | `alias` | resolve | One name, with no colon and no slash, or `null`. `null` makes the folder the public id. |
-| `context_length` | open | A positive integer. Registration writes 131072. `GET /v1/models` lists it. The usage prompt cap uses it when `max_prompt_tokens` is absent. The served window stays 131072 in this package. |
-| `max_prompt_tokens` | open | A positive integer. The usage prompt cap. Registration leaves the key off. The served window stays 131072. |
+| `context_length` | listing | A positive integer. Registration writes 131072. `GET /v1/models` lists it, and the usage prompt cap uses it when `max_prompt_tokens` is absent. The next completion reads the file. The served window stays 131072 in this package. |
+| `max_prompt_tokens` | listing | A positive integer. The usage prompt cap. Registration leaves the key off. The next completion reads the file. The served window stays 131072. |
 | `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
 
 `variants` accepts only `thinking` and `instruct`. A third name is listed and does not select its own card. A request still overrides one sampling field for that call. Changing the effort does not swap the card.
