@@ -22,6 +22,8 @@ load is missing or a later turn does not extend it.
     uv run python -m harness.coding --model qwen38-27b --vision --thinking on
     uv run python -m harness.coding --model qwen38-27b --vision --thinking off
     uv run python -m harness.coding --model qwen38-27b --vision --thinking off --store on
+    uv run python -m harness.coding --model qwen38-27b --thinking on --preserve-thinking on
+    uv run python -m harness.coding --model qwen38-27b --thinking off --preserve-thinking off
 """
 
 from __future__ import annotations
@@ -60,6 +62,12 @@ def argument_parser() -> argparse.ArgumentParser:
         help="send the horse still as the first chat",
     )
     parser.add_argument("--thinking", choices=("on", "off"), default="on")
+    parser.add_argument(
+        "--preserve-thinking",
+        choices=("on", "off"),
+        default="off",
+        help="send preserve_thinking for the ledger",
+    )
     parser.add_argument(
         "--store",
         choices=("on", "off"),
@@ -112,9 +120,11 @@ def main(argv: list[str] | None = None) -> int:
             from favlo.smoke_lock import unload_model
 
             unload_model()
+        preserve = args.preserve_thinking == "on"
         print(
             f"kv {selection.kv_cache} mtp {args.mtp} depth {args.mtp_depth} "
-            f"thinking {args.thinking} vision {vision_flag} store {args.store}",
+            f"thinking {args.thinking} vision {vision_flag} store {args.store} "
+            f"preserve {args.preserve_thinking}",
             flush=True,
         )
         _, problems = run_session(
@@ -126,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             mtp_depth=args.mtp_depth,
             vision=vision,
             store=store,
+            preserve_thinking=preserve,
         )
         _print_rates(server.log, stem)
         base_url = f"http://127.0.0.1:{server.port}/v1"

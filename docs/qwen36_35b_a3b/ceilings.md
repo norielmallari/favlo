@@ -115,7 +115,7 @@ Twenty calls make the attention 2.66 ms at context 2048 and 12.30 ms at context 
 
 ## Half prefill
 
-Measured on 7 November 2026. A score window is `prefill_f16_n64` and the value mix is `prefill_f16_n64_stride`, 16384 query rows, value token stride 262144. The softmax, probability cast, scale, and add rows are the fp8 prefill figures above: those kernels did not change. One 2048-key window is 4488.1 µs. One 4096-key window is 7639.8 µs. The first chunk, one 2048-key window per head, is 1306.7 ms, 1567.3 tok/s. A prompt of 65536 tokens, with the same window counts as the fp8 prompt, is 79494.8 ms, 824.4 tok/s. The 90% test for a half prefill uses this kernel ceiling.
+Measured on 7 November 2026. A score window is `prefill_f16_n64` and the value mix is `prefill_f16_n64_stride`, 16384 query rows, value token stride 262144. The softmax, probability cast, scale, and add rows are the fp8 prefill figures above: those kernels did not change. One 2048-key window is 4488.1 µs. One 4096-key window is 7639.8 µs. The first chunk, one 2048-key window per head, is 1248.9 ms, 1639.8 tok/s. A prompt of 65536 tokens, with the same window counts as the fp8 prompt, is 77645.5 ms, 843.8 tok/s. The 90% test for a half prefill uses this kernel ceiling. Those two totals subtract the 14 November `gdn_chunk_solve` gap below.
 
 ## Prefill
 
@@ -141,7 +141,7 @@ The int8 rows are one command buffer each, the median of four samples after one 
 | `scale_i8_f32` out | 30 | 60.2 |
 | `gdn_conv_rows` | 30 | 484.6 |
 | `gdn_l2_rows` | 30 | 220.5 |
-| `gdn_chunk_solve` | 960 | 316.4 |
+| `gdn_chunk_solve` | 960 | 256.2 |
 | `gdn_chunk_out` | 960 | 102.4 |
 | `gdn_chunk_state` | 960 | 151.0 |
 | `gdn_y_norm` | 30 | 363.5 |
@@ -184,9 +184,11 @@ The int8 rows are one command buffer each, the median of four samples after one 
 | `scatter_add_grouped` | 40 | 609.1 |
 | `residual_rows` | 40 | 55.9 |
 
-The attention window is the only part of a chunk that changes with the keys already stored. Without that window, one chunk is 1216.963 ms. A 2048-key window is `prefill_fp8_n64` 651.8 µs, `kv_softmax_max_rows` 245.5 µs, `kv_softmax_prob_rows` 1074.5 µs, `kv_softmax_close` 61.9 µs, `kv_cast_probs` 923.4 µs, `prefill_fp8_n64_stride` 775.9 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 161.0 µs, 3954.6 µs together. A 4096-key window is `prefill_fp8_n64` 1295.8 µs, `kv_softmax_max_rows` 370.5 µs, `kv_softmax_prob_rows` 1564.6 µs, `kv_softmax_close` 63.9 µs, `kv_cast_probs` 2422.4 µs, `prefill_fp8_n64_stride` 1570.1 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 177.7 µs, 7525.6 µs together. The first chunk, one 2048-key window per head, is 1296.1 ms, 1580.18 tok/s.
+On 14 November 2026 the substitution and the state-row dot in `gdn_chunk_solve` each keep four partial sums. Sixteen dispatches in one command buffer, the first sample discarded, the median of the next four, the previous shader interleaved with this one: 304.2 µs before, 244.0 µs after. The table row stays on the 25 October scale, 316.4 − 60.2 = 256.2. One chunk drops by 57.792 ms.
 
-A prompt of 65536 tokens is 32 chunks. Chunk n sees n×2048 keys: the floor of n/2 windows of 4096 keys, and one 2048-key window when n is odd. One head walks 256 windows of 4096 keys and 16 windows of 2048 keys. Ten layers and two heads make 20 of each. That prompt is 78739.4 ms, 832.32 tok/s. That is the kernel ceiling for prefill.
+The attention window is the only part of a chunk that changes with the keys already stored. Without that window, one chunk is 1159.171 ms. A 2048-key window is `prefill_fp8_n64` 651.8 µs, `kv_softmax_max_rows` 245.5 µs, `kv_softmax_prob_rows` 1074.5 µs, `kv_softmax_close` 61.9 µs, `kv_cast_probs` 923.4 µs, `prefill_fp8_n64_stride` 775.9 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 161.0 µs, 3954.6 µs together. A 4096-key window is `prefill_fp8_n64` 1295.8 µs, `kv_softmax_max_rows` 370.5 µs, `kv_softmax_prob_rows` 1564.6 µs, `kv_softmax_close` 63.9 µs, `kv_cast_probs` 2422.4 µs, `prefill_fp8_n64_stride` 1570.1 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 177.7 µs, 7525.6 µs together. The first chunk, one 2048-key window per head, is 1238.3 ms, 1653.9 tok/s.
+
+A prompt of 65536 tokens is 32 chunks. Chunk n sees n×2048 keys: the floor of n/2 windows of 4096 keys, and one 2048-key window when n is odd. One head walks 256 windows of 4096 keys and 16 windows of 2048 keys. Ten layers and two heads make 20 of each. That prompt is 76890.1 ms, 852.1 tok/s. That is the kernel ceiling for prefill.
 
 The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per window. On this record the projections and the shared expert are fp8, and 2,048 of the 10,240 expert images are fp8. One first chunk is 28,688,637,952 bytes. The 65536-token prompt is 4,257,677,574,144 bytes, 14.06 s at 302.74 GB/s, 4659.90 tok/s. The 90% test for prefill uses this kernel ceiling. The int8 rows are the resident projections the forward launches. The packed-tile rows for `in_proj_a`, `in_proj_b`, and the routed experts remain the earlier fp4-weight measurement.
 

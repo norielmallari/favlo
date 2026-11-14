@@ -120,8 +120,10 @@ def test_the_vision_tower_runs_once() -> None:
     assert vision_problems("vision cache 16\n")
     twice = "vision patches 64\nvision patches 64\nvision cached 16\n"
     assert any("ran 2" in item for item in vision_problems(twice))
-    early = "vision cached 16\nvision patches 64\n"
+    early = "vision cache 16\nvision patches 64\n"
     assert any("preceded" in item for item in vision_problems(early))
+    covered = "vision cached 16\nvision patches 64\nvision cache 16\n"
+    assert vision_problems(covered) == []
 
 
 def test_the_image_turn_covers_the_pooled_tokens() -> None:

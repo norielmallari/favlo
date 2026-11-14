@@ -20,13 +20,20 @@ SESSION_ROUNDS = 16
 
 
 def agent_options(
-    request: Request, *, mtp: bool, mtp_depth: int, store: bool = False
+    request: Request,
+    *,
+    mtp: bool,
+    mtp_depth: int,
+    store: bool = False,
+    preserve_thinking: bool = False,
 ) -> dict[str, object]:
     """Fields the framework client sends. Sampling stays off the body.
 
     ``store`` is the value for the whole run. False makes the client replay
     the transcript. True sends ``previous_response_id`` and the listener
     chain rebuilds that transcript before the pipeline encodes.
+    ``preserve_thinking`` is sent on the body. False drops historical think
+    blocks. True keeps them, so the next prompt can extend the stored tokens.
     """
     return {
         "store": store,
@@ -34,6 +41,7 @@ def agent_options(
         "extra_body": {
             "favlo:mtp": bool(mtp),
             "favlo:mtp_depth": int(mtp_depth),
+            "preserve_thinking": bool(preserve_thinking),
         },
     }
 
@@ -99,10 +107,31 @@ def ledger_log(text: str) -> str:
     chain = [blocks[start]]
     for index in range(start + 1, end + 1):
         prompt, lines = blocks[index]
-        if prompt < chain[-1][0]:
+        # A new user message with historical thinking omitted can be shorter
+        # than the previous prompt and still be this still's follow-up.
+        if prompt < chain[-1][0] and not _same_still(chain, lines):
             continue
         chain.append((prompt, lines))
     return "\n".join(line for _prompt, lines in chain for line in lines)
+
+
+def _still_ids(lines: list[str]) -> set[int]:
+    found: set[int] = set()
+    for line in lines:
+        for prefix in ("vision patches ", "vision merged ", "vision cached ", "vision cache "):
+            if not line.startswith(prefix):
+                continue
+            token = line.removeprefix(prefix).split(" ", 1)[0]
+            if token.isdigit():
+                found.add(int(token))
+    return found
+
+
+def _same_still(chain: list[tuple[int, list[str]]], lines: list[str]) -> bool:
+    seen: set[int] = set()
+    for _prompt, earlier in chain:
+        seen |= _still_ids(earlier)
+    return bool(seen & _still_ids(lines))
 
 
 def _cache_counts(lines: list[str]) -> dict[int, int]:
@@ -145,24 +174,33 @@ def _still_span(blocks: list[tuple[int, list[str]]]) -> tuple[int, int]:
     return start, end
 
 
-def prefix_problems(requests: list[RequestRate]) -> list[str]:
+def prefix_problems(
+    requests: list[RequestRate], *, preserve_thinking: bool = False
+) -> list[str]:
     """Problems when the restart did not load the prefix or later turns drifted.
 
     A later turn may reload the prompt-boundary file when the chat template
     re-encodes a tool call differently from the drawn tokens. That reload is
     still a held prefix when the hit equals that boundary or the prior applied
-    length. A cache miss after the first request is not.
+    length. A generation prompt ends in ``<think>`` (two tokens) or a closed
+    empty think (four tokens). The next encode does not repeat that suffix, so
+    a hit shorter by that many tokens is the same boundary. With
+    ``preserve_thinking`` off, a new user message drops historical think
+    blocks, and the hit may be an earlier stored prefix of the previous
+    prompt. A cache miss after the first request is not.
     """
     if len(requests) < 2:
         return ["the ledger made fewer than two requests"]
     if not any(request.prefix_load is not None for request in requests[1:]):
         return ["prefix was not loaded from disk"]
-    if not coding_prefix_holds(requests):
+    if not coding_prefix_holds(requests, preserve_thinking=preserve_thinking):
         return ["prefix did not extend"]
     return []
 
 
-def coding_prefix_holds(requests: list[RequestRate]) -> bool:
+def coding_prefix_holds(
+    requests: list[RequestRate], *, preserve_thinking: bool = False
+) -> bool:
     """True when the restart loaded from disk and later turns kept a cache hit."""
     from harness.file_session import _applied, _cold_start, _extends, _stored_load
 
@@ -177,12 +215,28 @@ def coding_prefix_holds(requests: list[RequestRate]) -> bool:
         if current.prefix_load is not None:
             if not _stored_load(current):
                 return False
-            if current.prefix_hit not in {_applied(previous), previous.prompt_tokens}:
+            if not _held_load(previous, current, preserve_thinking=preserve_thinking):
                 return False
             continue
         if not _extends(previous, current):
             return False
     return True
+
+
+def _held_load(
+    previous: RequestRate, current: RequestRate, *, preserve_thinking: bool
+) -> bool:
+    """True when a disk load is still this conversation's prefix."""
+    from harness.file_session import _applied
+
+    hit = current.prefix_hit
+    if hit is None:
+        return False
+    if hit in {_applied(previous), previous.prompt_tokens}:
+        return True
+    if previous.prompt_tokens - hit in (2, 4):
+        return True
+    return not preserve_thinking and hit < previous.prompt_tokens
 
 
 def rebind_chat_client(client: Any, port: int) -> None:
@@ -204,6 +258,7 @@ def run_session(
     mtp_depth: int = 3,
     vision: bytes | None = None,
     store: bool = False,
+    preserve_thinking: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Let the agent use the tools. Return the calls that succeeded and any problems."""
     prepare_workspace(workspace)
@@ -220,11 +275,14 @@ def run_session(
                 mtp_depth=mtp_depth,
                 vision=vision,
                 store=store,
+                preserve_thinking=preserve_thinking,
                 problems=problems,
             )
         )
         text = ledger_log(pipeline_log(server.log.text(), model))
-        problems.extend(prefix_problems(parse_requests(text)))
+        problems.extend(
+            prefix_problems(parse_requests(text), preserve_thinking=preserve_thinking)
+        )
         if vision is not None:
             from harness.coding.compliance import vision_problems
 
@@ -244,6 +302,7 @@ async def _run(
     mtp_depth: int,
     vision: bytes | None,
     store: bool,
+    preserve_thinking: bool,
     problems: list[str],
 ) -> None:
     from agent_framework import Agent, ChatMiddleware
@@ -255,7 +314,13 @@ async def _run(
     client.function_invocation_configuration["max_consecutive_errors_per_request"] = SESSION_ROUNDS
     client.function_invocation_configuration["allow_concurrent_invocation"] = False
     client.function_invocation_configuration["include_detailed_errors"] = True
-    options = agent_options(request, mtp=mtp, mtp_depth=mtp_depth, store=store)
+    options = agent_options(
+        request,
+        mtp=mtp,
+        mtp_depth=mtp_depth,
+        store=store,
+        preserve_thinking=preserve_thinking,
+    )
     restarter = _PrefixRestart(server, client, model)
 
     class PrefixRestartMiddleware(ChatMiddleware):

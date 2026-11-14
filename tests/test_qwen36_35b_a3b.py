@@ -252,7 +252,11 @@ def test_an_omitted_completion_cap_is_the_context_room() -> None:
 
 
 def _chat_root() -> Path | None:
-    for name in ("Qwen3.6-35B-A3B-fp8-e20", "Qwen3.6-35B-A3B-fp4"):
+    for name in (
+        "Qwen3.6-35B-A3B-fp8-e30-24h",
+        "Qwen3.6-35B-A3B-fp8-e20",
+        "Qwen3.6-35B-A3B-fp4",
+    ):
         root = Path("models") / name
         if (root / "chat_template.jinja").is_file() and (root / "tokenizer.json").is_file():
             return root
@@ -355,6 +359,34 @@ def test_close_drops_device_buffers_before_another_pipeline() -> None:
     assert runtime.k_cache == []
     assert runtime.v_cache == []
     assert runtime._held == []
+
+
+def test_a_dropped_think_shares_the_prompt_before_the_generation_suffix() -> None:
+    root = _chat_root()
+    if root is None:
+        pytest.skip("chat template is not installed")
+    from qwen36_35b_a3b.metal41.chat import encode_chat, generation_cut
+
+    first = [{"role": "user", "content": "Describe the picture."}]
+    follow_up = [
+        *first,
+        {
+            "role": "assistant",
+            "reasoning_content": "The horse is running.",
+            "content": "The picture shows a horse running.",
+        },
+        {"role": "user", "content": "Build ledger.py."},
+    ]
+    for thinking in (True, False):
+        prompt = encode_chat(root, first, None, thinking, preserve_thinking=False)
+        cut = generation_cut(root, prompt)
+        assert cut is not None
+        nxt = encode_chat(root, follow_up, None, thinking, preserve_thinking=False)
+        assert nxt[:cut] == prompt[:cut]
+        assert nxt[: len(prompt)] != prompt
+    kept_prompt = encode_chat(root, first, None, True, preserve_thinking=False)
+    kept = encode_chat(root, follow_up, None, True, preserve_thinking=True)
+    assert kept[: len(kept_prompt)] == kept_prompt
 
 
 def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:

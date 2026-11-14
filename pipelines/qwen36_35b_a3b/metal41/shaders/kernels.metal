@@ -3172,24 +3172,54 @@ kernel void gdn_chunk_solve(
         device const float* kr = mixed + (c0 + r) * 8192u + 2048u + qhead * 128u;
         float acc_u = beta * vr[tid];
         float acc_w = beta * kr[tid];
-        for (uint i = 0u; i < r; ++i) {
-            float kk = gram[r * 64u + i];
-            float decay = exp(lg[r] - lg[i]);
-            acc_u -= beta * decay * kk * uu[i * 128u + tid];
-            acc_w -= beta * kk * ww[i * 128u + tid];
+        float su0 = 0.0f;
+        float su1 = 0.0f;
+        float su2 = 0.0f;
+        float su3 = 0.0f;
+        float sw0 = 0.0f;
+        float sw1 = 0.0f;
+        float sw2 = 0.0f;
+        float sw3 = 0.0f;
+        uint i = 0u;
+        for (; i + 3u < r; i += 4u) {
+            float k0 = gram[r * 64u + i];
+            float k1 = gram[r * 64u + i + 1u];
+            float k2 = gram[r * 64u + i + 2u];
+            float k3 = gram[r * 64u + i + 3u];
+            su0 += exp(lg[r] - lg[i]) * k0 * uu[i * 128u + tid];
+            su1 += exp(lg[r] - lg[i + 1u]) * k1 * uu[(i + 1u) * 128u + tid];
+            su2 += exp(lg[r] - lg[i + 2u]) * k2 * uu[(i + 2u) * 128u + tid];
+            su3 += exp(lg[r] - lg[i + 3u]) * k3 * uu[(i + 3u) * 128u + tid];
+            sw0 += k0 * ww[i * 128u + tid];
+            sw1 += k1 * ww[(i + 1u) * 128u + tid];
+            sw2 += k2 * ww[(i + 2u) * 128u + tid];
+            sw3 += k3 * ww[(i + 3u) * 128u + tid];
         }
+        for (; i < r; ++i) {
+            float kk = gram[r * 64u + i];
+            su0 += exp(lg[r] - lg[i]) * kk * uu[i * 128u + tid];
+            sw0 += kk * ww[i * 128u + tid];
+        }
+        acc_u -= beta * (su0 + su1 + su2 + su3);
+        acc_w -= beta * (sw0 + sw1 + sw2 + sw3);
         uu[r * 128u + tid] = acc_u;
         ww[r * 128u + tid] = acc_w;
         threadgroup_barrier(mem_flags::mem_device);
     }
     device const float* srow = state + (head * 128u + tid) * 128u;
     for (uint r = 0u; r < clen; ++r) {
-        float dot = 0.0f;
+        float d0 = 0.0f;
+        float d1 = 0.0f;
+        float d2 = 0.0f;
+        float d3 = 0.0f;
         device const float* wr = ww + r * 128u;
-        for (uint j = 0u; j < 128u; ++j) {
-            dot += srow[j] * wr[j];
+        for (uint j = 0u; j < 128u; j += 4u) {
+            d0 += srow[j] * wr[j];
+            d1 += srow[j + 1u] * wr[j + 1u];
+            d2 += srow[j + 2u] * wr[j + 2u];
+            d3 += srow[j + 3u] * wr[j + 3u];
         }
-        vv[r * 128u + tid] = uu[r * 128u + tid] - exp(lg[r]) * dot;
+        vv[r * 128u + tid] = uu[r * 128u + tid] - exp(lg[r]) * (d0 + d1 + d2 + d3);
     }
 }
 

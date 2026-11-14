@@ -2274,6 +2274,7 @@ class Qwen36Runtime:
 
         bind_vision(self, hit)
         suffix = prompt[hit:]
+        uncached = len(suffix)
         if mtp and not self._mtp_ready:
             message = "this record has no MTP weights"
             raise RuntimeError(message)
@@ -2287,19 +2288,31 @@ class Qwen36Runtime:
         boundary = False
         out: list[int] = []
         try:
-            prefill_row = self._begin_phase("prefill", len(suffix))
+            prefill_row = self._begin_phase("prefill", uncached)
             self._prefill_progress = prefill_row
             self._prefill_done = 0
             started = time.perf_counter()
-            if len(suffix) > 1:
-                from qwen36_35b_a3b.metal41.prefill import prefill_ids
+            from qwen36_35b_a3b.metal41.chat import generation_cut
+            from qwen36_35b_a3b.metal41.prefill import prefill_ids
 
+            cut = generation_cut(self.root, prompt)
+            if cut is not None and hit < cut:
+                # The next encode drops this suffix when historical thinking is
+                # omitted. The file that stops here is the one that follow-up hits.
+                self._prefill_base = 0
+                prefill_ids(self, prompt[hit:cut], hit, follow=prompt[cut])
+                self.filled = cut
+                self.prefix.note(prompt[:cut])
+                self._store_prefix(note=False)
+                hit = cut
+                suffix = prompt[hit:]
+            if len(suffix) > 1:
                 self._prefill_base = 0
                 prefill_ids(self, suffix[:-1], hit, follow=suffix[-1])
             self._take_routes(prefill=True)
             self.step(suffix[-1], len(prompt) - 1, logits=True, download=False)
             self.prefix.note(prompt)
-            self._note_prefill(len(suffix))
+            self._note_prefill(uncached)
             # The forward is inside prefill. The first sample closes it.
             self._prefill_seconds = time.perf_counter() - started
             pending = list(forced or [])
@@ -2420,7 +2433,7 @@ class Qwen36Runtime:
                     elapsed = last_sample - started
                     self._prefill_seconds = elapsed
                     self._prefill_progress = None
-                    self._end_phase(prefill_row, format_rate("prefill", len(suffix), elapsed))
+                    self._end_phase(prefill_row, format_rate("prefill", uncached, elapsed))
                     prefill_row = None
                     boundary = True
                     # The prompt prefix write stays outside the decode clock.
@@ -2605,7 +2618,7 @@ class Qwen36Runtime:
                 elapsed = time.perf_counter() - started
                 self._prefill_seconds = elapsed
                 self._prefill_progress = None
-                self._end_phase(prefill_row, format_rate("prefill", len(suffix), elapsed))
+                self._end_phase(prefill_row, format_rate("prefill", uncached, elapsed))
                 prefill_row = None
                 boundary = True
                 self._store_prefix(note=False)

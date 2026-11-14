@@ -119,6 +119,26 @@ prefill 1.00 tok/s (0 tok in 0.00s)
 decode 1.00 tok/s (1 tok in 1.00s)
 """
     assert prefix_problems(parse_requests(drifted)) == ["prefix did not extend"]
+    suffix = """\
+prompt tokens 14
+cache miss
+prefill 1.00 tok/s (14 tok in 14.00s)
+decode 1.00 tok/s (8 tok in 8.00s)
+prefix load 12 tokens
+prompt tokens 30
+cache hit 12
+prefill 1.00 tok/s (18 tok in 18.00s)
+decode 1.00 tok/s (4 tok in 4.00s)
+prefix load 20 tokens
+prompt tokens 40
+cache hit 20
+prefill 1.00 tok/s (20 tok in 20.00s)
+decode 1.00 tok/s (2 tok in 2.00s)
+"""
+    assert prefix_problems(parse_requests(suffix)) == []
+    assert prefix_problems(parse_requests(suffix), preserve_thinking=True) == [
+        "prefix did not extend"
+    ]
     shared = """\
 vision patches 3200
 vision merged 800
@@ -164,6 +184,29 @@ decode 1.00 tok/s (2 tok in 1.00s)
     assert "prompt tokens 29" not in kept_repeat
     assert "vision merged 180" in kept_repeat
     assert vision_problems(kept_repeat) == []
+    shrunk = """\
+prompt tokens 40
+vision cached 180
+cache hit 20
+prefill 1.00 tok/s (20 tok in 1.00s)
+decode 1.00 tok/s (2 tok in 1.00s)
+prompt tokens 30
+vision cached 180
+vision patches 720
+vision merged 180
+prefix load 20 tokens
+cache hit 20
+prefill 1.00 tok/s (10 tok in 1.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+prompt tokens 12
+cache miss
+prefill 1.00 tok/s (12 tok in 1.00s)
+decode 1.00 tok/s (1 tok in 1.00s)
+"""
+    kept_short = ledger_log(shrunk)
+    assert "prompt tokens 30" in kept_short
+    assert "prompt tokens 12" not in kept_short
+    assert vision_problems(kept_short) == []
 
 
 def test_an_open_prefill_does_not_hold_the_restart() -> None:
@@ -194,6 +237,7 @@ def test_thinking_body_omits_sampling_fields() -> None:
     assert options["reasoning"] == {"effort": "medium"}
     assert extra["favlo:mtp"] is True
     assert extra["favlo:mtp_depth"] == 3
+    assert extra["preserve_thinking"] is False
     assert options["store"] is False
     kept = agent_options(request, mtp=False, mtp_depth=3, store=True)
     assert kept["store"] is True
@@ -207,6 +251,8 @@ def test_thinking_body_omits_sampling_fields() -> None:
     assert off["extra_body"]["favlo:mtp"] is False
     four = agent_options(request, mtp=True, mtp_depth=4)
     assert four["extra_body"]["favlo:mtp_depth"] == 4
+    kept_trace = agent_options(request, mtp=False, mtp_depth=3, preserve_thinking=True)
+    assert kept_trace["extra_body"]["preserve_thinking"] is True
 
 
 def test_mtp_defaults_off() -> None:
@@ -216,6 +262,7 @@ def test_mtp_defaults_off() -> None:
     assert args.vision is False
     assert args.thinking == "on"
     assert args.store == "off"
+    assert args.preserve_thinking == "off"
     instruct = argument_parser().parse_args(["--model", "qwen36_35b_a3b", "--thinking", "off"])
     assert instruct.thinking == "off"
 

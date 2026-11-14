@@ -301,16 +301,26 @@ def image_turn_problems(text: str, counted: object, width: int, height: int) -> 
 
 
 def vision_problems(log: str) -> list[str]:
-    """The tower encodes the still once. A later request reuses that result."""
-    tower = [index for index, line in enumerate(log.splitlines()) if _TOWER.search(line)]
-    cached = [index for index, line in enumerate(log.splitlines()) if _CACHE.search(line)]
+    """The tower encodes the still once. A later request reuses that result.
+
+    ``vision cached`` is a copy already inside a loaded prefix. It may precede
+    the tower that encodes a later copy of that still. A disk ``vision cache``
+    line before the tower means the row file was read before the tower ran.
+    """
+    lines = log.splitlines()
+    tower = [index for index, line in enumerate(lines) if _TOWER.search(line)]
+    reuse = [index for index, line in enumerate(lines) if line.startswith("vision cache")]
     problems: list[str] = []
     if len(tower) != 1:
         problems.append(f"the vision tower ran {len(tower)} times")
-    if not cached:
+    if not reuse:
         problems.append("a later request did not reuse the vision tower")
-    elif tower and cached[0] < tower[0]:
-        problems.append("the vision cache preceded the tower")
+    elif tower:
+        for index in reuse:
+            if index >= tower[0] or lines[index].startswith("vision cached"):
+                continue
+            problems.append("the vision cache preceded the tower")
+            break
     return problems
 
 
