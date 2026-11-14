@@ -221,3 +221,25 @@ def test_prefix_pack_length_and_exact_file_refusal() -> None:
     assert adapter.accept(header, [1, 2, 3, 4]) is False
     assert adapter.accept(header, [1, 2, 3, 4, 5]) is True
     assert adapter.accept(header, [9, 2, 3, 4, 5]) is False
+
+
+def test_has_vision() -> None:
+    from gemma4_26b_a4b.metal41.chat import Pipeline
+
+    assert Pipeline().has_vision() is True
+
+
+def test_vision_disk_cache_uses_the_shared_helper(tmp_path: Path, monkeypatch) -> None:
+    from favlo import vision_cache
+    from gemma4_26b_a4b.metal41.geometry import HIDDEN
+    from gemma4_26b_a4b.metal41 import vision
+
+    monkeypatch.setattr(vision_cache, "cache_dir", lambda pipeline: tmp_path / pipeline)
+    root = tmp_path / "record"
+    digest = b"\x01" * 32
+    blob = bytes(HIDDEN * 4)
+    vision._store_vision_disk(root, digest, blob, 1, 4)
+    assert vision._load_vision_disk(root, digest) == (blob, 1, 4)
+    path = vision_cache.cache_path("gemma4_26b_a4b", str(root), digest, 0, 0)
+    assert path.is_file()
+    assert vision_cache.cache_path("gemma4_26b_a4b", str(root), digest, 1, 2) != path

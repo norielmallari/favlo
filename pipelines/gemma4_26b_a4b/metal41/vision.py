@@ -7,9 +7,10 @@ encoder, a 3×3 average pools patches, the pooled rows are scaled by
 ``sqrt(width)``, then ``(row - std_bias) * std_scale`` standardizes them.
 An unscaled RMSNorm then the embedding projection replace ``<|image|>``. The
 pixel resize is the only host step. The tower itself is Metal. Soft rows are
-also written under ``~/.favlo/vision-cache/gemma4_26b_a4b/``, so a later serve
-process that sees the same bytes logs ``vision cache`` and does not rerun the
-tower.
+stored by ``favlo.vision_cache`` under ``~/.favlo/vision-cache/gemma4_26b_a4b/``.
+The file name hashes the checkpoint path, the image digest, and a pixel budget
+of 0, 0. A hit logs ``vision cache`` and does not rerun the tower. The process
+does not keep those rows.
 """
 
 from __future__ import annotations
@@ -46,7 +47,6 @@ from gemma4_26b_a4b.metal41.geometry import (
 from gemma4_26b_a4b.metal41.planes import FP8, align_k, fp8_parts
 
 _POOL_SCALE = VISION_WIDTH**0.5
-_CACHE_LIMIT = 8
 _PIPELINE = "gemma4_26b_a4b"
 
 _MAX_PATCHES = VISION_SOFT_MAX * POOL * POOL
@@ -54,51 +54,39 @@ _MAX_SIDE = VISION_SOFT_MAX * POOL
 _POS_ROWS = 10240
 
 
-def _vision_cache_dir() -> Path:
-    from favlo.logs import favlo_home
-
-    path = favlo_home() / "vision-cache" / _PIPELINE
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _vision_cache_path(root: Path, digest: bytes) -> Path:
-    material = hashlib.sha256()
-    material.update(str(root).encode())
-    material.update(digest)
-    return _vision_cache_dir() / f"{material.hexdigest()}.npz"
+    from favlo.vision_cache import cache_path
+
+    return cache_path(_PIPELINE, str(root), digest, 0, 0)
 
 
 def _load_vision_disk(root: Path, digest: bytes) -> tuple[bytes, int, int] | None:
-    path = _vision_cache_path(root, digest)
-    if not path.is_file():
+    from favlo.vision_cache import load_cache
+
+    body = load_cache(_vision_cache_path(root, digest))
+    if body is None or "blob" not in body or "soft" not in body or "patches" not in body:
         return None
-    try:
-        payload = np.load(path)
-        blob = bytes(np.ascontiguousarray(payload["blob"], dtype=np.uint8))
-        soft = int(payload["soft"])
-        patches = int(payload["patches"])
-    except (OSError, ValueError, KeyError):
-        return None
+    blob = bytes(np.ascontiguousarray(body["blob"], dtype=np.uint8))
+    soft = int(body["soft"])
+    patches = int(body["patches"])
     if soft < 1 or patches < 1 or len(blob) != soft * HIDDEN * 4:
         return None
     return blob, soft, patches
 
 
 def _store_vision_disk(root: Path, digest: bytes, blob: bytes, soft: int, patches: int) -> None:
-    path = _vision_cache_path(root, digest)
-    tmp = path.with_name(path.stem + ".tmp.npz")
-    try:
-        np.savez(
-            tmp,
-            blob=np.frombuffer(blob, dtype=np.uint8),
-            soft=np.int32(soft),
-            patches=np.int32(patches),
-        )
-        tmp.replace(path)
-    except OSError:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
+    from favlo.vision_cache import store_cache
+
+    store_cache(
+        _vision_cache_path(root, digest),
+        {
+            "blob": np.frombuffer(blob, dtype=np.uint8),
+            "soft": np.int32(soft),
+            "patches": np.int32(patches),
+        },
+    )
+
+
 _MLP_PAD = align_k(VISION_MLP, FP8)
 # Vision attention uses the raw dot. It does not divide by sqrt(head_dim).
 _ATTN_SCALE = 1.0
@@ -270,7 +258,6 @@ class VisionTower:
         self._ready = False
         self._pos_offset = 0
         self.layers: list[_Layer] = []
-        self._cache: dict[bytes, tuple[bytes, int, int]] = {}
         self._note: Callable[[str], None] | None = None
 
     def encode(self, png: bytes, *, note: Callable[[str], None] | None = None) -> tuple[object, int]:
@@ -279,11 +266,7 @@ class VisionTower:
         if note is not None:
             self._note = note
         key = hashlib.sha256(png).digest()
-        cached = self._cache.get(key)
-        if cached is None:
-            cached = _load_vision_disk(self.root, key)
-            if cached is not None:
-                self._cache[key] = cached
+        cached = _load_vision_disk(self.root, key)
         if cached is not None:
             blob, soft, patches = cached
             del patches
@@ -318,10 +301,7 @@ class VisionTower:
         self._gemm(self.pre_proj, self.project, soft, self.soft)
         self.session.flush()
         blob = memory.load(self.soft, 0, soft * HIDDEN * 4)
-        self._cache[key] = (blob, soft, count)
         _store_vision_disk(self.root, key, blob, soft, count)
-        while len(self._cache) > _CACHE_LIMIT:
-            self._cache.pop(next(iter(self._cache)))
         return self.soft, soft
 
     def _status(self, line: str) -> None:

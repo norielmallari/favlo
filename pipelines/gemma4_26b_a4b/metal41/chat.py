@@ -285,6 +285,9 @@ class Pipeline(LanguagePipeline):
     default_variant = _sampling_mod.DEFAULT_VARIANT
     default_thinking = _sampling_mod.DEFAULT_THINKING
 
+    def has_vision(self) -> bool:
+        return True
+
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         del reply, selection
         runtime._stop = False
