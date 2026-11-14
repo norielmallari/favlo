@@ -37,3 +37,15 @@ The banner prints the loaded plane, MTP, thinking, and vision.
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+### 15 November 2026 — thinking card
+
+Same plane, MTP on at depth 3, and vision on. Thinking recorded 560.55 tok/s prefill and 18.04 tok/s decode. A search on 15 November 2026 did not find 560.55 and 18.04 in these sources. Queries: "560.55 OR 18.04 Qwen3.5-4B coding agent vision MTP tok/s", and "Qwen3.5-4B MTP depth 3 M5 Pro fp8_e4m3 vision coding agent thinking tok/s 2026". Closest overlaps were [oMLX Qwen3.5-4B-Optimized-MTPLX on a 20-core M5 Pro](https://omlx.ai/benchmarks/performance/7bdbt1iy) at 2605 tok/s prefill and 46.8 tok/s decode at 4096 context with thinking off, [oMLX Qwen3.5-4B-oQ4e-mtp on a 16-core M5 Pro](https://omlx.ai/benchmarks/performance/syd6zrfc) at 2265 tok/s prefill and 127.9 tok/s decode at 16384 context with MTP on and thinking off, [Treeish on an M4 Max](https://huggingface.co/treeish/Qwen3.5-4B-oQ4e-MTP-MLX) at 66.4 tok/s at MTP depth 3, and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm/pull/1167) at 72.557 tok/s generation for a BF16 MTP run. None of them is this `fp8_e4m3` vision table on the thinking card. The instruct row above stays the 5 November measurement.
+
+```text
+uv run python -m harness.coding --model qwen35_4b --mtp on --vision --thinking on
+```
+
+| Thinking | Vision | MTP | Result | Prefill | Decode |
+|---|---|---|---|---|---|
+| on | on | on, depth 3 | pass | 560.55 tok/s (2444 tok in 4.36 s) | 18.04 tok/s (1441 tok in 79.87 s) |
