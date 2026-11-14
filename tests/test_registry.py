@@ -12,7 +12,9 @@ from favlo.registry import (
     list_unregistered,
     load_registry,
     model_objects,
+    model_props,
     one_model,
+    pipeline_has_vision,
     refuse_conflicting_destination,
     register_quantized,
     resolve,
@@ -594,4 +596,74 @@ def test_served_models_list_language_and_embeddings_from_registry_only(
     assert one_model("vec-pack", root=tmp_path)["pipeline"] == "embed_pipe"
     with pytest.raises(LookupError, match="not found"):
         one_model("still-pack", root=tmp_path)
+
+
+def test_pipeline_has_vision_reads_a_constant_return(tmp_path) -> None:
+    seen = tmp_path / "seen"
+    seen.mkdir()
+    (seen / "chat.py").write_text(
+        "class Pipeline:\n    def has_vision(self) -> bool:\n        return True\n"
+    )
+    blind = tmp_path / "blind"
+    blind.mkdir()
+    (blind / "chat.py").write_text(
+        "class Pipeline:\n    def has_vision(self):\n        return self.ready\n"
+    )
+    assert pipeline_has_vision("example", runtime="metal41", pipeline_root=str(seen)) is True
+    assert pipeline_has_vision("example", runtime="metal41", pipeline_root=str(blind)) is False
+    assert pipeline_has_vision("example", runtime="metal41", pipeline_root=str(tmp_path)) is False
+    assert pipeline_has_vision("qwen36_35b_a3b", runtime="metal41") is True
+
+
+def test_model_props_reports_context_and_vision(tmp_path) -> None:
+    tree = tmp_path / "runtime"
+    tree.mkdir()
+    (tree / "chat.py").write_text(
+        "class Pipeline:\n    def has_vision(self) -> bool:\n        return True\n"
+    )
+    save_registry(
+        {
+            "version": 1,
+            "default": "plain:thinking",
+            "models": {
+                "seen-pack": {
+                    "pipeline": "example_model",
+                    "runtime": "metal41",
+                    "alias": "seen",
+                    "pipeline_root": str(tree),
+                    "variants": {"thinking": {"temperature": 1}},
+                    "default_variant": "thinking",
+                    "context_length": 4096,
+                },
+                "plain-pack": {
+                    "pipeline": "example_model",
+                    "runtime": "metal41",
+                    "alias": "plain",
+                    "pipeline_root": str(tree),
+                    "variants": {"thinking": {}},
+                    "default_variant": "thinking",
+                    "context_length": 2048,
+                },
+                "vec-pack": {
+                    "pipeline": "embed_pipe",
+                    "runtime": "metal41",
+                    "pipeline_root": str(tree),
+                    "variants": {"embed": {}},
+                    "default_variant": "embed",
+                    "context_length": 1024,
+                },
+            },
+        },
+        tmp_path,
+    )
+    assert model_props("seen:thinking", root=tmp_path) == {
+        "model_alias": "seen",
+        "default_generation_settings": {"n_ctx": 4096},
+        "modalities": {"vision": True},
+    }
+    assert model_props(None, root=tmp_path, resident="vec-pack")["modalities"]["vision"] is False
+    assert model_props(None, root=tmp_path, resident="seen-pack")["model_alias"] == "seen"
+    assert model_props(None, root=tmp_path)["model_alias"] == "plain"
+    with pytest.raises(LookupError):
+        model_props("missing", root=tmp_path)
 

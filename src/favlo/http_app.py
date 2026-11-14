@@ -2,7 +2,9 @@
 
 Uvicorn serves it. A pipeline receives a :class:`favlo.reply.LiveReply` and
 never a socket. ``GET /v1/models`` lists language and embeddings rows from
-the registry and does not take the request lock. The
+the registry and does not take the request lock. ``GET /props`` and
+``GET /v1/props`` report that row's context and whether its pipeline embeds
+a still. They do not load the model and do not take the request lock. The
 pipeline manager admits the GPU: embeddings, then chats, then media. An
 embedding waits until the open chat returns. A chat that has not started
 waits while an embedding is queued or running. A chat preempts media and
@@ -45,7 +47,7 @@ from favlo.pipelines import (
     open_for,
     release_admission,
 )
-from favlo.registry import one_model, served_model_objects
+from favlo.registry import model_props, one_model, served_model_objects
 from favlo.reply import LiveReply
 
 _MAX_BODY = 64 * 1024 * 1024
@@ -283,6 +285,9 @@ def build_app(args: Any, state: dict[str, Any]) -> Any:
     async def model(request: Request) -> Response:
         return _one_model(request, state)
 
+    async def props(request: Request) -> Response:
+        return _props(request, state)
+
     async def release(request: Request) -> Response:
         return await _release(request, args, state)
 
@@ -360,6 +365,8 @@ def build_app(args: Any, state: dict[str, Any]) -> Any:
     routes = [
         Route("/v1/models", models, methods=["GET"]),
         Route("/v1/models/{model_id:path}", model, methods=["GET"]),
+        Route("/props", props, methods=["GET"]),
+        Route("/v1/props", props, methods=["GET"]),
         Route("/v1/release", release, methods=["POST"]),
         Route("/v1/resume", resume, methods=["POST"]),
         Route("/v1/pipelines/close", pipelines_close, methods=["POST"]),
@@ -387,6 +394,15 @@ def _one_model(request: Request, state: dict[str, Any]) -> Response:
     except LookupError as exc:
         return _error(404, str(exc), "not_found")
     return _json_response(row)
+
+
+def _props(request: Request, state: dict[str, Any]) -> Response:
+    model = request.query_params.get("model")
+    try:
+        payload = model_props(model, resident=state.get("record"))
+    except LookupError as exc:
+        return _error(404, str(exc), "not_found")
+    return _json_response(payload)
 
 
 async def _release(request: Request, args: Any, state: dict[str, Any]) -> Response:

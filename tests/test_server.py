@@ -2306,6 +2306,9 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
             status, _kind, _raw = _http(port, method, route, payload)
             assert status == 404, route
         models_status, _kind, models_raw = _http(port, "GET", "/v1/models")
+        props_status, _kind, props_raw = _http(port, "GET", "/props?model=text-model:thinking&autoload=false")
+        v1_props_status, _kind, v1_props_raw = _http(port, "GET", "/v1/props?model=embed-model")
+        missing_props_status, _kind, _missing_props = _http(port, "GET", "/props?model=missing-model")
         one_status, _kind, one_raw = _http(port, "GET", "/v1/models/text-model")
         embed_status, _kind, embed_raw = _http(port, "GET", "/v1/models/embed-model")
         media_status, _kind, _media_raw = _http(port, "GET", "/v1/models/example-model")
@@ -2317,6 +2320,14 @@ def test_media_http_routes_are_gone(monkeypatch, tmp_path) -> None:
     finally:
         _stop_background(state, thread)
     assert models_status == 200
+    assert props_status == 200
+    props = json.loads(props_raw)
+    assert props["modalities"] == {"vision": True}
+    assert props["default_generation_settings"]["n_ctx"] == 131072
+    assert props["model_alias"] == "text-model"
+    assert v1_props_status == 200
+    assert json.loads(v1_props_raw)["modalities"] == {"vision": False}
+    assert missing_props_status == 404
     rows = json.loads(models_raw)["data"]
     assert [row["id"] for row in rows] == [
         "text-model",

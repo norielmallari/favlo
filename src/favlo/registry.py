@@ -4,11 +4,13 @@ A flavor is a packed record directory. When the row stores an alias, that
 alias is the public id for ``GET /v1/models`` and for ``resolve``. The folder
 name is the storage key only. A variant is a sampling suffix on that public id.
 ``GET /v1/models`` lists language and embeddings rows from this file only. It
-does not import pipeline packages to classify a row.
+does not import pipeline packages to classify a row. ``GET /props`` reads
+``has_vision`` from that pipeline's ``chat.py`` without importing it.
 """
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -421,6 +423,83 @@ def served_model_objects(
         for variant in _variant_names(entry):
             rows.append(_object(f"{name}:{variant}", folder, variant, entry, created, resident))
     return rows
+
+
+def model_props(
+    model_id: str | None = None,
+    root: Path | None = None,
+    *,
+    resident: str | None = None,
+) -> dict[str, Any]:
+    """llama.cpp ``/props`` body for one registered language or embeddings id.
+
+    An omitted id uses the resident row, then the registry default. The probe
+    does not load the model. ``modalities.vision`` is that pipeline's
+    ``has_vision`` constant. Embeddings stay false.
+    """
+    data = load_registry(root)
+    chosen = model_id.strip() if isinstance(model_id, str) and model_id.strip() else None
+    if chosen is None:
+        chosen = _props_model_id(data, resident, root)
+    selection = resolve(chosen, root=root)
+    entry = data["models"][selection.folder]
+    if not _is_served_model_entry(data, selection.folder, entry):
+        message = "not found"
+        raise LookupError(message)
+    vision = False
+    if _is_language_model_entry(entry):
+        vision = pipeline_has_vision(
+            selection.pipeline,
+            runtime=selection.runtime,
+            pipeline_root=selection.pipeline_root,
+        )
+    return {
+        "model_alias": selection.parent,
+        "default_generation_settings": {"n_ctx": selection.context_length},
+        "modalities": {"vision": vision},
+    }
+
+
+def pipeline_has_vision(
+    pipeline: str, *, runtime: str, pipeline_root: str | None = None
+) -> bool:
+    """True when ``chat.py`` defines ``has_vision`` and that method returns ``True``.
+
+    The file is parsed, not imported, so a capability probe does not load Metal.
+    A missing file or a method that is not a constant return is false.
+    """
+    from favlo.cli import pipeline_tree
+
+    path = pipeline_tree(runtime, pipeline=pipeline, pipeline_root=pipeline_root) / "chat.py"
+    if not path.is_file():
+        return False
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return False
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for item in node.body:
+            if not isinstance(item, ast.FunctionDef) or item.name != "has_vision":
+                continue
+            returned = [
+                stmt.value
+                for stmt in item.body
+                if isinstance(stmt, ast.Return) and stmt.value is not None
+            ]
+            if len(returned) != 1 or not isinstance(returned[0], ast.Constant):
+                return False
+            return returned[0].value is True
+    return False
+
+
+def _props_model_id(data: dict[str, Any], resident: str | None, root: Path | None) -> str:
+    if isinstance(resident, str) and resident:
+        entry = data["models"].get(resident)
+        if isinstance(entry, dict) and _is_served_model_entry(data, resident, entry):
+            return _public_id(entry, resident)
+    return default_llm_id(root)
 
 
 def one_model(
