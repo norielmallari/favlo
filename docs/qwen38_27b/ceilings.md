@@ -85,24 +85,24 @@ One full-attention head in that chunk has 12,288 query rows and one 2048-key win
 
 Decode reads the projection image once and adds `lm_head`, 675,430,400 bytes. 15,220,162,560 bytes at 254.6 GB/s is 59.8 ms, 16.7 tok/s.
 
-Each prefill time below is one command buffer, then a wait, the median of five dispatches after one discarded sample. Counts are one 2048-token chunk of the mixed record. `gdn_state_rows` keeps the state row on the thread for the chunk.
+Each prefill time below is one command buffer, then a wait, the median of five dispatches after one discarded sample. Counts are one 2048-token chunk of the mixed record. `gdn_state_rows` keeps the state row on the thread for the chunk. A language projection whose tile grid is at least 8 by 8 walks in Morton order. `in_proj_a`, `in_proj_b`, the fp8 down projection, and the attention score stay row-major.
 
 | Kernel | Shape | Count | µs | ms |
 |---|---|---:|---:|---:|
-| `prefill_fp4_n64` qkv | 2048×10240×5120 | 48 | 8803 | 422.56 |
-| `prefill_fp4_n64` z | 2048×6144×5120 | 48 | 5351 | 256.85 |
+| `prefill_fp4_n64_morton` qkv | 2048×10240×5120 | 48 | 8866 | 425.57 |
+| `prefill_fp4_n64_morton` z | 2048×6144×5120 | 48 | 5326 | 255.65 |
 | `prefill_fp4_n64` a | 2048×64×5120 | 48 | 133 | 6.37 |
 | `prefill_fp4_n64` b | 2048×64×5120 | 48 | 134 | 6.41 |
-| `prefill_fp4_n64` out | 2048×5120×6144 | 48 | 5423 | 260.28 |
-| `prefill_fp4_n64` q | 2048×12288×5120 | 16 | 10636 | 170.17 |
-| `prefill_fp4_n64` k | 2048×1024×5120 | 16 | 934 | 14.95 |
-| `prefill_fp4_n64` v | 2048×1024×5120 | 16 | 924 | 14.79 |
-| `prefill_fp4_n64` o | 2048×5120×6144 | 16 | 5478 | 87.65 |
-| `prefill_fp4_n64` gate | 2048×17408×5120 | 52 | 15012 | 780.63 |
-| `prefill_fp4_n64` up | 2048×17408×5120 | 52 | 14953 | 777.56 |
-| `prefill_fp4_m32` down | 2048×5120×17408 | 52 | 15830 | 823.16 |
-| `prefill_fp8_n64` gate | 2048×17408×5120 | 12 | 14760 | 177.12 |
-| `prefill_fp8_n64` up | 2048×17408×5120 | 12 | 14715 | 176.58 |
+| `prefill_fp4_n64_morton` out | 2048×5120×6144 | 48 | 5242 | 251.62 |
+| `prefill_fp4_n64_morton` q | 2048×12288×5120 | 16 | 10583 | 169.33 |
+| `prefill_fp4_n64_morton` k | 2048×1024×5120 | 16 | 920 | 14.72 |
+| `prefill_fp4_n64_morton` v | 2048×1024×5120 | 16 | 920 | 14.72 |
+| `prefill_fp4_n64_morton` o | 2048×5120×6144 | 16 | 5264 | 84.22 |
+| `prefill_fp4_n64_morton` gate | 2048×17408×5120 | 52 | 14490 | 753.48 |
+| `prefill_fp4_n64_morton` up | 2048×17408×5120 | 52 | 14490 | 753.48 |
+| `prefill_fp4_m32_morton` down | 2048×5120×17408 | 52 | 16046 | 834.39 |
+| `prefill_fp8_n64_morton` gate | 2048×17408×5120 | 12 | 13973 | 167.68 |
+| `prefill_fp8_n64_morton` up | 2048×17408×5120 | 12 | 13973 | 167.68 |
 | `prefill_fp8_m32` down | 2048×5120×17408 | 12 | 15618 | 187.42 |
 | `prefill_fp8_n64` score | 12288×2048×256 | 64 | 492 | 31.48 |
 | `prefill_fp8_n64_stride` value | 12288×256×2048 | 64 | 609 | 38.99 |
@@ -122,7 +122,7 @@ Each prefill time below is one command buffer, then a wait, the median of five d
 | `kv_softmax_close` | 12288 | 64 | 45 | 2.86 |
 | `kv_acc_add` | 12288×256 | 64 | 41 | 2.59 |
 
-The sum is 5245.3 ms, 390 tok/s. That is the kernel ceiling for this set. A full chunk does not clear the norm buffer or the half tile, because the norm and the cast overwrite them. Key and value stores, the query cast, the row init, the attend write, and the embedding row are outside it.
+The sum is 5175.6 ms, 396 tok/s. That is the kernel ceiling for this set. A full chunk does not clear the norm buffer or the half tile, because the norm and the cast overwrite them. Key and value stores, the query cast, the row init, the attend write, and the embedding row are outside it.
 
 ## MTP verify
 

@@ -22,6 +22,9 @@ _LIBC.madvise.restype = ctypes.c_int
 
 KERNELS = (
     "prefill_fp4_n64",
+    "prefill_fp4_n64_morton",
+    "prefill_fp8_n64_morton",
+    "prefill_fp4_m32_morton",
     "prefill_fp4_m32",
     "prefill_fp4_e8m0",
     "prefill_fp8_n64",
@@ -117,6 +120,15 @@ KERNELS = (
     "sample_scan",
     "fill_mrope",
 )
+
+def projection_grid(tiles_x: int, tiles_y: int) -> tuple[bool, tuple[int, int, int]]:
+    """Eight-by-eight Morton blocks when both axes have at least eight tiles."""
+    if tiles_x >= 8 and tiles_y >= 8:
+        blocks_x = (tiles_x + 7) // 8
+        blocks_y = (tiles_y + 7) // 8
+        return True, (blocks_x * blocks_y * 64, 1, 1)
+    return False, (tiles_x, tiles_y, 1)
+
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _VISION = Path(__file__).resolve().parent / "shaders" / "vision.metal"

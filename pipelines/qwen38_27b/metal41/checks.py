@@ -50,6 +50,41 @@ def _probe_fp4(rows: int, cols: int, inner: int) -> tuple[np.ndarray, bytes, byt
     return activation, bytes(packed), bytes(scales), expected
 
 
+def _fp4_random(rows: int, cols: int, inner: int, seed: int) -> tuple[np.ndarray, bytes, bytes, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    activation = rng.normal(scale=0.05, size=(rows, inner)).astype(np.float16)
+    weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+    data, scales = quantize_fp4(weight)
+    expect = activation.astype(np.float32) @ dequant_fp4(data, scales, cols, inner).T
+    return activation, data, scales, expect.astype(np.float32)
+
+
+def _morton_prefill(
+    session: Session,
+    name: str,
+    activation: np.ndarray,
+    data: bytes,
+    scales: bytes,
+    rows: int,
+    cols: int,
+    inner: int,
+    tile_x: int,
+    tile_y: int,
+) -> np.ndarray:
+    tiles_x, tiles_y = cols // tile_x, rows // tile_y
+    blocks_x, blocks_y = (tiles_x + 7) // 8, (tiles_y + 7) // 8
+    destination = session.zeros(rows * cols * 4)
+    width = int(session.pipes[name].threadExecutionWidth())
+    session.dispatch(
+        name,
+        [session.upload(activation), session.upload(data), session.upload(scales), destination],
+        [struct.pack("<I", rows), struct.pack("<I", cols), struct.pack("<I", inner)],
+        (blocks_x * blocks_y * 64, 1, 1),
+        (width * 4, 1, 1),
+    )
+    return session.download_f32(destination, rows * cols).reshape(rows, cols)
+
+
 def check_fp4_tile(session: Session) -> None:
     activation, data, scales, expected = _probe_fp4(64, 64, 256)
     got = session.prefill("prefill_fp4_n64", activation, data, scales, 64, 64, 256)
@@ -60,6 +95,12 @@ def check_fp4_tile(session: Session) -> None:
     activation, data, scales, expected = _probe_fp4(64, 128, 256)
     got = session.prefill("prefill_fp4_m32", activation, data, scales, 64, 128, 256)
     _close("fp4 32x128", got, expected, rtol=0.0, atol=0.0)
+    activation, data, scales, expected = _fp4_random(512, 512, 256, 4)
+    got = _morton_prefill(session, "prefill_fp4_n64_morton", activation, data, scales, 512, 512, 256, 64, 64)
+    _close("fp4 morton", got, expected, rtol=0.0, atol=1e-5)
+    activation, data, scales, expected = _fp4_random(64, 256, 256, 5)
+    got = _morton_prefill(session, "prefill_fp4_m32_morton", activation, data, scales, 64, 256, 256, 128, 32)
+    _close("fp4 morton 32x128", got, expected, rtol=0.0, atol=1e-5)
 
 
 def check_fp4_gemv(session: Session) -> None:
@@ -175,6 +216,12 @@ def check_fp8_prefill(session: Session) -> None:
     matrix = dequant_fp8(data, scales, 128, 256)
     expect = activation.astype(np.float32) @ matrix.T
     _close("fp8 32x128", got, expect.astype(np.float32), atol=2e-3)
+    activation = rng.normal(scale=0.05, size=(512, 256)).astype(np.float16)
+    weight = rng.normal(scale=0.05, size=(512, 256)).astype(np.float32)
+    data, scales = quantize_fp8(weight)
+    got = _morton_prefill(session, "prefill_fp8_n64_morton", activation, data, scales, 512, 512, 256, 64, 64)
+    matrix = dequant_fp8(data, scales, 512, 256)
+    _close("fp8 morton", got, (activation.astype(np.float32) @ matrix.T).astype(np.float32), atol=2e-3)
 
 
 def check_fp8_x4(session: Session) -> None:

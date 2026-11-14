@@ -3,7 +3,8 @@
 Feed-forward gate, up, and down, and the Gated DeltaNet qkv, z, and out, are
 restored from the packed matrix into one int8 stage and multiplied as
 int8 × int8. The down projection uses a 32×128 tile. Attention projections,
-``in_proj_a``, and ``in_proj_b`` stay half × fp4 or half × fp8. Decode stays
+``in_proj_a``, and ``in_proj_b`` stay half × fp4 or half × fp8. A grid of at
+least eight tiles on both axes walks those tiles in Morton order. Decode stays
 a GEMV and does not read the stage.
 """
 
@@ -28,6 +29,7 @@ from qwen38_27b.metal41.layout import (
     THETA,
     Z_WIDTH,
 )
+from qwen38_27b.metal41.session import projection_grid
 
 
 # One feed-forward gate: int8 codes plus one float scale per output channel.
@@ -515,11 +517,19 @@ def _matmul(runtime: Any, half: Any, name: str, dest: Any, rows: int) -> None:
         raise RuntimeError(message)
     wide = name.endswith("mlp.down_proj.weight") and cols % 128 == 0 and rows % 32 == 0
     if wide:
-        kernel = "prefill_fp8_m32" if kind == "fp8" else "prefill_fp4_m32"
-        groups = (cols // 128, rows // 32, 1)
+        tiles_x, tiles_y = cols // 128, rows // 32
+        family = "fp8_m32" if kind == "fp8" else "fp4_m32"
+        # The fp8 down tile is slower in Morton order. The fp4 down tile is not.
+        use_morton = kind != "fp8"
     else:
-        kernel = "prefill_fp8_n64" if kind == "fp8" else "prefill_fp4_n64"
-        groups = (cols // 64, rows // 64, 1)
+        tiles_x, tiles_y = cols // 64, rows // 64
+        family = "fp8_n64" if kind == "fp8" else "fp4_n64"
+        use_morton = True
+    morton, groups = projection_grid(tiles_x, tiles_y)
+    if not use_morton:
+        morton = False
+        groups = (tiles_x, tiles_y, 1)
+    kernel = f"prefill_{family}_morton" if morton else f"prefill_{family}"
     width = int(runtime.session.pipes[kernel].threadExecutionWidth())
     runtime.session.encode(
         kernel,
