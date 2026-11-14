@@ -76,9 +76,32 @@ add a score for the cutoff.
 
 Setup and the first clip are in [SETUP.md](SETUP.md).
 
+## Registry
+
+The row key in `models/registry.json` is the packed folder, `Wan2.2-TI2V-5B-int8`. Registration leaves `alias` null, so that folder is the public id. `directory` and `parts` are copied at open, so close the resident model after changing them. The listener stays up.
+
+```python
+from favlo.registry import load_registry, save_registry
+
+data = load_registry()
+data["models"]["Wan2.2-TI2V-5B-int8"]["parts"]["umt5"] = "models/google/umt5-xxl-int8"
+save_registry(data)
+```
+
+| Field | When | Values |
+|---|---|---|
+| `parts.umt5` | open | The int8 umT5 pack. A missing name opens `<directory>/umt5` when that directory has `manifest.json`, and otherwise `models/google/umt5-xxl-int8`. The pack must be int8. A BF16 path is refused. |
+| `alias` | resolve | One name, with no colon and no slash, or `null`. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+| `directory` | open | The packed record `serve` opens. |
+
+Registration writes `media.t2v` and `media.i2v` to this folder when those keys are empty, because the tools are `generate_video_t2v` and `generate_video_i2v`. `favlo media` looks up `media.video`, because the handler kind is `video`, so those stored keys are not that lookup. An omitted `--model` uses `pipeline_default`, then the first folder registered for this pipeline.
+
+The sampling card (`default`, temperature 0) is copied at registration. A video request does not read it. `kv_cache` and `resident_percent` are discarded at open. `mtp`, `mtp_depth`, `enable_thinking`, `reasoning_effort`, `context_length`, and `max_prompt_tokens` may sit on the row and are not read. `pipeline`, `runtime`, `source`, and `pipeline_root` are the row's identity. `steps` and `guidance_scale` are request fields. They are not registry keys.
+
 ## Listener
 
-`favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the MP4. `--model` is optional. An omitted `--model` uses the t2v default in the registry when that folder is this pipeline. Otherwise it uses the first folder registered for this pipeline. `--kind` is unnecessary. This pipeline serves one kind.
+`favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the MP4. `--model` is optional. An omitted `--model` uses the row marked `pipeline_default`, then the first folder registered for this pipeline. The lookup is [Registry](#registry). `--kind` is unnecessary. This pipeline serves one kind.
 
 ```text
 uv run favlo media --pipeline wan22-ti2v-5b prompt="A horse gallops at speed. Fixed camera." size=832x480 frames=9

@@ -23,6 +23,28 @@ Each patch is 4 latent frames, 160 ms. The diffusion transformer takes 10 Euler 
 
 `models add <folder>` writes `manifest.json` with `complete` true when that directory holds `model.safetensors` and `config.json`, then registers the folder. The served record is `models/VoxCPM2`, a link to the checkout. `setup` still does not register.
 
+## Registry
+
+The row key in `models/registry.json` is the folder passed to `models add`, `VoxCPM2` for the served link. `setup` does not register. `models add` writes `manifest.json` with `complete` true when the directory holds `model.safetensors` and `config.json`, then registers that folder. `alias` stays null unless `models add` is given one, so the folder is the public id. `directory` is copied at open, so close the resident model after changing it. The listener stays up.
+
+```python
+from favlo.registry import load_registry, save_registry
+
+data = load_registry()
+data["media"]["voice"] = "VoxCPM2"
+save_registry(data)
+```
+
+| Field | When | Values |
+|---|---|---|
+| `alias` | resolve | One name, with no colon and no slash, or `null`. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+| `directory` | open | The checkout `serve` opens. It holds `model.safetensors` and `config.json`. |
+
+The file key `media.voice` is the folder `favlo media` uses when the command omits `--model` and that folder is this pipeline. The first voice registration fills an empty key. A stored key stays.
+
+The sampling card (`voice`, temperature 0) is copied at registration. Speech reads the checkpoint flow-matching card, not that row. `kv_cache` and `resident_percent` are discarded at open. The live cache stays float32. `mtp`, `mtp_depth`, `enable_thinking`, `reasoning_effort`, `context_length`, and `max_prompt_tokens` may sit on the row and are not read. `context_length` is 8192 at registration. `pipeline`, `runtime`, `source`, and `pipeline_root` are the row's identity.
+
 ## Listener
 
 `favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the audio file. `--model` is optional. An omitted `--model` uses the voice default in the registry when that folder is this pipeline. Otherwise it uses the first folder registered for this pipeline. `--kind` is unnecessary. This pipeline serves one kind.

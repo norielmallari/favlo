@@ -15,6 +15,33 @@ uv run favlo --z_image_turbo kernels
 
 The default image is 1024×1024. Width and height are multiples of 16 and at most 2560. `--steps` must be 8. The seed selects the initial noise. The publisher's last training stage keeps each edge within 256 pixels of the 1024 grid, from 768 to 1280. Serving accepts up to 2560 on each edge.
 
+## Registry
+
+The row key in `models/registry.json` is the packed folder, `Z-Image-Turbo-int8` or `Z-Image-Turbo-fp4`. Registration leaves `alias` null, so that folder is the public id. `directory` is copied at open, so close the resident model after changing it. The listener stays up.
+
+```python
+from favlo.registry import load_registry, save_registry, set_pipeline_default
+
+set_pipeline_default("Z-Image-Turbo-int8")
+data = load_registry()
+data["media"]["image"] = "Z-Image-Turbo-int8"
+save_registry(data)
+```
+
+```text
+uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
+```
+
+| Field | When | Values |
+|---|---|---|
+| `alias` | resolve | One name, with no colon and no slash, or `null`. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+| `directory` | open | The packed record `serve` opens. |
+
+The file key `media.image` is the folder `favlo media` uses when the command omits `--model` and that folder is this pipeline. The first image registration fills an empty key. A stored key stays. When that folder is another pipeline, the command uses the row marked `pipeline_default`, then the first folder registered for this pipeline.
+
+This pipeline has no sampler keys on the row. A request runs eight steps. The sampling card (`generate`, temperature 0) is copied at registration and is not read. `kv_cache`, `resident_percent`, `mtp`, `mtp_depth`, `enable_thinking`, `reasoning_effort`, `context_length`, and `max_prompt_tokens` may sit on the row. This open discards `kv_cache` and `resident_percent` and does not read the others. `context_length` is 1536 at registration. `pipeline`, `runtime`, `source`, and `pipeline_root` are the row's identity.
+
 ## Listener
 
 `favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the PNG. `--model` is optional. An omitted `--model` uses the image default in the registry when that folder is this pipeline. Otherwise it uses the first folder registered for this pipeline. `--kind` is unnecessary. This pipeline serves one kind.

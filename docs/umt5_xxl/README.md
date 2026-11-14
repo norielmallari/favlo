@@ -16,5 +16,7 @@ uv run favlo --wan22_i2v umt5 quantize --format wan
 defaults to `--format wan`. `--format hf` packs a Hugging Face
 `.safetensors` encoder; pass `--src` for that file. `--keep-source` leaves the
 BF16 checkout in place. The default pack removes it after a successful write.
-`parts.umt5` on a Wan registry row is that shared directory. A clip never opens
-the BF16 file.
+
+## Registry
+
+This pack is not a registry row. The writable field is `parts.umt5` on the Wan row that opens the clip. The value is this int8 directory. The field is copied at open, so close the resident model after the write. The keys, the fallbacks, and the other fields on those rows are in [the I2V note](../wan22_i2v/README.md#registry) and [the TI2V note](../wan22_ti2v_5b/README.md#registry). A clip never opens the BF16 file.

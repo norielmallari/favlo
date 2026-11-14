@@ -6,6 +6,41 @@ As-built note for the `gemma4_26b_a4b` pipeline. Pack and the first chat are [SE
 
 The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it). Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license). `quantize` does not download. With no `--src` it reads `models/gemma-4-26B-A4B-it`. Device spans come from `device_buffer`. `open_runtime` takes `owner` and every span from that opening uses it. `close` sweeps that string. A command that omits `owner` mints one from this runtime's id. The opening reads `budget()` from the serve ledger. `--max-memory` is that ledger's cap. It keeps every expert layer that fits after `resident.bin`, the scratch, and the key/value cache. Each prefill chunk reads the ledger again. A larger answer admits more expert layers. A smaller answer leaves the resident layers in place. The cache starts at 256 tokens and doubles. Growth releases layer files until the new cache and at least one layer file fit. A layer that is not resident is read into the oldest slot before that layer runs. The opening refuses when one layer file does not fit. A request logs prompt tokens, a cache hit or miss, and the prefill and decode counts while those phases run. Each count posts onto `favlo.host_progress`; that host thread builds the fact for the console queue, and the CLI thread paints it. The prefill count stays short of the prompt until the chunk's command buffer has finished. The embedding and the dense projections are fp8. Decode reads those in `embed_fp8` and `gemv_fp8`, and the routed experts in `gemv_fp4_at` and `gemv_fp8_at`. Prefill restores each dense projection into an int8 stage for the chunk tile. Prefill reads a chunk of 1024 tokens.
 
+## Registry
+
+The row key in `models/registry.json` is the packed folder, `gemma-4-26B-A4B-it-fp8-e20`. The alias `gemma4_26b_a4b` is the public id and is not the key. The packed folder is not a request id while the alias is set. Write the field on that folder and save. `set_alias` takes the folder. A field marked open is copied when the pipeline process starts, so close the resident model after the write. The listener stays up.
+
+```python
+from favlo.registry import load_registry, save_registry
+
+data = load_registry()
+data["models"]["gemma-4-26B-A4B-it-fp8-e20"]["kv_cache"] = "fp8_e4m3"
+save_registry(data)
+```
+
+```text
+uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
+```
+
+| Field | When | Values |
+|---|---|---|
+| `kv_cache` | open | `half` or `fp8_e4m3`. `f16` and `fp16` resolve to `half`. `e4m3` and `fp8` resolve to `fp8_e4m3`. Registration writes `fp8_e4m3`. A missing key is read as `f16`, which opens as `half`. |
+| `enable_thinking` | open | `true` or `false`. Registration writes `true`. Used when the request omits effort and the selected card has no `reasoning_effort`. |
+| `reasoning_effort` | open | `minimal` or `high`. `none` becomes `minimal`. `low`, `medium`, `xhigh`, and `max` become `high`. Registration leaves the row key off. Used only when the selected card omits `reasoning_effort`. Both registered cards store one. |
+| `default_variant` | open | `thinking` or `instruct`. Registration writes `thinking`. A bare id uses that card. |
+| `variants.thinking` | open | `temperature` 0.95, `top_p` 0.95, `top_k` 64, `presence_penalty` 0, `reasoning_effort` `high`. |
+| `variants.instruct` | open | `temperature` 0.95, `top_p` 0.95, `top_k` 64, `presence_penalty` 0, `reasoning_effort` `minimal`. |
+| `alias` | resolve | One name, with no colon and no slash, or `null`. `null` makes the folder the public id. |
+| `context_length` | listing | A positive integer. Registration writes 131072. `GET /v1/models` lists it, and the usage prompt cap uses it when `max_prompt_tokens` is absent. The next completion reads the file. The served window stays 131072 in this package. |
+| `max_prompt_tokens` | listing | A positive integer. The usage prompt cap. Registration leaves the key off. The next completion reads the file. The served window stays 131072. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+
+`variants` accepts only `thinking` and `instruct`. A third name is listed and does not select its own card. A request `temperature` or `top_p` replaces the card for that call. `top_k` and the presence penalty stay on the card. Changing the effort does not swap the card.
+
+The file key `default` is the id harnesses and `favlo web` use when none is named. The first language registration writes `gemma4_26b_a4b:instruct`. A stored value stays until it is replaced.
+
+`pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity. `runtime` is `metal41`, `cuda`, or `portable`. `serve` opens `directory` and imports `{pipeline}.{runtime}`. `source` is the BF16 checkout quantize checks. `resident_percent` is stored as null and discarded at open. `mtp` and `mtp_depth` may sit on the row. This open discards `mtp`. The drafter is not in this record, so a request `favlo:mtp` does not start a draft. This pipeline does not read `parts`.
+
 ## Kernels
 
 `kernels` compiles this package's shader library and dispatches one fp8 `matmul2d`, one fp4 `matmul2d`, one Metal half `matmul2d`, and one int8 prefill tile. The fp8 and fp4 left operand is Metal half, the destination is float32, and a quantized right-hand tensor is dequantized inside the op. The int8 path restores a packed fp8 matrix into a per-row int8 stage, quantizes a float or half activation, multiplies with `prefill_i8_n64`, and scales the int32 product back to float. The fp8 and fp4 checks compare that product with the packed restore. The int8 check compares restore codes, activation codes, and the scaled tile. The prefix check copies filled Metal half tokens and compares those bytes with the host half pack. A missing kernel stays missing.

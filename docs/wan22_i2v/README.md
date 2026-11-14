@@ -16,9 +16,35 @@ The solver is Euler steps with shift 5. The default is four steps, and the knots
 
 The image is the first pixel frame. A still that is not the clip size is resized to that size. The other frames are zeros. `Wan2.1_VAE.pth` is the causal encoder and decoder: base width 96, multipliers 1, 2, 4, 4, two residual blocks, temporal downsample on the last two stages, latent width 16. Spatial stride is 8 and temporal stride is 4. The first frame changes in space only. The first encoded chunk skips the temporal convolution, and the next chunk's first temporal upsample does not read that frame. The latent the DiT sees is `(μ − mean) / std` with the published 16-channel vectors. The decoder inverts that affine and clamps to `[−1, 1]`. The four mask channels are 1 on the first latent time and 0 after that. The DiT input is 16 noise channels, the four mask channels, then the 16-channel latent. The head's 64 outputs are one time patch, a 2×2 spatial patch, then the 16 latent channels. Without that file, each 4×8×8 cell is averaged into the latent and the decoder repeats each cell. The text context is the `umt5` directory on the row, `models/google/umt5-xxl-int8`. A clip encodes with that pack and reads `tokenizer.json` from it. `favlo --wan22_i2v umt5 quantize` writes that directory. That BF16 file is not opened during a clip. Every linear is symmetric int8. The token embedding, the RMSNorm weights, and the relative buckets stay float16. `matmul2d` consumes the linears. The token rows are gathered from `embed.npy`. The real tokens, including the end token, are padded with zeros to 512. Without that pack or the tokenizer, the prompt bytes index the embedding table. The DiT text MLP still runs. The VAE uploads weights only while encode or decode runs. A convolution of at least 32 output channels, 1024 outputs, and 64 taps is an im2col tile and a half `matmul2d`. Smaller convolutions stay on the float `conv3d` kernel. The encoder and decoder commit once per block, and each DiT block commits before the next one is recorded. The 1×1 projections, the channel RMS, the clipped SiLU, and both mid-block attentions are kernels, and the causal cache is a device buffer. The Euler step adds the velocity on device. The host sees the latent again at the decoder, then reads the uint8 frames for the AVI. Kernel and bandwidth ceilings for one 9-frame 576×320 clip are in [ceilings.md](ceilings.md). The isolated sum is a measurement in [research/clip-ceiling.md](research/clip-ceiling.md). A 9-frame int8 smoke printed 23.11 s.
 
+## Registry
+
+The row key in `models/registry.json` is the packed folder, such as `Wan2.2-I2V-A14B-int8`. Registration leaves `alias` null, so that folder is the public id. `directory` and `parts` are copied at open, so close the resident model after changing them. The listener stays up.
+
+```python
+from favlo.registry import load_registry, save_registry
+
+data = load_registry()
+row = data["models"]["Wan2.2-I2V-A14B-int8"]
+row.setdefault("parts", {})["umt5"] = "models/google/umt5-xxl-int8"
+save_registry(data)
+```
+
+| Field | When | Values |
+|---|---|---|
+| `parts.high` | open | The high-noise expert directory. A missing name opens `<directory>/high`. |
+| `parts.low` | open | The low-noise expert directory. A missing name opens `<directory>/low`. |
+| `parts.umt5` | open | The int8 umT5 pack. A missing name opens `<directory>/umt5` when that directory has `manifest.json`, and otherwise `models/google/umt5-xxl-int8`. |
+| `alias` | resolve | One name, with no colon and no slash, or `null`. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+| `directory` | open | The packed record `serve` opens. |
+
+Registration writes `media.i2v` to this folder when that key is empty. `favlo media` looks up `media.video`, because the handler kind is `video`, so the stored `i2v` key is not that lookup. An omitted `--model` uses `pipeline_default`, then the first folder registered for this pipeline.
+
+The sampling card (`generate`, temperature 0) is copied at registration. This pipeline does not read it. `kv_cache` and `resident_percent` are discarded at open. `mtp`, `mtp_depth`, `enable_thinking`, `reasoning_effort`, `context_length`, and `max_prompt_tokens` may sit on the row and are not read. `context_length` is 512 at registration, the text length from the Wan config. `pipeline`, `runtime`, `source`, and `pipeline_root` are the row's identity.
+
 ## Listener
 
-`favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the MP4. `--model` is optional. An omitted `--model` uses the i2v default in the registry when that folder is this pipeline. Otherwise it uses the first folder registered for this pipeline. `--kind` is unnecessary. This pipeline serves one kind.
+`favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the MP4. `--model` is optional. An omitted `--model` uses the row marked `pipeline_default`, then the first folder registered for this pipeline. The lookup is [Registry](#registry). `--kind` is unnecessary. This pipeline serves one kind.
 
 ```text
 uv run favlo media --pipeline wan22-i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5

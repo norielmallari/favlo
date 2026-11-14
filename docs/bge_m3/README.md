@@ -8,6 +8,30 @@ The packed record is one int8 weight image on the GPU. Each projection is symmet
 
 `favlo --bge_m3 embed --text <sentence>` prints the 1024 floats. A missing record is an error. The command does not quantize. A warm encode of that record is [research/recorded-encode.md](research/recorded-encode.md).
 
+## Registry
+
+The row key in `models/registry.json` is the packed folder, `bge-m3-int8`. Registration leaves `alias` null unless one is passed, so the folder is the public id. `directory` is copied at open, so close the resident model after changing it. The listener stays up. An embeddings row is omitted from `GET /v1/models`.
+
+```python
+from favlo.registry import load_registry, save_registry
+
+data = load_registry()
+data["embeddings"] = "bge-m3-int8"
+save_registry(data)
+```
+
+| Field | When | Values |
+|---|---|---|
+| `alias` | resolve | One name, with no colon and no slash, or `null`. |
+| `directory` | open | The packed record `POST /v1/embeddings` opens. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+
+`context_length` and `max_prompt_tokens` are written at registration (4096, the longest function quantize builds). The encode does not read them. The served length is the constant 4096 in this package, and the longest function the open record contains. `GET /v1/models` does not list this row.
+
+The file key `embeddings` is the folder `POST /v1/embeddings` uses when the body omits `model`. The first registration whose pipeline defines `handle_embed` fills an empty key with the folder. A stored key stays.
+
+The sampling card (`embed`, temperature 0) is copied because registration requires one variant. An embedding request does not read it. `kv_cache` and `resident_percent` are discarded at open. `mtp`, `mtp_depth`, `enable_thinking`, and `reasoning_effort` may sit on the row and are not read. `pipeline`, `runtime`, `source`, and `pipeline_root` are the row's identity.
+
 `handle_embed` is an `EmbeddingsPipeline`. `embed` returns the vector and the token count. The list object is the class. `POST /v1/embeddings` takes `model` and `input` as one string or an array of strings. The body is one embedding object per input and `usage.prompt_tokens`. A pipeline that defines `handle_embed` is omitted from `GET /v1/models`. An embeddings request waits until the open chat completion returns. It sits ahead of a chat that has not started. It does not preempt media and it does not close the resident model. It does not wait on a memory hold or on `wait_released`, and its process does not take that hold while it loads or unloads. The embeddings process closes when the request returns. A chat that has not started waits while an embeddings request is queued or running.
 
 `uv run pytest tests/test_bge_m3.py tests/test_bge_m3_smoke.py` runs the host math. The smoke skips when `models/bge-m3-int8` is absent. `python -m harness.embeddings_agent` posts several sentences to the route on `127.0.0.1:8129` and checks that paraphrase cosines exceed cross-topic cosines.

@@ -6,6 +6,44 @@ As-built note for the `qwen38_27b` pipeline. Download, pack, and the first chat 
 
 The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Those weights are under the Apache License, Version 2.0. Device spans come from the process memory manager. The serve process keeps the ledger, and this runtime asks it for the budget at open and again before each prefill chunk. A larger answer raises the fit ceiling. A later dip does not shrink the live cache or the wired layers. A `--max-memory` cap is applied by that ledger, not by this package. `open_runtime` takes `owner` and every span from that opening uses it. `close` sweeps that string. A command that omits `owner` mints one from this runtime's id. The fit still starts at a 2048-token chunk.
 
+## Registry
+
+The row key in `models/registry.json` is the packed folder, such as `Qwen3.8-27B-fp4`. The alias `qwen38_27b` is the public id and is not the key. Write the field on that folder and save. `set_model_mtp` and `set_alias` take the public id. A field marked open is copied when the pipeline process starts, so close the resident model after the write. The listener stays up. A field marked request is read from the file on that request.
+
+```python
+from favlo.registry import load_registry, save_registry, set_model_mtp
+
+data = load_registry()
+data["models"]["Qwen3.8-27B-fp4"]["kv_cache"] = "half"
+save_registry(data)
+set_model_mtp("qwen38_27b", enabled=True, depth=3)
+```
+
+```text
+uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
+```
+
+| Field | When | Values |
+|---|---|---|
+| `kv_cache` | open | `half` or `fp8_e4m3`. `f16` and `fp16` resolve to `half`. `e4m3` and `fp8` resolve to `fp8_e4m3`. Registration writes `half`. A missing key is read as `f16`, which opens as `half`. The plane layout is in the forward section. |
+| `mtp` | request | `true` or `false`. Quantize and `models add` write `true` when the key is absent. A request `mtp` or `favlo:mtp` wins. |
+| `mtp_depth` | request | An integer of 1 or more. A missing key is 3. Quantize and `models add` write 3 together with `mtp`. A request `mtp_depth` or `favlo:mtp_depth` wins. |
+| `reasoning_effort` | open | `none`, `low`, `medium`, or `xhigh`. Registration writes `xhigh`. `minimal` becomes `low`. `high` and `max` become `xhigh`. `none` closes thinking. Any other resolved name opens it and is passed to the template. |
+| `enable_thinking` | open | `true` or `false`. Registration writes `true`. Used when the request omits effort and the row omits `reasoning_effort`. |
+| `default_variant` | open | `thinking` or `instruct`. Registration writes `thinking`. A bare id uses that card. The suffix does not open or close thinking. |
+| `variants.thinking` | open | `temperature` 1.0, `top_p` 0.95, `top_k` 20, `presence_penalty` 0. Registration stores no `reasoning_effort` on this card. |
+| `variants.instruct` | open | `temperature` 0.7, `top_p` 0.8, `top_k` 20, `presence_penalty` 1.5. Registration stores no `reasoning_effort` on this card. |
+| `alias` | resolve | One name, with no colon and no slash, or `null`. `null` makes the folder the public id. |
+| `context_length` | listing | A positive integer. Registration writes 131072. `GET /v1/models` lists it, and the usage prompt cap uses it when `max_prompt_tokens` is absent. The next completion reads the file. The served window stays 131072 in this package. |
+| `max_prompt_tokens` | listing | A positive integer. The usage prompt cap. Registration leaves the key off. The next completion reads the file. The served window stays 131072. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+
+A `reasoning_effort` stored on the selected card wins over the row field. Registration leaves both cards without that key, so the row field is what an omitted request uses. `variants` accepts only `thinking` and `instruct`. A third name is listed and does not select its own card. A request temperature or top-p replaces the card for that call. Top-k and the presence penalty stay on the card.
+
+The file key `default` is the id harnesses and `favlo web` use when none is named. The first language registration writes `qwen38_27b:instruct`. A stored value stays until it is replaced.
+
+`pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity. `runtime` is `metal41`, `cuda`, or `portable`. `serve` opens `directory` and imports `{pipeline}.{runtime}`. `source` is the BF16 checkout quantize checks. `resident_percent` is stored as null and discarded at open. This pipeline does not read `parts`.
+
 ## Kernels
 
 `kernels` compiles this package's shader library and fails if any kernel in that library does not produce a pipeline. It then dispatches the 64×64 and 64×32 fp4 `matmul2d` tiles, the 32×128 fp4 and fp8 tiles, the fp8 64×64 weight tile, an fp4 and an fp8 restore into int8, the 64×64 and 32×128 int8 tiles, the int8 scale epilogue, the fp4 GEMV, the four-row fp4 GEMV, the four-row fp8 GEMV, the fused fp8 gate and up projection, the two-activation fp4 GEMV, multiplicative RMSNorm, SwiGLU, one Gated DeltaNet step, the 10240-channel convolution, an E4M3 decode, partial RoPE at position 0, a top-k sample, image position ids, a patch cast, a four-token causal fp8 attention, the tanh GELU, and the erf GELU. The host formulas for those dispatches live in `qwen38_27b/checks.py`.

@@ -10,6 +10,44 @@ uv run favlo --qwen35_4b kernels
 uv run favlo --qwen35_4b complete
 ```
 
+## Registry
+
+The row key in `models/registry.json` is the packed folder, `Qwen3.5-4B-fp8`. The alias `qwen35_4b` is the public id and is not the key. Write the field on that folder and save. `set_model_mtp` and `set_alias` take the public id. A field marked open is copied when the pipeline process starts, so close the resident model after the write. The listener stays up. A field marked request is read from the file on that request.
+
+```python
+from favlo.registry import load_registry, save_registry, set_model_mtp
+
+data = load_registry()
+data["models"]["Qwen3.5-4B-fp8"]["kv_cache"] = "fp8_e4m3"
+save_registry(data)
+set_model_mtp("qwen35_4b", enabled=False, depth=3)
+```
+
+```text
+uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
+```
+
+| Field | When | Values |
+|---|---|---|
+| `kv_cache` | open | `half` or `fp8_e4m3`. Registration writes `fp8_e4m3`. This open accepts those two names only. A missing key is read as `f16`, and this open rejects that name. |
+| `mtp` | request | `true` or `false`. A missing key is off. A request `mtp` or `favlo:mtp` wins. |
+| `mtp_depth` | request | An integer of 1 or more. A missing key is 3. A request `mtp_depth` or `favlo:mtp_depth` wins. |
+| `enable_thinking` | open | `true` or `false`. Registration writes `true`. Used when the request omits effort and the selected card has no `reasoning_effort`. |
+| `reasoning_effort` | open | `none` or `high`. An unsupported name resolves the same way a request does (`minimal`, `low`, and `medium` become `high`; `xhigh` and `max` become `high`). Used only when the selected card omits `reasoning_effort`. Both registered cards store one. |
+| `default_variant` | open | `thinking` or `instruct`. Registration writes `thinking`. A bare id uses that card. |
+| `variants.thinking` | open | `temperature` 1.0, `top_p` 0.95, `top_k` 20, `presence_penalty` 1.5, `reasoning_effort` `high`. |
+| `variants.instruct` | open | `temperature` 0.7, `top_p` 0.8, `top_k` 20, `presence_penalty` 1.5, `reasoning_effort` `none`. |
+| `alias` | resolve | One name, with no colon and no slash, or `null`. `null` makes the folder the public id. |
+| `context_length` | listing | A positive integer. Registration writes 262144. `GET /v1/models` lists it, and the usage prompt cap uses it when `max_prompt_tokens` is absent. The next completion reads the file. The served window stays 262144 in this package. |
+| `max_prompt_tokens` | listing | A positive integer. Registration writes 262144. The usage prompt cap. The next completion reads the file. The served window stays 262144. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+
+`variants` accepts only `thinking` and `instruct`. A third name is listed and does not select its own card. A request still overrides one sampling field for that call. Changing the effort does not swap the card.
+
+The file key `default` is the id harnesses and `favlo web` use when none is named. The first language registration writes `qwen35_4b:instruct`. A stored value stays until it is replaced.
+
+`pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity. `runtime` is `metal41`, `cuda`, or `portable`. `serve` opens `directory` and imports `{pipeline}.{runtime}`. `source` is the BF16 checkout quantize checks. `resident_percent` is stored as null and discarded at open. This pipeline does not read `parts`.
+
 ## Memory
 
 Device spans come from `favlo.memory`. The serve process keeps the ledger. This runtime asks for the budget at open and again at the start of each generate. A `--max-memory` cap is applied by that ledger, not by this package. `open_runtime` calls `memory.set_max_memory` then opens; it does not keep a private parser. Spans go through `device_buffer`. The live full-attention cache length is the one knob: it shrinks at open until the resident record, Gated DeltaNet state, convolution history, workspace, and that cache fit. A 2048-token cache that does not fit refuses to open. `open_runtime` takes `owner`; every allocate in that opening uses it; `close` sweeps that string.

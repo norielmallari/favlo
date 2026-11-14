@@ -13,6 +13,29 @@ Download, pack, and the first clip are [SETUP.md](SETUP.md). `setup` downloads t
 
 The turbo schedule is 8 Euler steps at shift 3. Classifier-free guidance is not run. A request `steps` value other than 8, or a `cfg_scale` other than 1, is rejected. Duration is 10 seconds through 10 minutes. The latent rate is 25 Hz. A 10 second clip is 250 frames and 125 tokens after the kernel-2 patch.
 
+## Registry
+
+The row key in `models/registry.json` is the packed folder, `acestep-v15-xl-turbo-fp8-fp4`. Registration leaves `alias` null, so that folder is the public id. `directory` is copied at open, so close the resident model after changing it. The listener stays up.
+
+```python
+from favlo.registry import set_pipeline_default, load_registry, save_registry
+
+set_pipeline_default("acestep-v15-xl-turbo-fp8-fp4")
+data = load_registry()
+data["media"]["music"] = "acestep-v15-xl-turbo-fp8-fp4"
+save_registry(data)
+```
+
+| Field | When | Values |
+|---|---|---|
+| `alias` | resolve | One name, with no colon and no slash, or `null`. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+| `directory` | open | The packed record `serve` opens. |
+
+The file key `media.music` is the folder `favlo media` uses when the command omits `--model` and that folder is this pipeline. The first music registration fills an empty key. A stored key stays.
+
+The sampling card (`default`, temperature 0) is copied at registration. The DiT schedule does not read it. A request `steps` other than 8, or a `cfg_scale` other than 1, is rejected. Those are not registry keys. `kv_cache` and `resident_percent` are discarded at open. `mtp`, `mtp_depth`, `enable_thinking`, `reasoning_effort`, `context_length`, and `max_prompt_tokens` may sit on the row and are not read. `context_length` is 2048 at registration. `pipeline`, `runtime`, `source`, and `pipeline_root` are the row's identity.
+
 ## Listener
 
 `favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the audio file. `--model` is optional. An omitted `--model` uses the music default in the registry when that folder is this pipeline. Otherwise it uses the first folder registered for this pipeline. `--kind` is unnecessary. This pipeline serves one kind.

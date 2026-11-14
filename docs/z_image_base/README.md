@@ -21,6 +21,42 @@ uv run favlo --z_image_base kernels
 
 The default image is 1024×1024. Width and height are multiples of 16 and at most 2560. The aspect ratio is between 1:3 and 3:1. `--steps` may be from 1 to 100. The seed selects the initial noise. A picture is `favlo media`. The pipeline command does not draw. The image agent reads [smoke.json](smoke.json): the prompt, the negative prompt, 512×512, and seed 0. Quality stays at the pipeline default. The sampler fields that a request omits come from the registry row: `steps`, `guidance`, `shift`, `cfg_truncation`, and `cfg_normalization`.
 
+## Registry
+
+The row key in `models/registry.json` is the packed folder, `Z-Image-int8` or `Z-Image-fp4`. Registration leaves `alias` null, so that folder is the public id. A sampler field is read from the file on each request. `directory` is copied at open, so close the resident model after changing it. The listener stays up.
+
+```python
+from favlo.registry import load_registry, save_registry
+
+data = load_registry()
+row = data["models"]["Z-Image-int8"]
+row["steps"] = 28
+row["guidance"] = 4
+row["shift"] = 6
+row["cfg_truncation"] = 1
+row["cfg_normalization"] = 0
+save_registry(data)
+```
+
+```text
+uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
+```
+
+| Field | When | Values |
+|---|---|---|
+| `steps` | request | An integer from 1 to 100. A missing key is 28. A request `steps` wins. |
+| `guidance` | request | A number from 0 to 100. A missing key is 4. |
+| `shift` | request | A number greater than 0 and at most 100. A missing key is 6. |
+| `cfg_truncation` | request | A number from 0 to 100. A missing key is 1. |
+| `cfg_normalization` | request | A number from 0 to 100, or `true` (1) or `false` (0). A missing key is 0. |
+| `alias` | resolve | One name, with no colon and no slash, or `null`. |
+| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
+| `directory` | open | The packed record `serve` opens. |
+
+The file key `media.image` is the folder `favlo media` uses when the command omits `--model` and that folder is this pipeline. The first image registration fills an empty key. A stored key stays.
+
+The sampling card (`generate`, temperature 0) is copied at registration. This pipeline does not read it. `kv_cache`, `resident_percent`, `mtp`, `mtp_depth`, `enable_thinking`, `reasoning_effort`, `context_length`, and `max_prompt_tokens` may sit on the row. This open discards `kv_cache` and `resident_percent` and does not read the others. `context_length` is 1536 at registration. `pipeline`, `runtime`, `source`, and `pipeline_root` are the row's identity.
+
 ## Listener
 
 `favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the PNG. `--model` is optional. An omitted `--model` uses the image default in the registry when that folder is this pipeline. Otherwise it uses the first folder registered for this pipeline. `--kind` is unnecessary. This pipeline serves one kind.
