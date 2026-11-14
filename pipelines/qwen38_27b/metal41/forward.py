@@ -1280,7 +1280,8 @@ class Qwen38Runtime:
             started = time.perf_counter()
             from qwen38_27b.metal41.chat import generation_cut
 
-            cut = generation_cut(self.root, prompt)
+            root = getattr(self, "root", None)
+            cut = generation_cut(root, prompt) if root is not None else None
             if cut is not None and hit < cut:
                 # The next encode drops this suffix when historical thinking is
                 # omitted. The file that stops here is the one that follow-up hits.
