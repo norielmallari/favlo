@@ -1273,10 +1273,25 @@ class Qwen38Runtime:
             from qwen38_27b.metal41.tower import bind_request
 
             bind_request(self, prompt, hit)
-            prefill_row = self._begin_phase("prefill", len(suffix))
+            uncached = len(suffix)
+            prefill_row = self._begin_phase("prefill", uncached)
             self._prefill_progress = prefill_row
             self._prefill_noted = 0
             started = time.perf_counter()
+            from qwen38_27b.metal41.chat import generation_cut
+
+            cut = generation_cut(self.root, prompt)
+            if cut is not None and hit < cut:
+                # The next encode drops this suffix when historical thinking is
+                # omitted. The file that stops here is the one that follow-up hits.
+                from qwen38_27b.metal41.prefill import prefill_ids
+
+                prefill_ids(self, prompt[hit:cut], hit, follow=prompt[cut])
+                self.filled = cut
+                self.prefix.note(prompt[:cut])
+                self._store_prefix()
+                hit = cut
+                suffix = prompt[hit:]
             if len(suffix) > 1:
                 from qwen38_27b.metal41.prefill import prefill_ids
 
@@ -1287,9 +1302,9 @@ class Qwen38Runtime:
             sampled_at = time.perf_counter()
             prefill_elapsed = max(sampled_at - started, 0.0)
             self._prefill_seconds = prefill_elapsed
-            self._note_prefill(len(suffix))
+            self._note_prefill(uncached)
             self._prefill_progress = None
-            self._end_phase(prefill_row, format_rate("prefill", len(suffix), prefill_elapsed))
+            self._end_phase(prefill_row, format_rate("prefill", uncached, prefill_elapsed))
             prefill_row = None
             self.prefix.note(prompt)
             self._store_prefix()

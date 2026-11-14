@@ -22,6 +22,7 @@ from qwen38_27b.metal41.chat import (
     decode_text,
     encode_chat,
     encode_text,
+    generation_cut,
     keeps_token_ids,
     load_tokenizer,
 )
@@ -747,6 +748,32 @@ def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
     follow_off = user + [{"role": "assistant", "content": "done"}]
     second_off = encode_chat(root, follow_off, None, False)
     assert second_off[: len(applied_off)] == applied_off
+
+
+def test_a_dropped_think_shares_the_prompt_before_the_generation_suffix() -> None:
+    root = installed_record()
+    if root is None or not (root / "chat_template.jinja").is_file():
+        pytest.skip("quantized record is not installed")
+    first = [{"role": "user", "content": "Describe the picture."}]
+    follow_up = [
+        *first,
+        {
+            "role": "assistant",
+            "reasoning_content": "The horse is running.",
+            "content": "The picture shows a horse running.",
+        },
+        {"role": "user", "content": "Build ledger.py."},
+    ]
+    for thinking in (True, False):
+        prompt = encode_chat(root, first, None, thinking, preserve_thinking=False)
+        cut = generation_cut(root, prompt)
+        assert cut is not None
+        nxt = encode_chat(root, follow_up, None, thinking, preserve_thinking=False)
+        assert nxt[:cut] == prompt[:cut]
+        assert nxt[: len(prompt)] != prompt
+    kept_prompt = encode_chat(root, first, None, True, preserve_thinking=False)
+    kept = encode_chat(root, follow_up, None, True, preserve_thinking=True)
+    assert kept[: len(kept_prompt)] == kept_prompt
 
 
 def test_prefill_progress_counts_finished_tokens() -> None:
