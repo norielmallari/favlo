@@ -75,9 +75,9 @@ _EMPTY_THINK = """{%- if reasoning_content %}
 def preserve_thinking(body: dict[str, Any]) -> bool:
     """Whether historical reasoning stays in the prompt.
 
-    Omitted is on, which is this checkpoint's default. A top-level
-    ``preserve_thinking`` wins over ``chat_template_kwargs``. False keeps a
-    think block only on assistant turns after the latest user message.
+    Omitted is off. A top-level ``preserve_thinking`` wins over
+    ``chat_template_kwargs``. False keeps a think block only on assistant
+    turns after the latest user message. True keeps historical traces.
     """
     flag = _preserve_flag(body.get("preserve_thinking")) if "preserve_thinking" in body else None
     if flag is None:
@@ -85,7 +85,7 @@ def preserve_thinking(body: dict[str, Any]) -> bool:
         if isinstance(kwargs, dict) and "preserve_thinking" in kwargs:
             flag = _preserve_flag(kwargs.get("preserve_thinking"))
     if flag is None:
-        return True
+        return False
     return flag
 
 
@@ -105,12 +105,12 @@ def encode_chat(
     enable_thinking: bool,
     reasoning_effort: str | None = None,
     *,
-    preserve_thinking: bool = True,
+    preserve_thinking: bool = False,
 ) -> list[int]:
     """Render the checkpoint template and encode it.
 
     ``preserve_thinking`` false drops reasoning on assistant turns before the
-    latest user message. True, the default, keeps every assistant think block.
+    latest user message. True keeps every assistant think block.
     """
     template = (root / "chat_template.jinja").read_text()
     if _CHECKOUT_EMPTY_THINK not in template:

@@ -181,9 +181,10 @@ def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = No
     """Whether historical reasoning stays in the prompt.
 
     A top-level ``preserve_thinking`` wins over ``chat_template_kwargs``.
-    Either wins over ``settings.json``. Omitted is on, so a later prompt
-    extends the stored prefix. False keeps a think block only on assistant
-    turns after the latest user message.
+    Either wins over ``settings.json``. Omitted is off, matching the card's
+    interleaved default: only the think block for the latest user message
+    stays. True keeps historical traces so a later prompt can extend the
+    stored prefix.
     """
     requested = (
         _preserve_flag(body.get("preserve_thinking"))
@@ -200,7 +201,7 @@ def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = No
         settings = load_settings(favlo_home())
     value = settings.get("preserve_thinking")
     if value is None:
-        return True
+        return False
     return bool(value)
 
 

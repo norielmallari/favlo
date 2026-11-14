@@ -1435,10 +1435,10 @@ def test_kv_widths_and_atlas_budget() -> None:
         assert max_position(root) == 262144
 
 
-def test_preserve_thinking_defaults_on_and_the_request_wins() -> None:
+def test_preserve_thinking_defaults_off_and_the_request_wins() -> None:
     from qwen36_35b_a3b.metal41.chat import preserve_thinking
 
-    assert preserve_thinking({}, {}) is True
+    assert preserve_thinking({}, {}) is False
     assert preserve_thinking({}, {"preserve_thinking": True}) is True
     assert preserve_thinking({}, {"preserve_thinking": False}) is False
     assert (
@@ -1456,6 +1456,7 @@ def test_preserve_thinking_defaults_on_and_the_request_wins() -> None:
         is True
     )
     assert preserve_thinking({"chat_template_kwargs": {}}, {"preserve_thinking": True}) is True
+    assert preserve_thinking({"chat_template_kwargs": {}}, {}) is False
     assert preserve_thinking({"preserve_thinking": True}, {}) is True
     assert preserve_thinking({"preserve_thinking": False}, {"preserve_thinking": True}) is False
     assert (

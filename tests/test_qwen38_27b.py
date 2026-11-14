@@ -576,12 +576,14 @@ def test_the_draw_tokenizer_is_not_the_lookup_method(monkeypatch: pytest.MonkeyP
     assert runtime._tokenizer().decode([1]) == "ok"
 
 
-def test_preserve_thinking_defaults_on_and_either_field_overrides() -> None:
+def test_preserve_thinking_defaults_off_and_either_field_overrides() -> None:
     from qwen38_27b.metal41.chat import preserve_thinking
 
-    assert preserve_thinking({}) is True
+    assert preserve_thinking({}) is False
+    assert preserve_thinking({"preserve_thinking": True}) is True
     assert preserve_thinking({"preserve_thinking": False}) is False
     assert preserve_thinking({"chat_template_kwargs": {"preserve_thinking": False}}) is False
+    assert preserve_thinking({"chat_template_kwargs": {"preserve_thinking": True}}) is True
     assert (
         preserve_thinking(
             {

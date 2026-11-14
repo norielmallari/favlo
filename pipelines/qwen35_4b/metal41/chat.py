@@ -65,8 +65,8 @@ def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = No
     """Whether historical reasoning stays in the prompt.
 
     A top-level ``preserve_thinking`` wins over ``chat_template_kwargs``.
-    Either wins over ``settings.json``. Omitted is on, so a later prompt
-    extends the stored prefix.
+    Either wins over ``settings.json``. Omitted is off. True keeps historical
+    traces so a later prompt can extend the stored prefix.
     """
     if "preserve_thinking" in body:
         return _preserve_flag(body.get("preserve_thinking"))
@@ -79,7 +79,7 @@ def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = No
         settings = load_settings(favlo_home())
     value = settings.get("preserve_thinking")
     if value is None:
-        return True
+        return False
     return bool(value)
 
 

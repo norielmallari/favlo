@@ -161,6 +161,14 @@ def test_vision_still_packing() -> None:
     assert sin.shape == cos.shape
 
 
+def test_preserve_thinking_defaults_off() -> None:
+    from qwen35_4b.metal41.chat import preserve_thinking
+
+    assert preserve_thinking({}, {}) is False
+    assert preserve_thinking({"preserve_thinking": True}, {}) is True
+    assert preserve_thinking({}, {"preserve_thinking": True}) is True
+
+
 def test_historical_reasoning_is_dropped() -> None:
     from qwen35_4b.metal41.chat import _without_historical_reasoning
 
