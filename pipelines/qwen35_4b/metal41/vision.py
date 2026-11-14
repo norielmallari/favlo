@@ -557,7 +557,7 @@ def _linear(
         "matmul_fp8",
         [ws.half, runtime.weights, runtime.weights, ws.wide],
         [u32(pad), u32(cols), u32(inner)],
-        (cols // 64, pad // 64, 1),
+        ((cols // 64) * (pad // 64), 1, 1),
         (128, 1, 1),
         offsets=[0, plane.data, plane.scale, 0],
     )

@@ -1,10 +1,11 @@
-"""Dense MTP draft and greedy serial verify for Qwen3.5-4B.
+"""Dense MTP draft and verify for Qwen3.5-4B.
 
 The official head predicts the next-next token from the backbone residual and
-the embedding of the just-chosen token. Weights are Metal ``half``. The live
-MTP attention plane uses the same Metal ``half`` / ``fp8_e4m3`` cache mode as
-the language layers. Greedy verify only steps confirmed tokens into the
-language cache, so a rejected draft needs no DeltaNet restore.
+the embedding of the just-chosen token. Weights are Metal ``half``. A window
+of two or three feeds shares one weight read. A rejected tail restores the
+Gated DeltaNet state, the convolution history, and the token counts, then
+replays only the feeds that stay. The live MTP attention plane uses the same
+Metal ``half`` / ``fp8_e4m3`` cache mode as the language layers.
 """
 
 from __future__ import annotations
@@ -59,6 +60,29 @@ def propose(runtime: Any, token: int, anchor: int, depth: int = DEPTH) -> list[i
         current = drafts[-1]
         at += 1
     return drafts
+
+
+def span_keep(
+    samples: list[int], expected: list[int], stop: set[int]
+) -> tuple[int, int, int | None]:
+    """Accepted drafts, feeds to keep, and the bonus when it is already a sample.
+
+    ``samples[i]`` is the token predicted by ``feeds[i]``. A stop match keeps
+    the feeds that produced it and does not ask for another step. A full match
+    with no stop returns a bonus of ``None``: the caller steps the last draft.
+    A miss keeps the feed that produced the replacement token.
+    """
+    if len(samples) != len(expected):
+        message = f"{len(samples)} samples and {len(expected)} drafts"
+        raise RuntimeError(message)
+    accepted = 0
+    while accepted < len(expected) and int(samples[accepted]) == int(expected[accepted]):
+        accepted += 1
+        if int(samples[accepted - 1]) in stop:
+            return accepted, accepted, int(samples[accepted - 1])
+    if accepted == len(expected):
+        return accepted, len(expected), None
+    return accepted, accepted + 1, int(samples[accepted])
 
 
 def verify(

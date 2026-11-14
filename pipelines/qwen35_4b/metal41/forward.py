@@ -160,7 +160,9 @@ class Qwen35Runtime:
         }
         gdn = GDN_STATE_BYTES
         conv = (LAYERS - len(FULL)) * _CONV_CH * (CONV_KERNEL - 1) * 4
+        self._conv_bytes = conv
         self._kv_slots = KV_SLOTS if self._mtp_ready else len(FULL)
+        snap = (gdn + conv + VOCAB * 4 + 3 * VOCAB * 4) if self._mtp_ready else 0
         self.refresh_budget()
         budget = self.max_memory
         capacity = CONTEXT
@@ -170,6 +172,7 @@ class Qwen35Runtime:
                 + _workspace_bytes(capacity, self.kv_cache)
                 + gdn
                 + conv
+                + snap
                 + cache_bytes(capacity, self.kv_cache, slots=self._kv_slots)
             )
             if need <= budget:
@@ -180,6 +183,7 @@ class Qwen35Runtime:
             + _workspace_bytes(capacity, self.kv_cache)
             + gdn
             + conv
+            + snap
             + cache_bytes(capacity, self.kv_cache, slots=self._kv_slots)
         )
         if need > budget:
@@ -232,6 +236,17 @@ class Qwen35Runtime:
         self.token_buf = s.allocate(4, zero=True)
         self.token_out = s.allocate(4, zero=True)
         self.token_counts = s.allocate(VOCAB * 4, zero=True)
+        self._gdn_snap = 0
+        self._conv_snap = 0
+        self._count_snap = 0
+        self._mtp_logits = 0
+        self._span_ids = 0
+        if self._mtp_ready:
+            self._gdn_snap = s.allocate(gdn, zero=True)
+            self._conv_snap = s.allocate(conv, zero=True)
+            self._count_snap = s.allocate(VOCAB * 4, zero=True)
+            self._mtp_logits = s.allocate(3 * VOCAB * 4, zero=True)
+            self._span_ids = s.allocate(16, zero=True)
         self.gdn_state = s.allocate(gdn, zero=True)
         self.conv_hist = s.allocate(conv, zero=True)
         plane = self._kv_slots * capacity * KV_HEADS * HEAD_DIM * self._kv_elem
@@ -393,7 +408,7 @@ class Qwen35Runtime:
         self._decode_seconds = 0.0
         self._mtp_accepts = 0
         self._mtp_tries = 0
-        from qwen35_4b.metal41.mtp import DEPTH, draft_window, kept_drafts, propose, verify
+        from qwen35_4b.metal41.mtp import DEPTH, draft_window, kept_drafts, propose
 
         depth = DEPTH if mtp_depth is None else mtp_depth
         use_mtp = bool(mtp) and bool(self._mtp_ready)
@@ -511,7 +526,7 @@ class Qwen35Runtime:
                     feeds, expected = draft_window(next_id, drafts, stop, room)
                     if expected:
                         self._mtp_tries += len(expected)
-                        accepted, nxt = verify(self, pos, feeds, expected, stop)
+                        accepted, nxt = self._verify_window(feeds, expected, stop)
                         self._mtp_accepts += accepted
                         emit, stop_mtp = kept_drafts(expected, accepted, stop)
                         for token in emit:
@@ -815,12 +830,16 @@ class Qwen35Runtime:
         if rows % row_tile != 0:
             message = f"matmul tile requires rows multiple of {row_tile}; got {rows}x{cols}"
             raise ValueError(message)
+        if inner % 128 != 0:
+            message = f"matmul K tile is 128; got inner {inner}"
+            raise ValueError(message)
         if cols % row_tile == 0:
+            tiles = (cols // row_tile) * (rows // row_tile)
             self.session.launch(
                 "matmul_fp8",
                 [self.pf_half, self.weights, self.weights, destination],
                 [u32(rows), u32(cols), u32(inner)],
-                (cols // row_tile, rows // row_tile, 1),
+                (tiles, 1, 1),
                 (128, 1, 1),
                 offsets=[0, plane.data, plane.scale, 0],
             )
@@ -828,11 +847,12 @@ class Qwen35Runtime:
         if cols % 32 != 0:
             message = f"matmul tile requires cols multiple of 32 or {row_tile}; got {rows}x{cols}"
             raise ValueError(message)
+        tiles = (cols // 32) * (rows // row_tile)
         self.session.launch(
             "matmul_fp8_n32",
             [self.pf_half, self.weights, self.weights, destination],
             [u32(rows), u32(cols), u32(inner)],
-            (cols // 32, rows // row_tile, 1),
+            (tiles, 1, 1),
             (128, 1, 1),
             offsets=[0, plane.data, plane.scale, 0],
         )
@@ -936,20 +956,22 @@ class Qwen35Runtime:
                 (256, 1, 1),
             )
         if wide and cols % 128 == 0 and rows % 32 == 0:
+            tiles = (cols // 128) * (rows // 32)
             session.launch(
                 "prefill_i8_m32",
                 [self.i8_act, weight, destination],
                 [u32(rows), u32(cols), u32(inner)],
-                (cols // 128, rows // 32, 1),
+                (tiles, 1, 1),
                 (128, 1, 1),
                 offsets=[0, data_off, 0],
             )
         else:
+            tiles = (cols // 64) * (rows // 64)
             session.launch(
                 "prefill_i8_n64",
                 [self.i8_act, weight, destination],
                 [u32(rows), u32(cols), u32(inner)],
-                (cols // 64, rows // 64, 1),
+                (tiles, 1, 1),
                 (128, 1, 1),
                 offsets=[0, data_off, 0],
             )
@@ -1651,6 +1673,494 @@ class Qwen35Runtime:
         self._gemv(
             self.attn, self._planes[f"layer.{layer}.o"], self.delta, HIDDEN, ATTN_HEADS * HEAD_DIM
         )
+
+    def _verify_window(
+        self, feeds: list[int], expected: list[int], stop: set[int]
+    ) -> tuple[int, int]:
+        """Verify a draft window. Two or three feeds share one weight read."""
+        from qwen35_4b.metal41.mtp import span_keep, verify
+
+        count = len(feeds)
+        if count < 2 or count > 3 or self.pos + count > self.max_pos:
+            return verify(self, self.pos, feeds, expected, stop)
+        start = self.pos
+        samples = self._span_forward(feeds)
+        accepted, keep, bonus = span_keep(samples, expected, stop)
+        if keep < count:
+            self._restore_span_snap()
+            self.pos = start
+            for token in feeds[:keep]:
+                self._step(int(token))
+            self._bump_tokens(samples[:keep])
+        if bonus is None:
+            bonus = self._step(int(expected[-1]), sample=True)
+        return accepted, int(bonus)
+
+    def _span_forward(self, tokens: list[int]) -> list[int]:
+        """Step ``tokens`` from ``pos``. Each fp8 weight row is read once."""
+        count = len(tokens)
+        start = self.pos
+        session = self.session
+        packed = b"".join(struct.pack("<I", int(token)) for token in tokens)
+        memory.store(self.pf_tokens, 0, packed)
+        session.begin()
+        try:
+            self._copy_words(self.gdn_state, self._gdn_snap, GDN_STATE_BYTES // 4)
+            self._copy_words(self.conv_hist, self._conv_snap, self._conv_bytes // 4)
+            self._copy_words(self.token_counts, self._count_snap, VOCAB)
+            session.launch(
+                "embed_rows",
+                [self.weights, self.weights, self.pf_tokens, self.pf_hidden],
+                [u32(count), u32(HIDDEN)],
+                (HIDDEN, count, 1),
+                (1, 1, 1),
+                offsets=[
+                    self._planes["embedding"].data,
+                    self._planes["embedding"].scale,
+                    0,
+                    0,
+                ],
+            )
+            for layer in range(LAYERS):
+                self._span_layer(layer, count, start)
+            session.launch(
+                "rmsnorm_rows",
+                [self.pf_hidden, self.weights, self.pf_normed],
+                [u32(HIDDEN), u32(count), f32(RMS_EPS), f32(1.0)],
+                (count, 1, 1),
+                (256, 1, 1),
+                offsets=[0, self._planes["final_norm"].data, 0],
+            )
+            self._gemv_span(
+                self.pf_normed,
+                self._planes["embedding"],
+                self._mtp_logits,
+                VOCAB,
+                HIDDEN,
+                count,
+                HIDDEN,
+                VOCAB,
+            )
+            groups = (VOCAB + 255) // 256
+            for index in range(count):
+                if self._presence or self._frequency:
+                    session.launch(
+                        "penalize",
+                        [self._mtp_logits, self.token_counts],
+                        [u32(VOCAB), f32(self._presence), f32(self._frequency)],
+                        ((VOCAB + 255) // 256, 1, 1),
+                        (256, 1, 1),
+                        offsets=[index * VOCAB * 4, 0],
+                    )
+                session.launch(
+                    "argmax_partial",
+                    [self._mtp_logits, self.argmax_v, self.argmax_i],
+                    [u32(VOCAB)],
+                    (groups, 1, 1),
+                    (32, 1, 1),
+                    offsets=[index * VOCAB * 4, 0, 0],
+                )
+                session.launch(
+                    "argmax_final",
+                    [self.argmax_v, self.argmax_i, self._span_ids],
+                    [u32(groups), u32(index)],
+                    (1, 1, 1),
+                    (32, 1, 1),
+                )
+                session.launch(
+                    "bump_count",
+                    [self.token_counts, self._span_ids],
+                    [u32(index)],
+                    (1, 1, 1),
+                    (1, 1, 1),
+                )
+            session.launch(
+                "copy_row_f32",
+                [self.pf_hidden, self.hidden],
+                [u32(HIDDEN), u32(count - 1)],
+                ((HIDDEN + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            session.end(wait=True)
+        except Exception:
+            if session.active:
+                session.end(wait=True)
+            raise
+        self.pos = start + count
+        raw = memory.load(self._span_ids, 0, count * 4)
+        return list(struct.unpack("<" + "I" * count, raw))
+
+    def _span_layer(self, layer: int, count: int, start: int) -> None:
+        session = self.session
+        session.launch(
+            "rmsnorm_rows",
+            [self.pf_hidden, self.weights, self.pf_normed],
+            [u32(HIDDEN), u32(count), f32(RMS_EPS), f32(1.0)],
+            (count, 1, 1),
+            (256, 1, 1),
+            offsets=[0, self._planes[f"layer.{layer}.in_norm"].data, 0],
+        )
+        if is_full(layer):
+            q_width = ATTN_HEADS * HEAD_DIM * 2
+            kv_width = KV_HEADS * HEAD_DIM
+            self._gemv_span(
+                self.pf_normed,
+                self._planes[f"layer.{layer}.q"],
+                self.pf_q,
+                q_width,
+                HIDDEN,
+                count,
+                HIDDEN,
+                q_width,
+            )
+            self._gemv_span(
+                self.pf_normed,
+                self._planes[f"layer.{layer}.k"],
+                self.pf_k,
+                kv_width,
+                HIDDEN,
+                count,
+                HIDDEN,
+                kv_width,
+            )
+            self._gemv_span(
+                self.pf_normed,
+                self._planes[f"layer.{layer}.v"],
+                self.pf_v,
+                kv_width,
+                HIDDEN,
+                count,
+                HIDDEN,
+                kv_width,
+            )
+            for index in range(count):
+                self._copy_row(self.pf_q, index, self.q_fuse, q_width)
+                self._copy_row(self.pf_k, index, self.k_buf, kv_width)
+                self._copy_row(self.pf_v, index, self.v_buf, kv_width)
+                self.pos = start + index
+                self._span_attend(layer)
+                self._copy_row(self.attn, 0, self.pf_attn, ATTN_HEADS * HEAD_DIM, dest_row=index)
+            self._gemv_span(
+                self.pf_attn,
+                self._planes[f"layer.{layer}.o"],
+                self.pf_delta,
+                HIDDEN,
+                ATTN_HEADS * HEAD_DIM,
+                count,
+                ATTN_HEADS * HEAD_DIM,
+                HIDDEN,
+            )
+        else:
+            self._gemv_span(
+                self.pf_normed,
+                self._planes[f"layer.{layer}.qkv"],
+                self.pf_mixed,
+                _CONV_CH,
+                HIDDEN,
+                count,
+                HIDDEN,
+                _CONV_CH,
+            )
+            self._gemv_span(
+                self.pf_normed,
+                self._planes[f"layer.{layer}.z"],
+                self.pf_z,
+                _GDN_Z,
+                HIDDEN,
+                count,
+                HIDDEN,
+                _GDN_Z,
+            )
+            self._gemv_span(
+                self.pf_normed,
+                self._planes[f"layer.{layer}.a"],
+                self.pf_a,
+                LINEAR_VALUE_HEADS,
+                HIDDEN,
+                count,
+                HIDDEN,
+                LINEAR_VALUE_HEADS,
+            )
+            self._gemv_span(
+                self.pf_normed,
+                self._planes[f"layer.{layer}.b"],
+                self.pf_b,
+                LINEAR_VALUE_HEADS,
+                HIDDEN,
+                count,
+                HIDDEN,
+                LINEAR_VALUE_HEADS,
+            )
+            for index in range(count):
+                self._copy_row(self.pf_mixed, index, self.mixed, _CONV_CH)
+                self._copy_row(self.pf_z, index, self.z_buf, _GDN_Z)
+                self._copy_row(self.pf_a, index, self.a_buf, LINEAR_VALUE_HEADS)
+                self._copy_row(self.pf_b, index, self.b_buf, LINEAR_VALUE_HEADS)
+                self.pos = start + index
+                self._span_gdn(layer)
+                self._copy_row(
+                    self.gdn_out,
+                    0,
+                    self.pf_gdn,
+                    LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM,
+                    dest_row=index,
+                )
+            self._gemv_span(
+                self.pf_gdn,
+                self._planes[f"layer.{layer}.out"],
+                self.pf_delta,
+                HIDDEN,
+                LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM,
+                count,
+                LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM,
+                HIDDEN,
+            )
+        session.launch(
+            "residual_add_rows",
+            [self.pf_hidden, self.pf_delta],
+            [u32(HIDDEN), u32(count)],
+            (HIDDEN, count, 1),
+            (1, 1, 1),
+        )
+        session.launch(
+            "rmsnorm_rows",
+            [self.pf_hidden, self.weights, self.pf_normed],
+            [u32(HIDDEN), u32(count), f32(RMS_EPS), f32(1.0)],
+            (count, 1, 1),
+            (256, 1, 1),
+            offsets=[0, self._planes[f"layer.{layer}.post_norm"].data, 0],
+        )
+        self._gemv_span(
+            self.pf_normed,
+            self._planes[f"layer.{layer}.gate"],
+            self.pf_gate,
+            INTERMEDIATE,
+            HIDDEN,
+            count,
+            HIDDEN,
+            INTERMEDIATE,
+        )
+        self._gemv_span(
+            self.pf_normed,
+            self._planes[f"layer.{layer}.up"],
+            self.pf_up,
+            INTERMEDIATE,
+            HIDDEN,
+            count,
+            HIDDEN,
+            INTERMEDIATE,
+        )
+        session.launch(
+            "silu_mul_rows",
+            [self.pf_gate, self.pf_up, self.pf_ff],
+            [u32(INTERMEDIATE), u32(count)],
+            (INTERMEDIATE, count, 1),
+            (1, 1, 1),
+        )
+        self._gemv_span(
+            self.pf_ff,
+            self._planes[f"layer.{layer}.down"],
+            self.pf_delta,
+            HIDDEN,
+            INTERMEDIATE,
+            count,
+            INTERMEDIATE,
+            HIDDEN,
+        )
+        session.launch(
+            "residual_add_rows",
+            [self.pf_hidden, self.pf_delta],
+            [u32(HIDDEN), u32(count)],
+            (HIDDEN, count, 1),
+            (1, 1, 1),
+        )
+
+    def _span_attend(self, layer: int) -> None:
+        session = self.session
+        length = self.pos + 1
+        k_data_off, k_scale_off = self._kv_offsets(layer)
+        qn = self._planes[f"layer.{layer}.q_norm"]
+        kn = self._planes[f"layer.{layer}.k_norm"]
+        session.launch(
+            "head_rmsnorm",
+            [self.q_fuse, self.weights],
+            [u32(HEAD_DIM * 2), f32(RMS_EPS), f32(1.0)],
+            (ATTN_HEADS, 1, 1),
+            (HEAD_DIM, 1, 1),
+            offsets=[0, qn.data],
+        )
+        session.launch(
+            "head_rmsnorm",
+            [self.k_buf, self.weights],
+            [u32(HEAD_DIM), f32(RMS_EPS), f32(1.0)],
+            (KV_HEADS, 1, 1),
+            (HEAD_DIM, 1, 1),
+            offsets=[0, kn.data],
+        )
+        rope_pos = max(0, self.pos + int(self._rope_delta))
+        session.launch(
+            "rope_heads",
+            [self.q_fuse],
+            [u32(ATTN_HEADS), u32(HEAD_DIM * 2), u32(ROPE_DIM), u32(rope_pos), f32(THETA)],
+            ((ATTN_HEADS * (ROPE_DIM // 2) + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        session.launch(
+            "rope_heads",
+            [self.k_buf],
+            [u32(KV_HEADS), u32(HEAD_DIM), u32(ROPE_DIM), u32(rope_pos), f32(THETA)],
+            ((KV_HEADS * (ROPE_DIM // 2) + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        for plane in (0, 1):
+            self._store_kv(
+                self.k_buf,
+                self.v_buf,
+                rows=False,
+                position=self.pos,
+                count=1,
+                plane=plane,
+                data_off=k_data_off,
+                scale_off=k_scale_off,
+            )
+        self._attend_decode(
+            self.q_fuse,
+            self.attn,
+            length=length,
+            data_off=k_data_off,
+            scale_off=k_scale_off,
+        )
+
+    def _span_gdn(self, layer: int) -> None:
+        session = self.session
+        gdn_i = self._gdn_index[layer]
+        state_off = gdn_i * LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM * LINEAR_HEAD_DIM * 4
+        hist_off = gdn_i * _CONV_CH * (CONV_KERNEL - 1) * 4
+        session.launch(
+            "conv_silu",
+            [self.weights, self.mixed, self.conv_hist],
+            [u32(_CONV_CH)],
+            ((_CONV_CH + 255) // 256, 1, 1),
+            (256, 1, 1),
+            offsets=[self._planes[f"layer.{layer}.conv"].data, 0, hist_off],
+        )
+        a_log = self._planes[f"layer.{layer}.A_log"]
+        dt = self._planes[f"layer.{layer}.dt_bias"]
+        session.launch(
+            "gdn_step",
+            [
+                self.gdn_state,
+                self.mixed,
+                self.a_buf,
+                self.b_buf,
+                self.weights,
+                self.weights,
+                self.gdn_out,
+            ],
+            [u32(LINEAR_KEY_HEADS), u32(LINEAR_VALUE_HEADS)],
+            (LINEAR_VALUE_HEADS, 1, 1),
+            (128, 1, 1),
+            offsets=[state_off, 0, 0, 0, a_log.data, dt.data, 0],
+        )
+        session.launch(
+            "gated_rmsnorm",
+            [self.gdn_out, self.z_buf, self.weights],
+            [f32(RMS_EPS)],
+            (LINEAR_VALUE_HEADS, 1, 1),
+            (LINEAR_HEAD_DIM, 1, 1),
+            offsets=[0, 0, self._planes[f"layer.{layer}.gdn_norm"].data],
+        )
+
+    def _gemv_span(
+        self,
+        activation: Any,
+        plane: Any,
+        destination: Any,
+        rows: int,
+        inner: int,
+        count: int,
+        act_stride: int,
+        dest_stride: int,
+    ) -> None:
+        x4 = rows % 4 == 0 and 256 <= rows <= 16384 and inner <= 4096
+        name = "gemv_fp8_x4_span" if x4 else "gemv_fp8_span"
+        grid = (rows // 4, 1, 1) if x4 else ((rows + GEMV_ROWS - 1) // GEMV_ROWS, 1, 1)
+        threads = (32, 1, 1) if x4 else (256, 1, 1)
+        self.session.launch(
+            name,
+            [activation, self.weights, self.weights, destination],
+            [u32(rows), u32(inner), u32(count), u32(act_stride), u32(dest_stride)],
+            grid,
+            threads,
+            offsets=[0, plane.data, plane.scale, 0],
+        )
+
+    def _copy_row(
+        self,
+        source: Any,
+        source_row: int,
+        destination: Any,
+        width: int,
+        *,
+        dest_row: int = 0,
+    ) -> None:
+        if dest_row == 0 and source_row >= 0:
+            self.session.launch(
+                "copy_row_f32",
+                [source, destination],
+                [u32(width), u32(source_row)],
+                ((width + 255) // 256, 1, 1),
+                (256, 1, 1),
+            )
+            return
+        self._copy_words(source, destination, width, source_row * width * 4, dest_row * width * 4)
+
+    def _copy_words(
+        self, source: Any, destination: Any, words: int, source_off: int = 0, dest_off: int = 0
+    ) -> None:
+        self.session.launch(
+            "copy_f32",
+            [source, destination],
+            [u32(words)],
+            ((words + 255) // 256, 1, 1),
+            (256, 1, 1),
+            offsets=[source_off, dest_off],
+        )
+
+    def _restore_span_snap(self) -> None:
+        session = self.session
+        session.begin()
+        try:
+            self._copy_words(self._gdn_snap, self.gdn_state, GDN_STATE_BYTES // 4)
+            self._copy_words(self._conv_snap, self.conv_hist, self._conv_bytes // 4)
+            self._copy_words(self._count_snap, self.token_counts, VOCAB)
+            session.end(wait=True)
+        except Exception:
+            if session.active:
+                session.end(wait=True)
+            raise
+
+    def _bump_tokens(self, tokens: list[int]) -> None:
+        if not tokens or not (self._presence or self._frequency):
+            return
+        packed = b"".join(struct.pack("<I", int(token)) for token in tokens)
+        memory.store(self._span_ids, 0, packed)
+        session = self.session
+        session.begin()
+        try:
+            for index in range(len(tokens)):
+                session.launch(
+                    "bump_count",
+                    [self.token_counts, self._span_ids],
+                    [u32(index)],
+                    (1, 1, 1),
+                    (1, 1, 1),
+                )
+            session.end(wait=True)
+        except Exception:
+            if session.active:
+                session.end(wait=True)
+            raise
 
     def _encode_sample(self) -> None:
         """Penalize, argmax, and the count bump in the open command buffer."""

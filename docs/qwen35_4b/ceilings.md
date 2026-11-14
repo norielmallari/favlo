@@ -10,7 +10,7 @@ The divisor for bandwidth is the 2 GiB streaming read on an M5 Pro with 48 GB: 7
 
 One chunk of 256 tokens (the matmul row multiple used for the isolated times below; the forward's `PREFILL_TILE` is 1024), with a 2048-key attention window on the eight full-attention layers. Prefill attention is `attend_prefill_half` on the half cache (online softmax, no score plane). Gated DeltaNet is `gdn_chunk`. The head is `gemv_fp8` on the last prompt row only.
 
-Designed dense path for FFN gate/up/down and GDN qkv/z/out: `restore_fp8_i8`, `quantize_half_i8`, `prefill_i8_n64` (or `prefill_i8_m32` for down), `scale_i8_f32`. GDN a/b and attention q/k/v/o stay on `matmul_fp8` / `matmul_fp8_n32`.
+Designed dense path for FFN gate/up/down and GDN qkv/z/out: `restore_fp8_i8`, `quantize_half_i8`, `prefill_i8_n64` (or `prefill_i8_m32` for down), `scale_i8_f32`. GDN a/b and attention q/k/v/o stay on `matmul_fp8` / `matmul_fp8_n32`. Those four matmul kernels walk threadgroups in Morton order inside each full 8×8 tile block and accumulate K in tiles of 128. The isolated times below were measured on the previous single-K kernels.
 
 Isolated int8 gate path at 256 rows (2 November 2026): `restore_fp8_i8` 1837.9 µs, `quantize_half_i8` 3.7 µs, `prefill_i8_n64` 268.9 µs, `scale_i8_f32` 37.7 µs. The same shape on `matmul_fp8` is 491.9 µs. The restore dominates an isolated command buffer; the live forward keeps one command buffer per chunk, so the matmul win shows up in serve rates.
 

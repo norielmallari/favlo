@@ -494,6 +494,127 @@ kernel void gemv_fp8_x4(
     }
 }
 
+// Same four-row dot as gemv_fp8_x4, for two or three activations. Each weight
+// row is read once and applied to every activation.
+kernel void gemv_fp8_x4_span(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    constant uint& count [[buffer(6)]],
+    constant uint& act_stride [[buffer(7)]],
+    constant uint& dest_stride [[buffer(8)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group << 2;
+    if (row0 >= rows || count < 1u || count > 3u) {
+        return;
+    }
+    uint blocks = inner >> 5;
+    float acc[3][4];
+    for (uint t = 0u; t < 3u; ++t) {
+        for (uint r = 0u; r < 4u; ++r) {
+            acc[t][r] = 0.0f;
+        }
+    }
+    device const uchar* w0 = weights + ulong(row0) * inner;
+    device const uchar* s0 = scales + ulong(row0) * blocks;
+    for (uint base = lane * 16u; base < inner; base += 512u) {
+        float4 xv[3][4];
+        for (uint t = 0u; t < count; ++t) {
+            device const float4* x4 = (device const float4*)(activation + ulong(t) * act_stride);
+            xv[t][0] = x4[(base >> 2) + 0u];
+            xv[t][1] = x4[(base >> 2) + 1u];
+            xv[t][2] = x4[(base >> 2) + 2u];
+            xv[t][3] = x4[(base >> 2) + 3u];
+        }
+        for (uint r = 0u; r < 4u; ++r) {
+            float scale = e8m0_code(s0[ulong(r) * blocks + (base >> 5)]);
+            device const uint4* packed = (device const uint4*)(w0 + ulong(r) * inner + base);
+            uint4 word4 = packed[0];
+            uint words[4] = {word4.x, word4.y, word4.z, word4.w};
+            for (uint t = 0u; t < count; ++t) {
+                float part = 0.0f;
+                for (uint j = 0u; j < 4u; ++j) {
+                    uint w = words[j];
+                    float4 x = xv[t][j];
+                    part = fma(E4M3_TABLE[w & 0xFFu], x.x, part);
+                    part = fma(E4M3_TABLE[(w >> 8) & 0xFFu], x.y, part);
+                    part = fma(E4M3_TABLE[(w >> 16) & 0xFFu], x.z, part);
+                    part = fma(E4M3_TABLE[w >> 24], x.w, part);
+                }
+                acc[t][r] = fma(part, scale, acc[t][r]);
+            }
+        }
+    }
+    for (uint t = 0u; t < count; ++t) {
+        float s0v = simd_sum(acc[t][0]);
+        float s1v = simd_sum(acc[t][1]);
+        float s2v = simd_sum(acc[t][2]);
+        float s3v = simd_sum(acc[t][3]);
+        if (lane == 0u) {
+            device float* dest = destination + ulong(t) * dest_stride + row0;
+            dest[0] = s0v;
+            dest[1] = s1v;
+            dest[2] = s2v;
+            dest[3] = s3v;
+        }
+    }
+}
+
+// Same row dot as gemv_fp8, for two or three activations. Eight rows per
+// threadgroup. Each weight row is read once.
+kernel void gemv_fp8_span(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    constant uint& count [[buffer(6)]],
+    constant uint& act_stride [[buffer(7)]],
+    constant uint& dest_stride [[buffer(8)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row = group * 8u + simd;
+    if (row >= rows || count < 1u || count > 3u) {
+        return;
+    }
+    device const uchar* w = weights + ulong(row) * inner;
+    device const uchar* s = scales + ulong(row) * (inner >> 5);
+    device const uint4* w16 = (device const uint4*)w;
+    float acc[3] = {0.0f, 0.0f, 0.0f};
+    for (uint base = lane * 16u; base < inner; base += 512u) {
+        uint4 packed = w16[base >> 4];
+        float scale = e8m0_code(s[base >> 5]);
+        uint words[4] = {packed.x, packed.y, packed.z, packed.w};
+        for (uint t = 0u; t < count; ++t) {
+            device const float4* x4 = (device const float4*)(activation + ulong(t) * act_stride);
+            float part = 0.0f;
+            for (uint j = 0u; j < 4u; ++j) {
+                uint word = words[j];
+                float4 xv = x4[(base >> 2) + j];
+                part = fma(E4M3_TABLE[word & 0xFFu], xv.x, part);
+                part = fma(E4M3_TABLE[(word >> 8) & 0xFFu], xv.y, part);
+                part = fma(E4M3_TABLE[(word >> 16) & 0xFFu], xv.z, part);
+                part = fma(E4M3_TABLE[word >> 24], xv.w, part);
+            }
+            acc[t] = fma(part, scale, acc[t]);
+        }
+    }
+    for (uint t = 0u; t < count; ++t) {
+        float sum = simd_sum(acc[t]);
+        if (lane == 0u) {
+            destination[ulong(t) * dest_stride + row] = sum;
+        }
+    }
+}
+
 // One simdgroup per row. Kept for checks; decode prefers gemv_fp8.
 kernel void gemv_fp8_vec(
     device const float* activation [[buffer(0)]],
@@ -830,8 +951,40 @@ kernel void copy_row_f32(
     }
 }
 
+// Morton order inside every full 8×8 block of output tiles. The right strip and
+// the bottom strip stay row-major, so each linear threadgroup owns one tile.
+static uint2 morton_tile(uint linear, uint tiles_n, uint tiles_m) {
+    const uint block = 8u;
+    uint full_nx = tiles_n / block;
+    uint full_ny = tiles_m / block;
+    uint full = full_nx * full_ny * (block * block);
+    if (linear < full && full_nx > 0u) {
+        uint which = linear / (block * block);
+        uint sub = linear - which * (block * block);
+        uint bx = which % full_nx;
+        uint by = which / full_nx;
+        uint mx = 0u;
+        uint my = 0u;
+        for (uint bit = 0u; bit < 3u; ++bit) {
+            mx |= ((sub >> (2u * bit)) & 1u) << bit;
+            my |= ((sub >> (2u * bit + 1u)) & 1u) << bit;
+        }
+        return uint2(bx * block + mx, by * block + my);
+    }
+    uint rest = linear - full;
+    uint full_x = full_nx * block;
+    uint full_y = full_ny * block;
+    uint right_w = tiles_n - full_x;
+    uint right_n = right_w * full_y;
+    if (right_w > 0u && rest < right_n) {
+        return uint2(full_x + (rest % right_w), rest / right_w);
+    }
+    rest -= right_n;
+    return uint2(rest % tiles_n, full_y + rest / tiles_n);
+}
+
 // y[rows, cols] = x[rows, inner] @ W[cols, inner]^T with fp8 W and E8M0 scales.
-// ``rows`` and ``cols`` are padded up to the 64-wide matmul2d tile.
+// One threadgroup per output tile, in Morton order. K accumulates in tiles of 128.
 kernel void matmul_fp8(
     device half* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
@@ -840,23 +993,39 @@ kernel void matmul_fp8(
     constant uint& rows [[buffer(4)]],
     constant uint& cols [[buffer(5)]],
     constant uint& inner [[buffer(6)]],
-    uint2 tgid [[threadgroup_position_in_grid]])
+    uint linear [[threadgroup_position_in_grid]])
 {
+    constexpr int BK = 128;
+    uint2 tile = morton_tile(linear, cols / 64u, rows / 64u);
+    int col0 = int(tile.x) * 64;
+    int row0 = int(tile.y) * 64;
     tensor<device half, dextents<int, 2>, tensor_inline> left(
         activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
     tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
         weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)}, scales_plane(scales));
     tensor<device float, dextents<int, 2>, tensor_inline> out(
         destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
-    constexpr auto desc = matmul2d_descriptor(64, 64, static_cast<int>(dynamic_extent), false, true, false);
-    matmul2d<desc, execution_simdgroups<4>> op;
-    auto tile_left = left.slice(0, int(tgid.y) * 64);
-    auto tile_right = right.slice(0, int(tgid.x) * 64);
-    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
-    op.run(tile_left, tile_right, tile_out);
+    constexpr auto write = matmul2d_descriptor(64, 64, BK, false, true, false);
+    constexpr auto add = matmul2d_descriptor(
+        64, 64, BK, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<write, execution_simdgroups<4>> first;
+    matmul2d<add, execution_simdgroups<4>> rest;
+    auto tile_out = out.slice(col0, row0);
+    int k_tiles = int(inner) / BK;
+    for (int k = 0; k < k_tiles; ++k) {
+        threadgroup_barrier(mem_flags::mem_none);
+        auto tile_left = left.slice(k * BK, row0);
+        auto tile_right = right.slice(k * BK, col0);
+        if (k == 0) {
+            first.run(tile_left, tile_right, tile_out);
+        } else {
+            rest.run(tile_left, tile_right, tile_out);
+        }
+    }
 }
 
 // Narrow N=32 tile for GDN a/b (LINEAR_VALUE_HEADS). Rows stay 64.
+// K accumulates in tiles of 128. Threadgroups walk in Morton order.
 kernel void matmul_fp8_n32(
     device half* activation [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
@@ -865,20 +1034,35 @@ kernel void matmul_fp8_n32(
     constant uint& rows [[buffer(4)]],
     constant uint& cols [[buffer(5)]],
     constant uint& inner [[buffer(6)]],
-    uint2 tgid [[threadgroup_position_in_grid]])
+    uint linear [[threadgroup_position_in_grid]])
 {
+    constexpr int BK = 128;
+    uint2 tile = morton_tile(linear, cols / 32u, rows / 64u);
+    int col0 = int(tile.x) * 32;
+    int row0 = int(tile.y) * 64;
     tensor<device half, dextents<int, 2>, tensor_inline> left(
         activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
     tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
         weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)}, scales_plane(scales));
     tensor<device float, dextents<int, 2>, tensor_inline> out(
         destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
-    constexpr auto desc = matmul2d_descriptor(64, 32, static_cast<int>(dynamic_extent), false, true, false);
-    matmul2d<desc, execution_simdgroups<4>> op;
-    auto tile_left = left.slice(0, int(tgid.y) * 64);
-    auto tile_right = right.slice(0, int(tgid.x) * 32);
-    auto tile_out = out.slice(int(tgid.x) * 32, int(tgid.y) * 64);
-    op.run(tile_left, tile_right, tile_out);
+    constexpr auto write = matmul2d_descriptor(64, 32, BK, false, true, false);
+    constexpr auto add = matmul2d_descriptor(
+        64, 32, BK, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<write, execution_simdgroups<4>> first;
+    matmul2d<add, execution_simdgroups<4>> rest;
+    auto tile_out = out.slice(col0, row0);
+    int k_tiles = int(inner) / BK;
+    for (int k = 0; k < k_tiles; ++k) {
+        threadgroup_barrier(mem_flags::mem_none);
+        auto tile_left = left.slice(k * BK, row0);
+        auto tile_right = right.slice(k * BK, col0);
+        if (k == 0) {
+            first.run(tile_left, tile_right, tile_out);
+        } else {
+            rest.run(tile_left, tile_right, tile_out);
+        }
+    }
 }
 
 kernel void rmsnorm_rows(
@@ -2173,7 +2357,7 @@ kernel void quantize_half_i8(
 }
 
 // y[rows, cols] (int32) = x[rows, inner] (int8) @ W[cols, inner]^T (int8).
-// ``rows`` and ``cols`` are multiples of 64.
+// ``rows`` and ``cols`` are multiples of 64. K accumulates in tiles of 128.
 kernel void prefill_i8_n64(
     device int8_t* activation [[buffer(0)]],
     device int8_t* weights [[buffer(1)]],
@@ -2181,26 +2365,39 @@ kernel void prefill_i8_n64(
     constant uint& rows [[buffer(3)]],
     constant uint& cols [[buffer(4)]],
     constant uint& inner [[buffer(5)]],
-    uint2 tgid [[threadgroup_position_in_grid]])
+    uint linear [[threadgroup_position_in_grid]])
 {
+    constexpr int BK = 128;
+    uint2 tile = morton_tile(linear, cols / 64u, rows / 64u);
+    int col0 = int(tile.x) * 64;
+    int row0 = int(tile.y) * 64;
     tensor<device int8_t, dextents<int, 2>, tensor_inline> left(
         activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
     tensor<device int8_t, dextents<int, 2>, tensor_inline> right(
         weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)});
     tensor<device int, dextents<int, 2>, tensor_inline> out(
         destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
-    constexpr auto desc = matmul2d_descriptor(64, 64, static_cast<int>(dynamic_extent), false, true, false);
-    matmul2d<desc, execution_simdgroups<4>> op;
-    auto tile_left = left.slice(0, int(tgid.y) * 64);
-    auto tile_right = right.slice(0, int(tgid.x) * 64);
-    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
-    // int8 x int8 -> int32 accumulates in a cooperative tensor, then stores.
-    auto acc = op.get_destination_cooperative_tensor<decltype(tile_left), decltype(tile_right), int>();
-    op.run(tile_left, tile_right, acc);
-    acc.store(tile_out);
+    constexpr auto write = matmul2d_descriptor(64, 64, BK, false, true, false);
+    constexpr auto add = matmul2d_descriptor(
+        64, 64, BK, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<write, execution_simdgroups<4>> first;
+    matmul2d<add, execution_simdgroups<4>> rest;
+    auto tile_out = out.slice(col0, row0);
+    int k_tiles = int(inner) / BK;
+    for (int k = 0; k < k_tiles; ++k) {
+        threadgroup_barrier(mem_flags::mem_none);
+        auto tile_left = left.slice(k * BK, row0);
+        auto tile_right = right.slice(k * BK, col0);
+        if (k == 0) {
+            first.run(tile_left, tile_right, tile_out);
+        } else {
+            rest.run(tile_left, tile_right, tile_out);
+        }
+    }
 }
 
 // 32 rows x 128 columns per group. ``rows`` is a multiple of 32, ``cols`` of 128.
+// K accumulates in tiles of 128. Threadgroups walk in Morton order.
 kernel void prefill_i8_m32(
     device int8_t* activation [[buffer(0)]],
     device int8_t* weights [[buffer(1)]],
@@ -2208,23 +2405,35 @@ kernel void prefill_i8_m32(
     constant uint& rows [[buffer(3)]],
     constant uint& cols [[buffer(4)]],
     constant uint& inner [[buffer(5)]],
-    uint2 tgid [[threadgroup_position_in_grid]])
+    uint linear [[threadgroup_position_in_grid]])
 {
+    constexpr int BK = 128;
+    uint2 tile = morton_tile(linear, cols / 128u, rows / 32u);
+    int col0 = int(tile.x) * 128;
+    int row0 = int(tile.y) * 32;
     tensor<device int8_t, dextents<int, 2>, tensor_inline> left(
         activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
     tensor<device int8_t, dextents<int, 2>, tensor_inline> right(
         weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)});
     tensor<device int, dextents<int, 2>, tensor_inline> out(
         destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(cols)});
-    constexpr auto desc = matmul2d_descriptor(32, 128, static_cast<int>(dynamic_extent), false, true, false);
-    matmul2d<desc, execution_simdgroups<4>> op;
-    auto tile_left = left.slice(0, int(tgid.y) * 32);
-    auto tile_right = right.slice(0, int(tgid.x) * 128);
-    auto tile_out = out.slice(int(tgid.x) * 128, int(tgid.y) * 32);
-    // int8 x int8 -> int32 accumulates in a cooperative tensor, then stores.
-    auto acc = op.get_destination_cooperative_tensor<decltype(tile_left), decltype(tile_right), int>();
-    op.run(tile_left, tile_right, acc);
-    acc.store(tile_out);
+    constexpr auto write = matmul2d_descriptor(32, 128, BK, false, true, false);
+    constexpr auto add = matmul2d_descriptor(
+        32, 128, BK, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<write, execution_simdgroups<4>> first;
+    matmul2d<add, execution_simdgroups<4>> rest;
+    auto tile_out = out.slice(col0, row0);
+    int k_tiles = int(inner) / BK;
+    for (int k = 0; k < k_tiles; ++k) {
+        threadgroup_barrier(mem_flags::mem_none);
+        auto tile_left = left.slice(k * BK, row0);
+        auto tile_right = right.slice(k * BK, col0);
+        if (k == 0) {
+            first.run(tile_left, tile_right, tile_out);
+        } else {
+            rest.run(tile_left, tile_right, tile_out);
+        }
+    }
 }
 
 // In place over the int32 accumulators: float(acc) * row_scale[row] * col_scale[col].

@@ -32,6 +32,8 @@ KERNELS = (
     "gemv_fp8",
     "gemv_fp8_add",
     "gemv_fp8_x4",
+    "gemv_fp8_x4_span",
+    "gemv_fp8_span",
     "gemv_fp8_vec",
     "gemv_half",
     "concat_pair",

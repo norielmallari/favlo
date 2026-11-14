@@ -234,6 +234,16 @@ class _StopSteps:
         return self._predictions.pop(0)
 
 
+def test_span_keep_matches_the_serial_window() -> None:
+    from qwen35_4b.metal41.mtp import span_keep
+
+    stop = {248044, 248046}
+    assert span_keep([11, 248046], [11, 248046], stop) == (2, 2, 248046)
+    assert span_keep([11, 5], [11, 12], stop) == (1, 2, 5)
+    assert span_keep([9], [11], stop) == (0, 1, 9)
+    assert span_keep([11, 12, 13], [11, 12, 13], stop) == (3, 3, None)
+
+
 def test_verify_leaves_a_stop_out_of_the_cache() -> None:
     runtime = _StopSteps([11, 248046, 99])
     accepted, nxt = verify(runtime, 0, [7, 11], [11, 248046], {248044, 248046})

@@ -17,7 +17,9 @@ def run_kernels() -> None:
     session = Session(owner)
     try:
         _check_gemv(session)
+        _check_span(session)
         _check_int8(session)
+        _check_int8_tiles(session)
         _check_rmsnorm(session)
         _check_gdn(session)
         _check_kv_half(session)
@@ -69,6 +71,100 @@ def _check_gemv(session: Session) -> None:
     got_v = np.frombuffer(memory.load(out_v, 0, rows * 4), dtype=np.float32)
     if not np.allclose(got_v, expect, rtol=2e-2, atol=2e-2):
         message = f"gemv_fp8_vec mismatch max={np.max(np.abs(got_v - expect))}"
+        raise RuntimeError(message)
+
+
+def _check_span(session: Session) -> None:
+    """A shared weight read matches one gemv per activation."""
+    rows, inner, count = 256, 512, 2
+    rng = np.random.default_rng(5)
+    activation = rng.standard_normal((count, inner)).astype(np.float32)
+    weight = rng.standard_normal((rows, inner)).astype(np.float32) * 0.02
+    data, scale = quantize_fp8(weight)
+    act = session.upload(np.ascontiguousarray(activation).tobytes())
+    w = session.upload(data)
+    sc = session.upload(scale)
+    alone = []
+    for index in range(count):
+        out = session.allocate(rows * 4, zero=True)
+        session.launch(
+            "gemv_fp8_x4",
+            [act, w, sc, out],
+            [u32(rows), u32(inner)],
+            (rows // 4, 1, 1),
+            (32, 1, 1),
+            offsets=[index * inner * 4, 0, 0, 0],
+        )
+        alone.append(np.frombuffer(memory.load(out, 0, rows * 4), dtype=np.float32).copy())
+    spanned = session.allocate(count * rows * 4, zero=True)
+    session.launch(
+        "gemv_fp8_x4_span",
+        [act, w, sc, spanned],
+        [u32(rows), u32(inner), u32(count), u32(inner), u32(rows)],
+        (rows // 4, 1, 1),
+        (32, 1, 1),
+    )
+    got = np.frombuffer(memory.load(spanned, 0, count * rows * 4), dtype=np.float32).reshape(count, rows)
+    for index in range(count):
+        if not np.allclose(got[index], alone[index], rtol=0.0, atol=0.0):
+            message = f"gemv_fp8_x4_span row {index} diverges"
+            raise RuntimeError(message)
+
+    wide_rows, wide_inner = 64, 256
+    wide_act = rng.standard_normal((count, wide_inner)).astype(np.float32)
+    wide_w = rng.standard_normal((wide_rows, wide_inner)).astype(np.float32) * 0.02
+    wide_data, wide_scale = quantize_fp8(wide_w)
+    wide_a = session.upload(np.ascontiguousarray(wide_act).tobytes())
+    wide_weight = session.upload(wide_data)
+    wide_sc = session.upload(wide_scale)
+    serial = []
+    for index in range(count):
+        out = session.allocate(wide_rows * 4, zero=True)
+        session.launch(
+            "gemv_fp8",
+            [wide_a, wide_weight, wide_sc, out],
+            [u32(wide_rows), u32(wide_inner)],
+            ((wide_rows + GEMV_ROWS - 1) // GEMV_ROWS, 1, 1),
+            (256, 1, 1),
+            offsets=[index * wide_inner * 4, 0, 0, 0],
+        )
+        serial.append(np.frombuffer(memory.load(out, 0, wide_rows * 4), dtype=np.float32).copy())
+    wide_span = session.allocate(count * wide_rows * 4, zero=True)
+    session.launch(
+        "gemv_fp8_span",
+        [wide_a, wide_weight, wide_sc, wide_span],
+        [u32(wide_rows), u32(wide_inner), u32(count), u32(wide_inner), u32(wide_rows)],
+        ((wide_rows + GEMV_ROWS - 1) // GEMV_ROWS, 1, 1),
+        (256, 1, 1),
+    )
+    wide_got = np.frombuffer(memory.load(wide_span, 0, count * wide_rows * 4), dtype=np.float32)
+    wide_got = wide_got.reshape(count, wide_rows)
+    for index in range(count):
+        if not np.allclose(wide_got[index], serial[index], rtol=0.0, atol=0.0):
+            message = f"gemv_fp8_span row {index} diverges"
+            raise RuntimeError(message)
+
+
+def _check_int8_tiles(session: Session) -> None:
+    """Morton walk and a split K match a host int32 product."""
+    rows, cols, inner = 512, 512, 256
+    rng = np.random.default_rng(6)
+    activation = rng.integers(-20, 20, size=(rows, inner), dtype=np.int32)
+    weight = rng.integers(-20, 20, size=(cols, inner), dtype=np.int32)
+    expect = activation @ weight.T
+    act = session.upload(np.ascontiguousarray(activation.astype(np.int8)).tobytes())
+    w = session.upload(np.ascontiguousarray(weight.astype(np.int8)).tobytes())
+    out = session.allocate(rows * cols * 4, zero=True)
+    session.launch(
+        "prefill_i8_n64",
+        [act, w, out],
+        [u32(rows), u32(cols), u32(inner)],
+        ((cols // 64) * (rows // 64), 1, 1),
+        (128, 1, 1),
+    )
+    got = np.frombuffer(memory.load(out, 0, rows * cols * 4), dtype=np.int32).reshape(rows, cols)
+    if not np.array_equal(got, expect):
+        message = f"prefill_i8_n64 tiled mismatch max={np.max(np.abs(got - expect))}"
         raise RuntimeError(message)
 
 
@@ -129,8 +225,8 @@ def _check_int8(session: Session) -> None:
     # Both tiles. 1% of the peak covers the two int8 roundings.
     limit = 0.02 * float(np.max(np.abs(expect)))
     for kernel, groups in (
-        ("prefill_i8_n64", (cols // 64, rows // 64, 1)),
-        ("prefill_i8_m32", (cols // 128, rows // 32, 1)),
+        ("prefill_i8_n64", ((cols // 64) * (rows // 64), 1, 1)),
+        ("prefill_i8_m32", ((cols // 128) * (rows // 32), 1, 1)),
     ):
         out = session.allocate(rows * cols * 4, zero=True)
         session.launch(
