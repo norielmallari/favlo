@@ -364,14 +364,6 @@ class Gemma4Runtime:
             from gemma4_26b_a4b.metal41.vision import VisionTower, expand_image_placeholders
 
             prompt = expand_image_placeholders(prompt, pictures)
-            # Warm the soft-token cache (and log patches/cache) even when a
-            # prefix hit already covers the image span after a serve restart.
-            tower = self._vision
-            if tower is None:
-                tower = VisionTower(self.session, self.root, self._owner)
-                self._vision = tower
-            for blob in pictures:
-                tower.encode(blob, note=self._status)
         visual = bool(pictures) or IMAGE_TOKEN in prompt or BOI_TOKEN in prompt
         self._hit_limit = False
         rng = random.Random(seed)
@@ -388,10 +380,27 @@ class Gemma4Runtime:
         decode_row = None
         try:
             start = time.perf_counter()
-            if visual:
-                self._prefill_visual(prompt, hit, pictures)
-            else:
-                self._prefill(prompt[hit:])
+            from gemma4_26b_a4b.metal41.chat import generation_cut
+
+            cut = generation_cut(self.root, prompt)
+            logged_cached = False
+            if cut is not None and hit < cut:
+                # The next encode drops this thought channel. The file that
+                # stops here is the one that follow-up hits through the still.
+                if visual:
+                    self._prefill_visual(prompt, hit, pictures, stop=cut)
+                    logged_cached = True
+                else:
+                    self._prefill(prompt[hit:cut], finish=False)
+                if self.filled == cut:
+                    self.prefix.note(prompt[:cut])
+                    self._store_prefix()
+                    hit = cut
+            if not self._stop:
+                if visual:
+                    self._prefill_visual(prompt, hit, pictures, log_cached=not logged_cached)
+                else:
+                    self._prefill(prompt[hit:])
             self.session.flush()
             prompt_n = pending
             self.prompt_tokens = self.filled
@@ -574,58 +583,76 @@ class Gemma4Runtime:
             last = finish and start + len(span) == len(tokens)
             self._span(span, last, noted=start)
 
-    def _prefill_visual(self, prompt: list[int], hit: int, images: list[bytes]) -> None:
-        from gemma4_26b_a4b.metal41.vision import VisionTower
+    def _prefill_visual(
+        self,
+        prompt: list[int],
+        hit: int,
+        images: list[bytes],
+        *,
+        stop: int | None = None,
+        log_cached: bool = True,
+    ) -> None:
+        from gemma4_26b_a4b.metal41.vision import VisionTower, image_soft_tokens
 
+        limit = len(prompt) if stop is None else stop
         soft_markers = prompt.count(IMAGE_TOKEN)
-        expected = 0
-        if images:
-            from gemma4_26b_a4b.metal41.vision import image_soft_tokens
-
-            expected = sum(image_soft_tokens(blob) for blob in images)
+        expected = sum(image_soft_tokens(blob) for blob in images) if images else 0
         if soft_markers != expected:
             message = "image parts do not match the image tokens"
             raise RuntimeError(message)
         tower = self._vision
-        if tower is None:
-            tower = VisionTower(self.session, self.root, self._owner)
-            self._vision = tower
-        pos = hit
+        pos = 0
         image_i = 0
-        while pos < len(prompt):
+        while pos < limit:
             if self._stop:
                 return
             if prompt[pos] == BOI_TOKEN:
                 end = pos + 1
-                self._prefill(prompt[pos:end], finish=False)
-                pos = end
-                if pos >= len(prompt) or prompt[pos] != IMAGE_TOKEN:
+                if end >= len(prompt) or prompt[end] != IMAGE_TOKEN:
                     message = "begin-of-image is missing soft placeholders"
                     raise RuntimeError(message)
-                start = pos
-                while pos < len(prompt) and prompt[pos] == IMAGE_TOKEN:
-                    pos += 1
-                span = pos - start
+                start = end
+                while end < len(prompt) and prompt[end] == IMAGE_TOKEN:
+                    end += 1
+                span = end - start
+                if end >= len(prompt) or prompt[end] != EOI_TOKEN:
+                    message = "image placeholders are missing end-of-image"
+                    raise RuntimeError(message)
+                block = end + 1
+                if block > limit:
+                    message = "the generation suffix splits an image"
+                    raise RuntimeError(message)
+                if block <= hit:
+                    if log_cached:
+                        self._status(f"vision cached {span}")
+                    image_i += 1
+                    pos = block
+                    continue
+                if pos < hit:
+                    message = "the prefix hit splits an image"
+                    raise RuntimeError(message)
+                self._prefill(prompt[pos : pos + 1], finish=False)
+                if tower is None:
+                    tower = VisionTower(self.session, self.root, self._owner)
+                    self._vision = tower
                 handle, count = tower.encode(images[image_i], note=self._status)
                 image_i += 1
                 if count != span:
                     message = f"soft tokens {count} do not match placeholders {span}"
                     raise RuntimeError(message)
                 self._accept_rows(handle, count, finish=False)
-                if pos >= len(prompt) or prompt[pos] != EOI_TOKEN:
-                    message = "image placeholders are missing end-of-image"
-                    raise RuntimeError(message)
-                end = pos + 1
-                self._prefill(prompt[pos:end], finish=end == len(prompt))
-                pos = end
+                self._prefill(prompt[end:block], finish=block == len(prompt))
+                pos = block
                 continue
             if prompt[pos] == IMAGE_TOKEN:
                 message = "image placeholders must follow begin-of-image"
                 raise RuntimeError(message)
             end = pos + 1
-            while end < len(prompt) and prompt[end] not in (IMAGE_TOKEN, BOI_TOKEN):
+            while end < limit and prompt[end] not in (IMAGE_TOKEN, BOI_TOKEN):
                 end += 1
-            self._prefill(prompt[pos:end], finish=end == len(prompt))
+            take = max(pos, hit)
+            if take < end:
+                self._prefill(prompt[take:end], finish=end == len(prompt))
             pos = end
 
     def _span(self, tokens: list[int], last: bool, *, noted: int) -> None:

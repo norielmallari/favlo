@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from favlo.reply import MemoryReply
 from gemma4_26b_a4b.metal41.chat import handle_responses
 from gemma4_26b_a4b.metal41.geometry import CONTEXT
@@ -390,3 +392,123 @@ def test_truncation_disabled_rejects_an_overlong_prompt(monkeypatch: Any) -> Non
     reply = MemoryReply()
     handle_responses.handle_responses(reply, runtime, {"input": "Hi"}, None, None, {})
     assert reply.status == 400
+
+
+def test_a_dropped_thought_shares_the_prompt_before_the_generation_suffix() -> None:
+    root = Path("models/gemma-4-26B-A4B-it-fp8-e20")
+    if not (root / "tokenizer.json").is_file():
+        pytest.skip("tokenizer is not installed")
+    from gemma4_26b_a4b.metal41.chat import decode_text, encode_chat, generation_cut
+
+    picture = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": "Describe the picture."},
+            ],
+        }
+    ]
+    follow = [
+        *picture,
+        {"role": "assistant", "content": "A horse is running."},
+        {"role": "user", "content": "Build ledger.py."},
+    ]
+    prompt = encode_chat(root, picture, False)
+    cut = generation_cut(root, prompt)
+    assert cut is not None
+    assert "<|image|>" in decode_text(root, prompt[:cut])
+    nxt = encode_chat(root, follow, False)
+    assert nxt[:cut] == prompt[:cut]
+    assert nxt[: len(prompt)] == prompt
+    plain = encode_chat(root, picture, True)
+    assert generation_cut(root, plain) is None
+    assert encode_chat(root, follow, True)[: len(plain)] == plain
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read",
+                "description": "read",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    opened_messages = [
+        {"role": "user", "content": "Read the file."},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": {}},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "1", "name": "read", "content": "ok"},
+    ]
+    opened = encode_chat(root, opened_messages, True, tools)
+    opened_cut = generation_cut(root, opened)
+    assert opened_cut is not None
+    dropped = encode_chat(
+        root,
+        [
+            *opened_messages,
+            {
+                "role": "assistant",
+                "reasoning_content": "The file is short.",
+                "content": "Done.",
+            },
+            {"role": "user", "content": "Now write ledger.py."},
+        ],
+        True,
+        tools,
+        preserve_thinking=False,
+    )
+    assert dropped[:opened_cut] == opened[:opened_cut]
+    assert dropped[: len(opened)] != opened
+
+
+def test_a_covered_image_span_is_not_encoded(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gemma4_26b_a4b.metal41.forward import Gemma4Runtime
+    from gemma4_26b_a4b.metal41.geometry import BOI_TOKEN, EOI_TOKEN, IMAGE_TOKEN
+
+    monkeypatch.setattr("gemma4_26b_a4b.metal41.vision.image_soft_tokens", lambda _blob: 2)
+    block = [BOI_TOKEN, IMAGE_TOKEN, IMAGE_TOKEN, EOI_TOKEN]
+
+    class _Walk:
+        def __init__(self) -> None:
+            self._stop = False
+            self._vision = self
+            self.notes: list[str] = []
+            self.encoded: list[bytes] = []
+            self.prefilled: list[list[int]] = []
+
+        def _status(self, text: str) -> None:
+            self.notes.append(text)
+
+        def encode(self, blob: bytes, note: Any = None) -> tuple[object, int]:
+            del note
+            self.encoded.append(blob)
+            return object(), 2
+
+        def _prefill(self, tokens: list[int], *, finish: bool = True) -> None:
+            del finish
+            self.prefilled.append(list(tokens))
+
+        def _accept_rows(self, source: object, count: int, *, finish: bool) -> None:
+            del source, count, finish
+
+    covered = _Walk()
+    Gemma4Runtime._prefill_visual(covered, block, len(block), [b"cached"])
+    assert covered.notes == ["vision cached 2"]
+    assert covered.encoded == []
+    assert covered.prefilled == []
+
+    later = _Walk()
+    Gemma4Runtime._prefill_visual(later, block + block, len(block), [b"cached", b"fresh"])
+    assert later.notes == ["vision cached 2"]
+    assert later.encoded == [b"fresh"]
+    assert later.prefilled == [[BOI_TOKEN], [EOI_TOKEN]]

@@ -126,6 +126,35 @@ def encode_chat(
     return list(load_tokenizer(root).encode(text).ids)
 
 
+def encode_text(root: Path, text: str) -> list[int]:
+    return list(load_tokenizer(root).encode(text).ids)
+
+
+_GENERATION_SUFFIX: dict[Path, tuple[list[int], list[int]]] = {}
+
+
+def generation_cut(root: Path, prompt: list[int]) -> int | None:
+    """Index where the thought-channel generation suffix starts.
+
+    Thinking off ends with the closed empty thought. Thinking on, after a
+    tool result, ends with the open thought. A follow-up that drops that
+    channel does not repeat the suffix, so the tokens before it are the
+    prefix that follow-up still shares.
+    """
+    pair = _GENERATION_SUFFIX.get(root)
+    if pair is None:
+        pair = (
+            encode_text(root, "<|channel>thought\n<channel|>"),
+            encode_text(root, "<|channel>thought\n"),
+        )
+        _GENERATION_SUFFIX[root] = pair
+    for suffix in pair:
+        count = len(suffix)
+        if count and len(prompt) > count and prompt[-count:] == suffix:
+            return len(prompt) - count
+    return None
+
+
 def decode_text(root: Path, tokens: list[int]) -> str:
     if not tokens:
         return ""
