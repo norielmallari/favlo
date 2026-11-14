@@ -38,3 +38,15 @@ The banner prints the loaded plane, MTP, thinking, and the decode cap.
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+### 15 November 2026 — 2048-token prompt
+
+Same plane, MTP off, and the instruct card. A cold 2048-token prompt prefilled at 1471.55 tok/s and decoded 128 tokens at 26.63 tok/s. End to end was 350.97 tok/s. A search on 15 November 2026 did not find 1471.55 and 26.63 in these sources. Queries: "1471.55 OR 26.63 OR 350.97 Qwen3.5-4B prefill decode tok/s", and "Qwen3.5-4B pp2048 tg128 MLX M5 Pro fp8 prefill tok/s 2026". Closest overlaps were [oMLX Qwen3.5-4B-8bit on a 20-core M5 Pro](https://omlx.ai/benchmarks/performance/x0t6bie9) at 2643 tok/s prefill and 55.4 tok/s decode at 4096 context, [oMLX Qwen3.5-4B-MLX-8bit on a 20-core M5 Pro](https://omlx.ai/benchmarks/performance/wia8vwen) at 2564 tok/s prefill and 52.5 tok/s decode at 4096 context, and [FastFlowLM](https://fastflowlm.com/docs/benchmarks/qwen3.5_results/) at 445.63 tok/s prefill and 15.6 tok/s decode for Qwen3.5-4B at 2048 tokens on XDNA2. None of them is this `fp8_e4m3` table. The 512 and 10000 rows above stay the 4 November measurement.
+
+```text
+uv run python -m harness.synthetic --model qwen35_4b --tokens 2048 --decode 128 --thinking off --mtp off
+```
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 2048 | 1471.55 tok/s (2048 tok in 1.39 s) | 26.63 tok/s (128 tok in 4.81 s) | 350.97 tok/s (2176 tok in 6.20 s) |
