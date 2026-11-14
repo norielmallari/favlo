@@ -45,3 +45,5 @@ Later finds are appended here. The sections above stay as committed.
 23 October 2026. A full chunk no longer clears the norm buffer or the half tile, and it submits every 4 layers. The timed set sums to 5245.3 ms, 390 tok/s.
 
 30 October 2026. A full-accept MTP window on an M5 Pro with 48 GB sums to 146.7 ms, 20.45 tok/s. The bandwidth ceiling of that window is 135.3 ms, 22.2 tok/s, at the 254.6 GB/s copy in [../ceilings.md](../ceilings.md). The table is in that note. The isolated fp4 sum above is not this window.
+
+15 November 2026. Language projections whose tile grid is at least 8 by 8 walk in Morton order. The fp8 down projection and the attention score stay row-major. The timed set in [../ceilings.md](../ceilings.md) sums to 5175.6 ms, 396 tok/s.
