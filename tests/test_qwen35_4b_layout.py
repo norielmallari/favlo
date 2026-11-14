@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35_4b"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -159,6 +161,34 @@ def test_vision_still_packing() -> None:
     cos, sin = vision_rotary(4, 4)
     assert cos.shape == (16, 64)
     assert sin.shape == cos.shape
+
+
+def test_a_dropped_think_shares_the_prompt_before_the_generation_suffix() -> None:
+    root = Path("models") / "Qwen3.5-4B-fp8"
+    if not (root / "chat_template.jinja").is_file() or not (root / "tokenizer.json").is_file():
+        pytest.skip("chat template is not installed")
+    from qwen35_4b.metal41.chat import encode_chat, generation_cut
+
+    first = [{"role": "user", "content": "Describe the picture."}]
+    follow_up = [
+        *first,
+        {
+            "role": "assistant",
+            "reasoning_content": "The horse is running.",
+            "content": "The picture shows a horse running.",
+        },
+        {"role": "user", "content": "Build ledger.py."},
+    ]
+    for thinking in (True, False):
+        prompt = encode_chat(root, first, None, thinking, preserve_thinking=False)
+        cut = generation_cut(root, prompt)
+        assert cut is not None
+        nxt = encode_chat(root, follow_up, None, thinking, preserve_thinking=False)
+        assert nxt[:cut] == prompt[:cut]
+        assert nxt[: len(prompt)] != prompt
+    kept_prompt = encode_chat(root, first, None, True, preserve_thinking=False)
+    kept = encode_chat(root, follow_up, None, True, preserve_thinking=True)
+    assert kept[: len(kept_prompt)] == kept_prompt
 
 
 def test_preserve_thinking_defaults_off() -> None:

@@ -231,6 +231,30 @@ def encode_text(root: Path, text: str) -> list[int]:
     return list(load_tokenizer(root).encode(text, add_special_tokens=False).ids)
 
 
+_GENERATION_SUFFIX: dict[Path, tuple[list[int], list[int]]] = {}
+
+
+def generation_cut(root: Path, prompt: list[int]) -> int | None:
+    """Index where the generation suffix starts, when this prompt ends with one.
+
+    Thinking leaves ``<think>\\n``. Instruct leaves the closed empty block.
+    A later prompt that omits historical thinking does not repeat that suffix,
+    so the tokens before it are the prefix the follow-up still shares.
+    """
+    pair = _GENERATION_SUFFIX.get(root)
+    if pair is None:
+        pair = (
+            encode_text(root, "<think>\n\n</think>\n\n"),
+            encode_text(root, "<think>\n"),
+        )
+        _GENERATION_SUFFIX[root] = pair
+    for suffix in pair:
+        count = len(suffix)
+        if count and len(prompt) > count and prompt[-count:] == suffix:
+            return len(prompt) - count
+    return None
+
+
 def tool_close_id(root: Path) -> int:
     """Token id of ``</tool_call>``. A forced open stops when this lands."""
     closed = encode_text(root, "</tool_call>")

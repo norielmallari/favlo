@@ -418,15 +418,33 @@ class Qwen35Runtime:
         close_call = int(tool_close) if tool_close is not None and pending_forced else None
         try:
             done = 0
-            while done < uncached:
+            from qwen35_4b.metal41.chat import generation_cut
+
+            cut = generation_cut(self.root, prompt)
+            if cut is not None and hit < cut:
+                # The next encode drops this suffix when historical thinking is
+                # omitted. The file that stops here is the one that follow-up hits.
+                span = prompt[hit:cut]
+                while done < len(span):
+                    self._check()
+                    piece = span[done : done + _TILE]
+                    done += len(piece)
+                    self._prefill_chunk([int(token) for token in piece], logits=False)
+                    progress.note_prefill(self._prefill_progress, done)
+                self.prefix.note(prompt[:cut])
+                self._store_prefix()
+                hit = cut
+                suffix = prompt[hit:]
+            tail = 0
+            while tail < len(suffix):
                 self._check()
-                piece = suffix[done : done + _TILE]
-                done += len(piece)
+                piece = suffix[tail : tail + _TILE]
+                tail += len(piece)
                 self._prefill_chunk(
                     [int(token) for token in piece],
-                    logits=done >= uncached,
+                    logits=tail >= len(suffix),
                 )
-                progress.note_prefill(self._prefill_progress, done)
+                progress.note_prefill(self._prefill_progress, done + tail)
             self.session.wait()
             while produced < max_tokens:
                 self._check()
