@@ -9,7 +9,7 @@ checkpoint processor: rescale by 1/255, then mean 0.5 and standard deviation
 resampled with Catmull-Rom so both sides stay on that grid and the pixel
 count stays inside 65536 through 16777216. ``detail`` and per-part
 ``min_pixels`` and ``max_pixels`` choose the budget inside those edges.
-``embed_image`` runs the Metal tower for one still; the row cache lives in
+``embed_image`` runs the Metal tower for one still; the file cache lives in
 ``tower``.
 """
 

@@ -3,19 +3,19 @@
 The record stores the tower. A text forward leaves it there. An image request
 copies that span once, then each block is a layer norm, an fp4 projection,
 and a residual. The merger writes one language vector per 2×2 patch block.
-Each still has its own row cache, keyed by the checkpoint, the byte hash, and
-the pixel bounds. Eight entries stay in memory, and the same rows are written
-under ``~/.favlo/vision-cache/qwen38_27b/``. A span whose tokens sit inside
-the prefix hit logs ``vision cached`` and uploads no rows. A span past the
-hit reuses that entry and logs ``vision cache``. A miss runs the tower, logs
-``vision patches`` and ``vision merged``, and stores the rows.
+Each still is one file under ``~/.favlo/vision-cache/qwen38_27b/``, keyed by
+the checkpoint path, the byte hash, and the pixel bounds. The file holds the
+merged rows, the patch-grid height, and the patch-grid width. The process
+does not keep those rows. A span whose tokens sit inside the prefix hit logs
+``vision cached`` and uploads no rows. A span past the hit reads that file
+and logs ``vision cache``. A miss runs the tower, logs ``vision patches``
+and ``vision merged``, and stores the file.
 """
 
 from __future__ import annotations
 
 import hashlib
 import struct
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -34,15 +34,13 @@ _DEPTH = 27
 _POS_SIDE = 48
 _POS_ROWS = _POS_SIDE * _POS_SIDE
 _EPS = 1e-6
-_ROW_CACHE: dict[tuple[Any, ...], np.ndarray] = {}
-_ROW_LIMIT = 8
+_PIPELINE = "qwen38_27b"
 
 
 def bind_request(runtime: Any, prompt: list[int], hit: int) -> None:
     """Build RoPE ids and embed only the stills that sit past ``hit``."""
     images = list(getattr(runtime, "_vision_images", None) or [])
-    runtime._vision_rows = None
-    runtime._vision_map = None
+    release_vision(runtime)
     if not images:
         runtime._rope_ids = None
         runtime._rope_next = None
@@ -126,6 +124,17 @@ def embed_image(
     return host, int(grid_h), int(grid_w)
 
 
+def release_vision(runtime: Any) -> None:
+    """Return this request's device copy of the merged rows."""
+    from qwen38_27b.metal41.session import release_buffer
+
+    rows = getattr(runtime, "_vision_rows", None)
+    runtime._vision_rows = None
+    runtime._vision_map = None
+    if rows is not None:
+        release_buffer(rows)
+
+
 def _vision_row(
     runtime: Any,
     blob: bytes,
@@ -133,70 +142,53 @@ def _vision_row(
     min_pixels: int,
     max_pixels: int,
 ) -> np.ndarray:
-    """Merged rows for one still. A repeat reuses the stored rows."""
+    """Merged rows for one still. A repeat reads the stored file."""
     key = (
         str(getattr(runtime, "root", "")),
         hashlib.sha256(blob).digest(),
         int(min_pixels),
         int(max_pixels),
     )
-    cached = _ROW_CACHE.get(key)
-    if cached is None:
-        cached = _load_vision_disk(key)
-        if cached is not None:
-            _ROW_CACHE[key] = cached
+    cached = _load_vision_disk(key)
     if cached is not None:
         _note(runtime, f"vision cache {int(cached.shape[0])}")
         return cached
-    host, _grid_h, _grid_w = embed_image(
+    host, grid_h, grid_w = embed_image(
         runtime, blob, min_pixels=min_pixels, max_pixels=max_pixels
     )
-    _ROW_CACHE[key] = host
-    _store_vision_disk(key, host)
-    while len(_ROW_CACHE) > _ROW_LIMIT:
-        _ROW_CACHE.pop(next(iter(_ROW_CACHE)))
+    _store_vision_disk(key, host, grid_h, grid_w)
     return host
 
 
-def _vision_cache_dir() -> Path:
-    from favlo.logs import favlo_home
+def _vision_cache_path(key: tuple[Any, ...]) -> Any:
+    from favlo.vision_cache import cache_path
 
-    path = favlo_home() / "vision-cache" / "qwen38_27b"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _vision_cache_path(key: tuple[Any, ...]) -> Path:
-    material = hashlib.sha256()
-    material.update(str(key[0]).encode())
-    for part in key[1:]:
-        if isinstance(part, (bytes, bytearray)):
-            material.update(part)
-        else:
-            material.update(struct.pack("<i", int(part)))
-    return _vision_cache_dir() / f"{material.hexdigest()}.npz"
+    root, digest, min_pixels, max_pixels = key
+    return cache_path(_PIPELINE, str(root), digest, int(min_pixels), int(max_pixels))
 
 
 def _load_vision_disk(key: tuple[Any, ...]) -> np.ndarray | None:
-    path = _vision_cache_path(key)
-    if not path.is_file():
+    from favlo.vision_cache import load_cache
+
+    body = load_cache(_vision_cache_path(key))
+    if body is None or "embedded" not in body:
         return None
-    try:
-        payload = np.load(path)
-        return np.ascontiguousarray(payload["embedded"], dtype=np.float32)
-    except (OSError, ValueError, KeyError):
-        return None
+    return np.ascontiguousarray(body["embedded"], dtype=np.float32)
 
 
-def _store_vision_disk(key: tuple[Any, ...], embedded: np.ndarray) -> None:
-    path = _vision_cache_path(key)
-    tmp = path.with_name(path.stem + ".tmp.npz")
-    try:
-        np.savez(tmp, embedded=np.ascontiguousarray(embedded, dtype=np.float32))
-        tmp.replace(path)
-    except OSError:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
+def _store_vision_disk(
+    key: tuple[Any, ...], embedded: np.ndarray, grid_h: int, grid_w: int
+) -> None:
+    from favlo.vision_cache import store_cache
+
+    store_cache(
+        _vision_cache_path(key),
+        {
+            "embedded": np.ascontiguousarray(embedded, dtype=np.float32),
+            "grid_h": np.int32(grid_h),
+            "grid_w": np.int32(grid_w),
+        },
+    )
 
 
 def _note(runtime: Any, text: str) -> None:

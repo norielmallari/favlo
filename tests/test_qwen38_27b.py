@@ -1773,9 +1773,10 @@ def test_an_image_is_logged_before_its_bytes_are_read() -> None:
     assert tower._vision_rows is None
 
 
-def test_a_repeated_still_past_the_hit_reuses_its_rows(monkeypatch) -> None:
+def test_a_repeated_still_past_the_hit_reuses_its_rows(tmp_path, monkeypatch) -> None:
     import hashlib
 
+    from favlo.vision_cache import cache_path, store_cache
     from qwen38_27b.metal41 import tower
     from qwen38_27b.metal41.tower import bind_request
     from qwen38_27b.metal41.vision import IMAGE_PAD
@@ -1800,8 +1801,12 @@ def test_a_repeated_still_past_the_hit_reuses_its_rows(monkeypatch) -> None:
             (np.zeros((16, 8), dtype=np.float32), (4, 4)),
         ],
     )
-    key = ("example-model", hashlib.sha256(blob).digest(), 1, 2)
-    monkeypatch.setattr(tower, "_ROW_CACHE", {key: rows})
+    monkeypatch.setattr("favlo.vision_cache.cache_dir", lambda _pipeline: tmp_path)
+    digest = hashlib.sha256(blob).digest()
+    store_cache(
+        cache_path("qwen38_27b", "example-model", digest, 1, 2),
+        {"embedded": rows, "grid_h": np.int32(4), "grid_w": np.int32(4)},
+    )
 
     def fail(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("tower")
@@ -1814,19 +1819,26 @@ def test_a_repeated_still_past_the_hit_reuses_its_rows(monkeypatch) -> None:
 
 
 def test_vision_disk_cache_round_trip(tmp_path, monkeypatch) -> None:
+    from favlo.vision_cache import load_cache
     from qwen38_27b.metal41 import tower
 
-    monkeypatch.setattr(tower, "_vision_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr("favlo.vision_cache.cache_dir", lambda _pipeline: tmp_path)
     key = ("example-model", b"\x01\x02", 65536, 16777216)
     rows = np.arange(8, dtype=np.float32).reshape(2, 4)
-    tower._store_vision_disk(key, rows)
+    tower._store_vision_disk(key, rows, 4, 2)
     loaded = tower._load_vision_disk(key)
     assert loaded is not None
     assert loaded.shape == (2, 4)
     assert np.allclose(loaded, rows)
+    body = load_cache(tower._vision_cache_path(key))
+    assert body is not None
+    assert int(body["grid_h"]) == 4
+    assert int(body["grid_w"]) == 2
     from qwen38_27b.metal41 import vision
+    from qwen38_27b.metal41.chat import Pipeline
 
     assert callable(vision.embed_image)
+    assert Pipeline().has_vision() is True
 
 
 def test_png_round_trip_and_square_grid() -> None:
