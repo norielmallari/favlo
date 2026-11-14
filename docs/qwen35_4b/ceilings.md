@@ -20,7 +20,7 @@ The byte count for that first chunk (dense projections, tied embed and head, Gat
 
 ## Decode
 
-One token at context 2048. Dense projections use `gemv_fp8` (eight rows per threadgroup). Mid-width outs (256–16384 rows, inner ≤4096) use `gemv_fp8_x4` in the forward; the table below is still the eight-row kernel. Attention is `attend_decode_half` on the half cache (online softmax, no score plane). The isolated `attend_decode_half` row below was measured on the earlier score-plane kernel; recompute that row when the next ceiling pass times the online path.
+One token at context 2048. Dense projections use `gemv_fp8` (eight rows per threadgroup). Mid-width outs (256–16384 rows, inner ≤4096) use `gemv_fp8_x4` in the forward. An inner above 4096 and a multiple of 512, the down projection, uses `gemv_fp8_x4_split`: one simdgroup per 512-byte K chunk. The table below is still the eight-row kernel. Attention is `attend_decode_half` on the half cache (online softmax, no score plane). The isolated `attend_decode_half` row below was measured on the earlier score-plane kernel; recompute that row when the next ceiling pass times the online path.
 
 | Kernel | Shape | Count | µs |
 |---|---|---:|---:|

@@ -17,6 +17,7 @@ def run_kernels() -> None:
     session = Session(owner)
     try:
         _check_gemv(session)
+        _check_split(session)
         _check_span(session)
         _check_int8(session)
         _check_int8_tiles(session)
@@ -71,6 +72,39 @@ def _check_gemv(session: Session) -> None:
     got_v = np.frombuffer(memory.load(out_v, 0, rows * 4), dtype=np.float32)
     if not np.allclose(got_v, expect, rtol=2e-2, atol=2e-2):
         message = f"gemv_fp8_vec mismatch max={np.max(np.abs(got_v - expect))}"
+        raise RuntimeError(message)
+
+
+def _check_split(session: Session) -> None:
+    """Tall-K four-row split matches the fp8 reconstruction. Down uses K of 9216."""
+    rows, inner = 8, 9216
+    rng = np.random.default_rng(2)
+    activation = rng.standard_normal(inner).astype(np.float32)
+    weight = rng.standard_normal((rows, inner)).astype(np.float32) * 0.02
+    data, scale = quantize_fp8(weight)
+    data_u = np.frombuffer(data, dtype=np.uint8).reshape(rows, inner)
+    scale_u = np.frombuffer(scale, dtype=np.uint8).reshape(rows, inner // 32)
+    recon = np.empty_like(weight)
+    for r in range(rows):
+        for b in range(inner // 32):
+            factor = _e8m0(int(scale_u[r, b]))
+            for i in range(32):
+                recon[r, b * 32 + i] = _e4m3(int(data_u[r, b * 32 + i])) * factor
+    expect = recon @ activation
+    act = session.upload(activation.tobytes())
+    w = session.upload(data)
+    sc = session.upload(scale)
+    out = session.allocate(rows * 4, zero=True)
+    session.launch(
+        "gemv_fp8_x4_split",
+        [act, w, sc, out],
+        [u32(rows), u32(inner)],
+        (rows // 4, 1, 1),
+        ((inner // 512) * 32, 1, 1),
+    )
+    got = np.frombuffer(memory.load(out, 0, rows * 4), dtype=np.float32)
+    if not np.allclose(got, expect, rtol=2e-2, atol=2e-2):
+        message = f"gemv_fp8_x4_split mismatch max={np.max(np.abs(got - expect))}"
         raise RuntimeError(message)
 
 

@@ -1444,8 +1444,19 @@ class Qwen35Runtime:
         dest_off: int = 0,
     ) -> None:
         # Four-row GEMV shares the activation stream. It wins for mid-width
-        # FFN/GDN outs; the eight-row GEMV stays faster for the head and for
-        # tall-K downs.
+        # FFN/GDN outs. A tall K is one simdgroup per 512-byte chunk. The
+        # eight-row GEMV stays faster for the head.
+        chunks = inner // 512
+        if rows % 4 == 0 and inner > 4096 and inner % 512 == 0 and 1 <= chunks <= 32:
+            self.session.launch(
+                "gemv_fp8_x4_split",
+                [activation, self.weights, self.weights, destination],
+                [u32(rows), u32(inner)],
+                (rows // 4, 1, 1),
+                (chunks * 32, 1, 1),
+                offsets=[act_off, plane.data, plane.scale, dest_off],
+            )
+            return
         if rows % 4 == 0 and 256 <= rows <= 16384 and inner <= 4096:
             self.session.launch(
                 "gemv_fp8_x4",

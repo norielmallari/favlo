@@ -494,6 +494,107 @@ kernel void gemv_fp8_x4(
     }
 }
 
+// One simdgroup owns one 512-byte K chunk of the same four-row dot. The chunks
+// run together and the threadgroup adds their partials.
+kernel void gemv_fp8_x4_split(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group << 2;
+    uint chunks = inner >> 9;
+    if (row0 >= rows || simd >= chunks || simd >= 32u) {
+        return;
+    }
+    uint base = lane * 16u + simd * 512u;
+    uint blocks = inner >> 5;
+    device const uchar* w0 = weights + ulong(row0) * inner;
+    device const uchar* s0 = scales + ulong(row0) * blocks;
+    device const float4* x4 = (device const float4*)activation;
+    float4 xv0 = x4[(base >> 2) + 0u];
+    float4 xv1 = x4[(base >> 2) + 1u];
+    float4 xv2 = x4[(base >> 2) + 2u];
+    float4 xv3 = x4[(base >> 2) + 3u];
+    float scale0 = e8m0_code(s0[base >> 5]);
+    float scale1 = e8m0_code(s0[blocks + (base >> 5)]);
+    float scale2 = e8m0_code(s0[2u * blocks + (base >> 5)]);
+    float scale3 = e8m0_code(s0[3u * blocks + (base >> 5)]);
+    device const uint4* p0 = (device const uint4*)(w0 + base);
+    device const uint4* p1 = (device const uint4*)(w0 + inner + base);
+    device const uint4* p2 = (device const uint4*)(w0 + 2u * inner + base);
+    device const uint4* p3 = (device const uint4*)(w0 + 3u * inner + base);
+    uint4 a = p0[0];
+    uint4 b = p1[0];
+    uint4 c = p2[0];
+    uint4 d = p3[0];
+    float part0 = 0.0f;
+    float part1 = 0.0f;
+    float part2 = 0.0f;
+    float part3 = 0.0f;
+    uint words0[4] = {a.x, a.y, a.z, a.w};
+    uint words1[4] = {b.x, b.y, b.z, b.w};
+    uint words2[4] = {c.x, c.y, c.z, c.w};
+    uint words3[4] = {d.x, d.y, d.z, d.w};
+    float4 xs[4] = {xv0, xv1, xv2, xv3};
+    for (uint j = 0u; j < 4u; ++j) {
+        float4 xv = xs[j];
+        uint w = words0[j];
+        part0 = fma(E4M3_TABLE[w & 0xFFu], xv.x, part0);
+        part0 = fma(E4M3_TABLE[(w >> 8) & 0xFFu], xv.y, part0);
+        part0 = fma(E4M3_TABLE[(w >> 16) & 0xFFu], xv.z, part0);
+        part0 = fma(E4M3_TABLE[w >> 24], xv.w, part0);
+        w = words1[j];
+        part1 = fma(E4M3_TABLE[w & 0xFFu], xv.x, part1);
+        part1 = fma(E4M3_TABLE[(w >> 8) & 0xFFu], xv.y, part1);
+        part1 = fma(E4M3_TABLE[(w >> 16) & 0xFFu], xv.z, part1);
+        part1 = fma(E4M3_TABLE[w >> 24], xv.w, part1);
+        w = words2[j];
+        part2 = fma(E4M3_TABLE[w & 0xFFu], xv.x, part2);
+        part2 = fma(E4M3_TABLE[(w >> 8) & 0xFFu], xv.y, part2);
+        part2 = fma(E4M3_TABLE[(w >> 16) & 0xFFu], xv.z, part2);
+        part2 = fma(E4M3_TABLE[w >> 24], xv.w, part2);
+        w = words3[j];
+        part3 = fma(E4M3_TABLE[w & 0xFFu], xv.x, part3);
+        part3 = fma(E4M3_TABLE[(w >> 8) & 0xFFu], xv.y, part3);
+        part3 = fma(E4M3_TABLE[(w >> 16) & 0xFFu], xv.z, part3);
+        part3 = fma(E4M3_TABLE[w >> 24], xv.w, part3);
+    }
+    part0 = simd_sum(fma(part0, scale0, 0.0f));
+    part1 = simd_sum(fma(part1, scale1, 0.0f));
+    part2 = simd_sum(fma(part2, scale2, 0.0f));
+    part3 = simd_sum(fma(part3, scale3, 0.0f));
+    threadgroup float red[32][4];
+    if (lane == 0u) {
+        red[simd][0] = part0;
+        red[simd][1] = part1;
+        red[simd][2] = part2;
+        red[simd][3] = part3;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd == 0u && lane == 0u) {
+        float sum0 = 0.0f;
+        float sum1 = 0.0f;
+        float sum2 = 0.0f;
+        float sum3 = 0.0f;
+        for (uint i = 0u; i < chunks; ++i) {
+            sum0 += red[i][0];
+            sum1 += red[i][1];
+            sum2 += red[i][2];
+            sum3 += red[i][3];
+        }
+        destination[row0] = sum0;
+        destination[row0 + 1u] = sum1;
+        destination[row0 + 2u] = sum2;
+        destination[row0 + 3u] = sum3;
+    }
+}
+
 // Same four-row dot as gemv_fp8_x4, for two or three activations. Each weight
 // row is read once and applied to every activation.
 kernel void gemv_fp8_x4_span(
