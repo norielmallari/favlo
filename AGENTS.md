@@ -40,7 +40,7 @@ Run Python through `uv run` so the command uses this checkout's environment. A m
 
 Changes stay in this repository. Edit another repository only when the user asks for that repository.
 
-The open product in this repository is the listener, the web app, and the web API. A hosted build of the same app calls another process that implements the same HTTP contract. That process is not part of this repository, and this repository does not name it. When a sibling checkout of the hosted product is present, read it only for a hosted task. When it is absent, stay in this repository.
+The open product in this repository is the listener, the web app, and the web API. A hosted build of the same app calls another process that implements the same HTTP contract. That process is not part of this repository, and this repository does not name it. When a sibling Favlo Custom checkout is present, read it only for a custom-pipeline task. When it is absent, stay in this repository.
 
 Edit one runtime. Leave every other runtime's files untouched. The write set and the runtime table are in [ARCHITECTURE.md](ARCHITECTURE.md). Do not edit `src/favlo/cli.py` to register a runtime. Do not edit another package's sources, shaders, tests, or docs. A served media package subclasses `MediaPipeline` and sets `kind`, `id_prefix`, and `object_name`. A language-model package does not. Do not add a kernel that branches on the package. A new abstract method on `MediaPipeline` updates every media subclass in that same change.
 
