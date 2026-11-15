@@ -1,6 +1,8 @@
 # References
 
-Papers and specifications for the VoxCPM2 pipeline. The serving note is [README.md](README.md).
+Papers and specifications for the VoxCPM2 pipeline.
+
+The serving note is [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Zhou, Yixuan, and the VoxCPM team. *VoxCPM2: Tokenizer-Free TTS for Multilingual Speech Generation, Creative Voice Design, and True-to-Life Cloning.* [arXiv:2606.06928](https://arxiv.org/html/2606.06928).
 
@@ -14,6 +16,13 @@ Su, Jianlin, Yu Lu, Shengfeng Pan, Ahmed Murtadha, Bo Wen, and Yunfeng Liu. *RoF
 
 Kazemnejad, Amirhossein, Inkit Padhi, Karthikeyan Natesan Ramamurthy, Payel Das, and Siva Reddy. *The Impact of Positional Encoding on Length Generalization in Transformers.* NeurIPS 2023.
 
-OpenBMB. [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2). Apache-2.0. The checkout `config.json` is the width table.
+OpenBMB. [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2). Apache-2.0.
 
-Apple. *Explore Metal 4 games.* [WWDC26 session 330](https://developer.apple.com/videos/play/wwdc2026/330/). `matmul2d` and the tensor types. The language-model plane is `half` in and float out. A language-model step and one diffusion estimate each run as one command buffer, with float32 values between kernels. The AudioVAE convolutions are float32.
+The checkout `config.json` is the width table.
+
+Apple. *Explore Metal 4 games.* [WWDC26 session 330](https://developer.apple.com/videos/play/wwdc2026/330/).
+
+- `matmul2d` and the tensor types.
+- The language-model plane is `half` in and float out.
+- A language-model step and one diffusion estimate each run as one command buffer, with float32 values between kernels.
+- The AudioVAE convolutions are float32.

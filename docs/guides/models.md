@@ -20,7 +20,7 @@ favlo --qwen35_4b setup
 
 ## Qwen3.6-35B-A3B
 
-The official checkpoint is `Qwen/Qwen3.6-35B-A3B`. The steps are [qwen36_35b_a3b/SETUP.md](../qwen36_35b_a3b/SETUP.md).
+The official checkpoint is `Qwen/Qwen3.6-35B-A3B`. The steps are [qwen36_35b_a3b/README.md](../qwen36_35b_a3b/README.md).
 
 `favlo --qwen36_35b_a3b setup` downloads that checkpoint and packs it, without opening the socket:
 
@@ -34,13 +34,13 @@ favlo --qwen36_35b_a3b setup
 
 ## Gemma 4 26B-A4B
 
-The official checkpoint is `google/gemma-4-26B-A4B-it`. The steps are [gemma4_26b_a4b/SETUP.md](../gemma4_26b_a4b/SETUP.md).
+The official checkpoint is `google/gemma-4-26B-A4B-it`. The steps are [gemma4_26b_a4b/README.md](../gemma4_26b_a4b/README.md).
 
 `favlo --gemma4_26b_a4b quantize` packs a local bfloat16 checkout. With no `--src` it reads `models/gemma-4-26B-A4B-it` and writes `models/gemma-4-26B-A4B-it-fp8-e20`. `--src` names another local checkout, including a directory outside `models/`. The row is registered under the alias `gemma4_26b_a4b` with `kv_cache` set to `half`. The checkout stays. `--name` is the packed folder. The alias on that row stays `gemma4_26b_a4b`.
 
 ## Qwen3.8-27B
 
-The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38_27b/SETUP.md](../qwen38_27b/SETUP.md).
+The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38_27b/README.md](../qwen38_27b/README.md).
 
 `favlo --qwen38_27b download` fetches that checkpoint into `models/Qwen3.8-27B-bf16` with plain HTTP. `--check` reports whether the volume has room and does not write the files. A short file is continued on the next run.
 
@@ -50,18 +50,18 @@ The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38_27b/SETUP.m
 
 ## Z-Image-Turbo
 
-The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z_image_turbo/SETUP.md](../z_image_turbo/SETUP.md).
+The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z_image_turbo/README.md](../z_image_turbo/README.md).
 
 `favlo --z_image_turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize --int8` packs `models/Z-Image-Turbo-int8` and copies `tokenizer/` into that record. That is the served record. Generation reads the copy. `quantize` without `--int8` packs `models/Z-Image-Turbo-fp4`. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-int8` when `--int8` is set, or `-fp4` otherwise. `--name` is the registry id.
 ## Wan 2.2 I2V
 
-The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google/umt5-xxl`. The steps are [wan22_i2v/SETUP.md](../wan22_i2v/SETUP.md).
+The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google/umt5-xxl`. The steps are [wan22_i2v/README.md](../wan22_i2v/README.md).
 
-`favlo --wan22_i2v umt5 setup` and `umt5 quantize` write `models/google/umt5-xxl-int8` with the tokenizer inside that pack. The steps are [umt5_xxl/SETUP.md](../umt5_xxl/SETUP.md). `favlo --wan22_i2v setup` downloads the VAE and the two expert files. `quantize --int8` packs `models/Wan2.2-I2V-A14B-int8`. That folder is the served record. `quantize --high` and `--low` with `--fp8-percent 50` pack `models/Wan2.2-I2V-A14B-fp8-e50`. The default percent is 20, which writes `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, points `parts.umt5` at the shared pack, and `--high-dir` and `--low-dir` store the quantized expert directories. A clip encodes with that umT5 directory.
+`favlo --wan22_i2v umt5 setup` and `umt5 quantize` write `models/google/umt5-xxl-int8` with the tokenizer inside that pack. The steps are [umt5_xxl/README.md](../umt5_xxl/README.md). `favlo --wan22_i2v setup` downloads the VAE and the two expert files. `quantize --int8` packs `models/Wan2.2-I2V-A14B-int8`. That folder is the served record. `quantize --high` and `--low` with `--fp8-percent 50` pack `models/Wan2.2-I2V-A14B-fp8-e50`. The default percent is 20, which writes `models/Wan2.2-I2V-A14B-fp4`. `--name` is that packed folder and the registry id. The row stores the packed directory, points `parts.umt5` at the shared pack, and `--high-dir` and `--low-dir` store the quantized expert directories. A clip encodes with that umT5 directory.
 
 ## ACE-Step
 
-The official checkpoint is `ACE-Step/acestep-v15-xl-turbo`. `setup` downloads the Diffusers split `ACE-Step/acestep-v15-xl-turbo-diffusers`. The steps are [ace_step_15_turbo/SETUP.md](../ace_step_15_turbo/SETUP.md).
+The official checkpoint is `ACE-Step/acestep-v15-xl-turbo`. `setup` downloads the Diffusers split `ACE-Step/acestep-v15-xl-turbo-diffusers`. The steps are [ace_step_15_turbo/README.md](../ace_step_15_turbo/README.md).
 
 `favlo --ace_step_15_turbo setup` writes `models/acestep-v15-xl-turbo`. That checkout holds the text encoder, the tokenizer, the condition encoder, the transformer, and the VAE. `quantize` packs `models/acestep-v15-xl-turbo-fp8-fp4` and stores that directory on the row. `delete <folder>` removes that row and the packed directory.
 

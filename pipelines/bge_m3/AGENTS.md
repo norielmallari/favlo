@@ -1,6 +1,6 @@
 # This package
 
-This package is an embeddings pipeline. It inherits `EmbeddingsPipeline`. The class writes the OpenAI list object. It does not normalize a vector or choose a hidden size. A language model and a media package do not inherit it. The as-built note is the README under `docs/` whose folder name matches this package.
+This package is an embeddings pipeline. It inherits `EmbeddingsPipeline`. The class writes the OpenAI list object. It does not normalize a vector or choose a hidden size. A language model and a media package do not inherit it. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder.
 
 A change to `embed` or the list object loads the seam-checks skill. Do not paste those commands here.
 

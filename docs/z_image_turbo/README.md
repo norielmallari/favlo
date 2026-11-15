@@ -1,96 +1,156 @@
 # Z-Image-Turbo
 
-Eight-step text-to-image pipeline for [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo). `favlo --z_image_turbo` loads `pipelines/z_image_turbo/metal41/z-image-turbo.py`. The DiT, the Qwen3 caption encoder, and the VAE decoder run as Metal shaders. The latent stays on the device across the eight steps. Patchify, the Euler update, the time sinusoid, the pad-token fill, the image and caption join, the RoPE index tables, the VAE scale, and the uint8 clip are shaders. The tokenizer and the PNG container stay on the host. The served pack is symmetric int8. `quantize --int8` reads the original weights and writes `models/Z-Image-Turbo-int8`. Each matrix has one float32 scale per output row, and `N` is padded to 128. The activation is quantized in groups of 128 along K. `matmul2d` multiplies that int8 activation by the int8 weight, and the kernel applies the group scales, the output scale, and the bias. Biases, norms, and the two pad tokens stay float16. `quantize` without `--int8` writes the fp4 E2M1 pack at `models/Z-Image-Turbo-fp4`. That matmul reads float16, and a row whose peak exceeds 60000 is scaled into that range. A noise-refiner output projection reached 81884. The VAE encoder is not packed. Those weights are under the Apache License, Version 2.0. The DiT, the caption encoder, the VAE, the pack, and the shaders live in `pipelines/z_image/metal41/z_image/`. This pipeline calls that package.
+Eight-step text-to-image pipeline for [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo). Those weights are under the Apache License, Version 2.0. `favlo --z_image_turbo` loads `pipelines/z_image_turbo/metal41/z-image-turbo.py`. With `favlo serve` listening, clients draw through `favlo media --pipeline z_image_turbo` or the published `z_image_turbo__generate_image` MCP tool.
 
-Download, pack, and the first image are [SETUP.md](SETUP.md). `setup` downloads the repository into `models/Z-Image-Turbo` from the Hugging Face resolve URL. `quantize --int8` packs `models/Z-Image-Turbo-int8`, registers that folder, and stores that directory on the row. That is the served record. When the image default is empty, that registration stores this folder as the default. A default that is already set stays. `quantize` without `--int8` packs `models/Z-Image-Turbo-fp4`. `--weights` is one `.safetensors` file or a directory of shards; with no flag, quantize uses the setup checkout. With no `--name` and no `--out`, that file or directory is packed to `models/<name>-int8` when `--int8` is set, or `models/<name>-fp4` otherwise. `--name` is the folder under `models/` and the registry id. `quantize --int8` copies `tokenizer/` into the packed record, and generation reads that copy. A weights-only path copies the tokenizer from `models/Z-Image-Turbo` when that checkout is present. Otherwise pass `--tokenizer-source`. `kernels` dispatches the fp4 matmul on a synthetic tile of 64 by 32 and an int8 matmul on a 64 by 128 tile. The fp4 check compares the dequantized matrix. The int8 check compares the integer product, the row scale, and the channel scale.
+- [ARCHITECTURE.md](ARCHITECTURE.md) is the as-built record: packed weights, registry, listener contract, forward path, smoke, and citations.
+- [ceilings.md](ceilings.md) lists kernel and bandwidth ceilings.
+- [research/generation-ceiling.md](research/generation-ceiling.md) records a measured generation sum.
+
+- The default image is 1024×1024.
+- Width and height are multiples of 16 up to 2560.
+- `--steps` must be 8.
 
 ```text
-uv run favlo --z_image_turbo setup
-uv run favlo --z_image_turbo quantize --int8
-uv run favlo --z_image_turbo quantize
-uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors
-uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors --name example-model
 uv run favlo --z_image_turbo kernels
 ```
 
-The default image is 1024×1024. Width and height are multiples of 16 and at most 2560. `--steps` must be 8. The seed selects the initial noise. The publisher's last training stage keeps each edge within 256 pixels of the 1024 grid, from 768 to 1280. Serving accepts up to 2560 on each edge.
-
-## Registry
-
-The row key in `models/registry.json` is the packed folder, `Z-Image-Turbo-int8` or `Z-Image-Turbo-fp4`. Registration leaves `alias` null, so that folder is the public id. `directory` is copied at open, so close the resident model after changing it. The listener stays up.
-
-```python
-from favlo.registry import load_registry, save_registry, set_pipeline_default
-
-set_pipeline_default("Z-Image-Turbo-int8")
-data = load_registry()
-data["media"]["image"] = "Z-Image-Turbo-int8"
-save_registry(data)
+```text
+uv run pytest tests/test_z_image_turbo_smoke.py -s
+ZIMAGE_SMOKE=1 uv run pytest tests/test_z_image_turbo_smoke.py -s
+python -m harness.image --pipeline z_image_turbo --tool generate_image --model Z-Image-Turbo-int8
+python -m harness.image_smoke_agent --pipeline z_image_turbo --tool generate_image --model Z-Image-Turbo-int8
 ```
+
+## Setup
+
+How to download, pack, and draw with `z_image_turbo`. The kernel contract is [ARCHITECTURE.md](ARCHITECTURE.md). The listener is [../serve.md](../serve.md). Pointing a client at the server is [../guides/clients.md](../guides/clients.md).
+
+The official checkpoint is [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo). Those weights are under the Apache License, Version 2.0.
+
+### What you need
+
+- Apple Silicon
+- Metal 4.1
+- 16 GB of memory
+- Python 3.12 or newer
+- [uv](https://docs.astral.sh/uv/)
+- A network path to `huggingface.co`
+- Free disk for the checkout and, after packing, the packed record beside it
+
+The seven weight files in the download are 30.6 GiB. The checkout stays on disk after `quantize`. The tokenizer is read from that checkout.
+
+8 GB is not enough to run a model capable of real-world agentic workflows.
+
+### Install
+
+From a checkout of this repository:
 
 ```text
-uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
+uv sync --extra dev
 ```
 
-| Field | When | Values |
-|---|---|---|
-| `alias` | resolve | One name, with no colon and no slash, or `null`. |
-| `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
-| `directory` | open | The packed record `serve` opens. |
+This checkout is release 0.6.0. PyPI publishes the runtime under `src/favlo`. The pipelines stay in this checkout, so later commands use `uv run favlo` from that checkout.
 
-The file key `media.image` is the folder `favlo media` uses when the command omits `--model` and that folder is this pipeline. The first image registration fills an empty key. A stored key stays. When that folder is another pipeline, the command uses the row marked `pipeline_default`, then the first folder registered for this pipeline.
-
-This pipeline has no sampler keys on the row. A request runs eight steps. The sampling card (`generate`, temperature 0) is copied at registration and is not read. `kv_cache`, `resident_percent`, `mtp`, `mtp_depth`, `enable_thinking`, `reasoning_effort`, `context_length`, and `max_prompt_tokens` may sit on the row. This open discards `kv_cache` and `resident_percent` and does not read the others. `context_length` is 1536 at registration. `pipeline`, `runtime`, `source`, and `pipeline_root` are the row's identity.
-
-## Listener
-
-`favlo serve` must already be listening. `favlo media` does not start it, and it exits when that port is closed. The command posts the body to the listener. Stdout is one `file://` URI. `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the PNG. `--model` is optional. An omitted `--model` uses the image default in the registry when that folder is this pipeline. Otherwise it uses the first folder registered for this pipeline. `--kind` is unnecessary. This pipeline serves one kind.
+### Download
 
 ```text
-uv run favlo media --pipeline z-image-turbo prompt="a red cube on a white table" size=1024x1024 seed=0 quality=high
-uv run favlo media --pipeline z-image-turbo --model Z-Image-Turbo-int8 --out pack.json prompt="a red cube on a white table"
+uv run favlo --z_image_turbo setup
 ```
 
-`prompt` is required. `size` is `auto` or `WIDTHxHEIGHT`. `quality` is `auto`, `low`, `medium`, `high`, `xhigh`, `max`, `standard`, or `hd`. `seed` is an integer. The other fields are the ones `handle_image` accepts.
+That command downloads [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) into `models/Z-Image-Turbo` with plain HTTP. A public checkout does not need a token. A file that already has its published size is left in place. A short file continues on the next run.
 
-`handle_image` is a `MediaPipeline`. `favlo serve` publishes `z_image_turbo__generate_image` on `POST /mcp`. The arguments follow the OpenAI image generation request. A path under `/v1/images` is 404. `prompt` is required. `model` selects the row. A request draws one image. `size` is `auto` or `WIDTHxHEIGHT`, and `auto` is 1024×1024. An omitted `generate_image` size is that same frame. Each edge is a multiple of 16, from 16 to 2560, and the aspect ratio is between 1:3 and 3:1. `quality` accepts `auto`, `low`, `medium`, `high`, `xhigh`, `max`, `standard`, and `hd`. Every accepted value runs the same eight steps. The response reports `low`, `medium`, `high`, `xhigh`, or `max`. `auto`, `standard`, and `hd` are reported as `high`. That reported value selects the PNG zlib level: `low` is 9, `medium` is 7, `high` is 5, `xhigh` is 3, and `max` is 1. A lower quality uses higher compression. The samples stay the uint8 decode. `background` accepts `auto` and `opaque`. Both leave an opaque RGB PNG. `transparent` is refused. `moderation` accepts `low` and `auto`. `style`, `user`, and `safety_identifier` are accepted. A non-empty `safety_identifier` is echoed, and otherwise a non-empty `user` is echoed. `output_format` must be `png`. `response_format` must be omitted or `b64_json`. `stream` must be omitted or false, and `partial_images` must be omitted or 0. An omitted `seed` is a random integer, and a provided integer selects the image. The seed, the prompt, and the other parameters are written under `generation` in `~/.favlo/images/<id>.png.json` (the shared media metadata schema). The uint8 decode is written to `~/.favlo/images/<id>.rgb`. The PNG is encoded from that file and written to `<id>.png` before the response is built, and the handler returns `data[].id`, the file stem. The reply has no PNG bytes. `resources/read` of `favlo://images/{id}.png` returns the PNG and that metadata JSON when present, and does not take the request lock. Both files stay until `image_ttl_seconds` in `~/.favlo/settings.json`. The default is five days. A sweep when the listener starts, and again after each image is stored, moves a pair that has reached that age to Trash. The response is `created`, `background`, `data[].id`, `data[].b64_json`, `output_format`, `quality`, `size`, `safety_identifier` when one was sent, and `generation_seconds`. `generation_seconds` is `total`, `caption`, `vae`, and `steps`. Opening the runtime reads the packed record under a `load` row counted in bytes. Each image opens a `sample` row counted in finished layers: the 35 caption layers and the caption projection, then each Euler step's two noise refiners, two context refiners, 30 main layers, and the final readout, then 25 decoder pieces. The size is logged once when that row opens. The row names `caption`, `step i/n`, or `decode`. Each step line is logged as the velocity returns. The summary line is `generate`, then the caption seconds and the decoder seconds, and the row closes as `sample done/total layers`. A pause closes that row as `sample paused` or `sample cancelled`. The next call opens a new row for the caption it runs again, the steps still left, and the decoder. Edits and variations are not served. A chat completion on this row is rejected. The message still names `POST /v1/images/generations`.
+`setup` does not pack the record and does not register it.
 
-A running image returns at a stage boundary when `cancel` or `preempt` is set. Cancel is read first. Cancel is read on the return from the caption encoder, each Euler step, and the VAE decode. Preempt is read on the return from each Euler step and the VAE decode. A chat that arrives while the record loads or the caption runs waits until that step returns, and the latent from the step stays on the hold. The Metal dispatch already submitted finishes before that return. Cancel leaves `status` `in_progress`, keeps the same `id`, writes no further file, and drops the checkpoint. Preempt keeps finished host outputs on `image_hold` and returns the same `status` and `id`. The caption embedding stays on the device, so a resume runs the caption again. A finished Euler step keeps its latent, and the resume uploads that latent and continues at the next step. A finished decode keeps the uint8 image, and the resume encodes the PNG from those samples. Stored PNGs stay in `data` and are not drawn again. The finished response has no `status`. While the job is in progress, `stage` is `caption`, `step`, `decode`, or `store`, `progress` counts finished steps, decodes, and stored images and stays below 100, and `eta` is the remaining Euler steps times the mean finished step.
+### Pack
 
-Device spans come from the process memory manager. `MediaPipeline` calls `ensure_open` before the draw and always calls `close` when the request returns, including a pause or a failure. `ensure_open` runs the shared open gate (`wait_released`, then `room()` vs weights plus scratch for the named size) and reloads the record when closed. A larger ledger grows scratch up to the 2560 square. Scratch that already covers the image stays when a later answer is smaller. `--max-memory` caps that ledger through `memory.set_max_memory`. This package does not keep a second cap. `open_runtime` stamps the owner with the shared helper. `close` finishes the command buffer, sweeps that owner, and waits through the shared close gate until those pages are reclaimable. Caption encoding, each Euler step, and the VAE decode release the temporary spans from that stage when it returns.
+```text
+uv run favlo --z_image_turbo quantize --int8
+```
 
-## Forward
+That command reads `models/Z-Image-Turbo` and registers the folder `Z-Image-Turbo-int8` in `models/registry.json`.
 
-The caption is the checkpoint chat template with one user turn and a generation prompt. The template's `enable_thinking` flag is left unset, which leaves the think block out. The caption vector is the penultimate Qwen3 layer, then the DiT caption norm and projection.
+- The row stores `models/Z-Image-Turbo-int8`.
+- The client model field is `Z-Image-Turbo-int8`.
+- When the registry image default is empty, that registration stores `Z-Image-Turbo-int8` as the default.
+- A default that is already set stays.
+- A later pack of another folder does not replace it.
+- It copies `tokenizer/` into that folder. Generation reads that copy.
+- A finished directory has `manifest.json` with `complete: true`.
+- Running `quantize --int8` again on that directory returns it.
+- An unfinished directory is replaced.
 
-Image tokens precede the caption tokens. A 2×2 patch is stored with the channel fastest. Sequences are padded to a multiple of 32 with the learned pad token at position 0, and those pad tokens attend. Caption indices on the temporal axis start at 1. Every image token uses temporal index `padded caption length + 1`, and the patch coordinate is the two spatial axes. The base is 256 and the split is 32, 48, 48. DiT rotation multiplies adjacent pairs. The caption encoder keeps the half-split rotation. Context refiners have no AdaLN. Noise refiners and the 30 main layers do. The four AdaLN slices are attention scale, attention gate, feed-forward scale, and feed-forward gate. The scale is applied as `x · (1 + scale)`. The gate is `tanh` of its slice and multiplies the branch after the second RMSNorm. `w1` is the SwiGLU gate and `w3` is the up projection. The final readout is a parameter-free LayerNorm with epsilon 1e-6, then `(1 + scale)`, where that scale is a SiLU followed by the 3840-wide projection.
+On an M5 Pro with 48 GB a 1280 generation of the smoke prompt from that record printed 51.74 s, caption 0.15 s, decoder 9.27 s, steps 5.24–5.37 s. A 1024 generation printed 26.01 s, caption 0.16 s, decoder 4.63 s, steps 2.65–2.66 s. A 512 generation printed 4.43 s, with each step at 0.44 s.
 
-The embedded time is `(1 − sigma) · 1000`, evaluated in float32 on device. Sigma 1 is noise and sigma 0 is the image. The shift is 3. The update adds `(sigma − sigma_next)` times the predicted velocity, on the latent buffer. Head-128 attention is a 32×32 `matmul2d` tile. The scores for that tile stay in the threadgroup. The 512-wide decoder head stays on the scalar attention kernel. Kernel and bandwidth ceilings for a 1280 generation are in [ceilings.md](ceilings.md). The isolated sum is a measurement in [research/generation-ceiling.md](research/generation-ceiling.md). On an M5 Pro with 48 GB an fp4 1280 generation of the smoke prompt printed 100.65 s, caption 0.35 s, decoder 10.43 s, steps 11.12–11.32 s. The int8 record printed 51.74 s, caption 0.15 s, decoder 9.27 s, steps 5.24–5.37 s. An fp4 1024 generation printed 55.84 s, caption 0.16 s, decoder 5.12 s, steps 6.28–6.38 s. The int8 record printed 26.01 s, caption 0.16 s, decoder 4.63 s, steps 2.65–2.66 s.
+- `quantize` without `--int8` writes `models/Z-Image-Turbo-fp4`.
+- It does not read the int8 record.
+- The fp4 directory is not the served record.
+- Run the int8 pack first.
+- A fp4 pack fills the image default only when that key is still empty.
 
-The VAE latent is `z / 0.3611 + 0.1159`. GroupNorm uses 32 groups and epsilon 1e-5. The mid-block attention is one head of 512 channels. PNG bytes use `(clip(x, −1, 1) + 1) / 2`.
+```text
+uv run favlo --z_image_turbo quantize
+```
 
-## Smoke
+### Another safetensors file
 
-`uv run pytest tests/test_z_image_turbo_smoke.py -s` dispatches the shader check. That check does not need the checkpoint. `uv run favlo --z_image_turbo kernels` is the same check. On an M5 Pro with 48 GB the 64×32 fp4 matmul, the K-144 row, and the causal attention case matched with max absolute error 0. `ZIMAGE_SMOKE=1 uv run pytest tests/test_z_image_turbo_smoke.py -s` also generates the recorded images with seed 0, at 512×512 and at 1024×1024. The first passing run writes `smoke.json` in this directory. A later run compares each latent hash. The harness picture check reads the 512 width and height. On an M5 Pro with 48 GB each of the eight 512 steps took 1.29–1.32s. Each of the eight fp4 1024 steps took 6.28–6.38s, and that generation printed 55.84 s. The int8 record at 1024 printed 26.01 s, with each step at 2.65–2.66s. The decoded images were a red cube on a white table.
+`--weights` is one `.safetensors` file, or a directory of those files. With no `--name` and no `--out`, the packed folder is that file name without `.safetensors`, or that directory name, plus `-int8` when `--int8` is set, or `-fp4` otherwise, under `models/`. A name that already ends in that suffix is kept. The folder is the registry id.
 
-`python -m harness.image --pipeline z-image-turbo --tool generate_image --model Z-Image-Turbo-int8` calls that published tool on a serve that is already listening and reads the PNG. It does not score the picture. `python -m harness.image_smoke_agent --pipeline z-image-turbo --tool generate_image --model Z-Image-Turbo-int8` is the vision check. It generates one picture at the pipeline default. The base record is `Z-Image-int8`.
+```text
+uv run favlo --z_image_turbo quantize --int8 --weights models/example-model.safetensors
+```
 
-## Citations
+That registers `example-model-int8`. The client model field is `example-model-int8`.
 
-Cai, Zheng, et al. *Z-Image: An Efficient Image Generation Foundation Model with Single-Stream Diffusion Transformer.* arXiv:2511.22699.
+```text
+uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors
+```
 
-Qwen Team. *Qwen3 Technical Report.* The caption encoder is the 36-layer Qwen3 configuration shipped in the Turbo repository.
+- `--name` replaces that folder.
+- The name is used as written, and it is the registry id.
 
-Peebles and Xie. *Scalable Diffusion Models with Transformers.* AdaLN-Zero.
+```text
+uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors --name example-model
+```
 
-Su et al. *RoFormer: Enhanced Transformer with Rotary Position Embedding.*
+That registers `example-model`. The official folder `Z-Image-Turbo-int8` stays on the official pack.
 
-Lipman et al. *Flow Matching for Generative Modeling.*
+- A weights-only file copies the tokenizer from `models/Z-Image-Turbo` when that checkout contains `tokenizer/tokenizer.json`.
+- Otherwise pass `--tokenizer-source` pointing at a tree that contains `tokenizer/`.
+- The copy is written into the packed record.
+- `--out` names the packed directory.
+- `--name` and `--out` are not used together.
+- A folder name is one token of letters, digits, dots, underscores, or hyphens.
+- A file name that is not such a token needs `--name`.
 
-Rombach et al. *High-Resolution Image Synthesis with Latent Diffusion Models.* The decoder byte map.
+### Draw a picture
 
-Open Compute Project. *OCP Microscaling Formats (MX) Specification.* fp4 E2M1 and E8M0.
+Start the listener:
 
-Dao et al. *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness.* The 32×32 score tile.
+```text
+uv run favlo serve
+```
 
-Apple. *Metal 4 tensor operations,* WWDC26 session 330. `matmul2d`.
+The daemon listens on `http://127.0.0.1:8129`. An image client calls `generate_image`.
+
+- Width and height are multiples of 16, from 16 to 2560.
+- The step count is 8.
+- `--model` is optional.
+- An omitted `--model` uses the image default.
+- After the int8 pack above, on an empty default, that id is `Z-Image-Turbo-int8`.
+
+```text
+uv run favlo media --pipeline z_image_turbo prompt="a red cube on a white table" size=1024x1024 seed=0
+uv run favlo media --pipeline z_image_turbo prompt="a red cube on a white table" size=1024x1024 seed=0 quality=high
+uv run favlo media --pipeline z_image_turbo --model Z-Image-Turbo-int8 --out pack.json prompt="a red cube on a white table"
+```
+
+- `favlo media` does not start the listener.
+- It exits when that port is closed.
+- Stdout is one `file://` URI.
+- This is the command that draws. The pipeline command does not.
+
+The default image is 1024×1024. `--seed` selects the initial noise. An omitted `--model` uses the image default, which the int8 pack sets when that key is empty.
+
+### If download stops
+
+Run `setup` again. Files that already have their published size stay on disk, and a short file continues from the bytes already written.

@@ -1,6 +1,15 @@
 # Ceilings
 
-Kernel and bandwidth ceilings for the kernels this pipeline runs. Reuse these figures while those kernels are unchanged. Recompute this note when one of them changes. Projection times are the earlier measurement. The attention rows were measured again after softmax began writing float32 weights. The kernel times below were measured when every weight image was fp4. The byte counts are the `Qwen3.6-35B-A3B-fp8-e20` record. Language projections, the shared expert, and `lm_head` are fp8. Of the 10,240 routed experts, 2,048 are fp8 and 8,192 are fp4. A decode token reads eight images per layer, counted at that pool mix: 64 fp8 and 256 fp4 of the 320 images.
+- Kernel and bandwidth ceilings for the kernels this pipeline runs.
+- Reuse these figures while those kernels are unchanged.
+- Recompute this note when one of them changes.
+- Projection times are the earlier measurement.
+- The attention rows were measured again after softmax began writing float32 weights.
+- The kernel times below were measured when every weight image was fp4.
+- The byte counts are the `Qwen3.6-35B-A3B-fp8-e20` record.
+- Language projections, the shared expert, and `lm_head` are fp8.
+- Of the 10,240 routed experts, 2,048 are fp8 and 8,192 are fp4.
+- A decode token reads eight images per layer, counted at that pool mix: 64 fp8 and 256 fp4 of the 320 images.
 
 Each time is one command buffer, then a wait. Overlapping command buffers are not added. The times are the median of four samples after one discarded sample.
 
@@ -8,7 +17,21 @@ A 2 GiB streaming read finished in 7093.5 µs, 302.74 GB/s. The bandwidth ceilin
 
 ## Decode
 
-One token. The times are the fp4 weight images. K and V are fp8 E4M3. The forward is 30 Gated DeltaNet layers, 10 attention layers, and the head. Top 8 routed experts. `gdn_in_proj` is the fused qkv, z, a, and b projection. `gemv_fp4_vec` is the output projection, the attention output, the shared expert, and the head. `router_coeff` is the float16 router and the shared-expert coefficient. `moe_gate_silu` and `moe_down_mix` read eight expert images. `rmsnorm_f32` is the layer norm, including the final norm. Attention is two key/value heads: `prefill_fp8_m8` scores the span and the three softmax kernels reduce it. The value mix is `kv_cast_blocks`, `kv_pv_split8`, and `kv_restore_sum`, each in its own command buffer. `kv_cast_blocks` writes one float16 plane in span order and one peak per row per block. `kv_pv_split8` mixes every block. `kv_restore_sum` multiplies each partial by that peak.
+- One token.
+- The times are the fp4 weight images.
+- K and V are fp8 E4M3.
+- The forward is 30 Gated DeltaNet layers, 10 attention layers, and the head.
+- Top 8 routed experts.
+- `gdn_in_proj` is the fused qkv, z, a, and b projection.
+- `gemv_fp4_vec` is the output projection, the attention output, the shared expert, and the head.
+- `router_coeff` is the float16 router and the shared-expert coefficient.
+- `moe_gate_silu` and `moe_down_mix` read eight expert images.
+- `rmsnorm_f32` is the layer norm, including the final norm.
+- Attention is two key/value heads: `prefill_fp8_m8` scores the span and the three softmax kernels reduce it.
+- The value mix is `kv_cast_blocks`, `kv_pv_split8`, and `kv_restore_sum`, each in its own command buffer.
+- `kv_cast_blocks` writes one float16 plane in span order and one peak per row per block.
+- `kv_pv_split8` mixes every block.
+- `kv_restore_sum` multiplies each partial by that peak.
 
 | Kernel | Shape | Count | µs |
 |---|---|---:|---:|
@@ -45,13 +68,27 @@ That sum is 10.28 ms, 97.25 tok/s. A context of 65536 tokens uses the same proje
 | `kv_pv_split8` | 128 blocks of 512 keys | 20 | 166.3 |
 | `kv_restore_sum` | 128 blocks, 8×256 | 20 | 102.1 |
 
-That token is 17.17 ms, 58.23 tok/s. Those times are the fp4-weight measurement. The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per block. On this record the projections, the shared expert, and the head are fp8 images. Context 2048 is 2,805,787,136 bytes, 9.27 ms, 107.90 tok/s. Context 65536 is 3,577,880,576 bytes, 11.82 ms, 84.61 tok/s. The fp8 decode dot loads both scale blocks of a 2048-wide row before the table lookup. One simdgroup owns one row.
+- That token is 17.17 ms, 58.23 tok/s.
+- Those times are the fp4-weight measurement.
+- The byte count is the resident projections, eight expert images per layer, the float16 routers and coefficients, the head, the GDN state read and write, K and V across the visible tokens, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per block.
+- On this record the projections, the shared expert, and the head are fp8 images.
+- Context 2048 is 2,805,787,136 bytes, 9.27 ms, 107.90 tok/s.
+- Context 65536 is 3,577,880,576 bytes, 11.82 ms, 84.61 tok/s.
+- The fp8 decode dot loads both scale blocks of a 2048-wide row before the table lookup.
+- One simdgroup owns one row.
 
 The embed, the query/gate split, RoPE, the top-8 pick, and the key/value store are not in the fp4 total above.
 
 ## Decode kernels the forward launches
 
-Measured on 30 October 2026. Each kernel is one command buffer, then a wait. The first sample is discarded. The figure is the median of the next four. The sum is every dispatch in the token, including the embed, the query/gate split, RoPE, the top-8 pick, and the key/value store. MTP off is one language token. MTP on is that token plus one draft. A full accept at depth 3 emits three tokens from three language steps and three drafts, and the state copy is once per three tokens, so the MTP-on figure adds one third of the snapshot.
+- Measured on 30 October 2026.
+- Each kernel is one command buffer, then a wait.
+- The first sample is discarded.
+- The figure is the median of the next four.
+- The sum is every dispatch in the token, including the embed, the query/gate split, RoPE, the top-8 pick, and the key/value store.
+- MTP off is one language token.
+- MTP on is that token plus one draft.
+- A full accept at depth 3 emits three tokens from three language steps and three drafts, and the state copy is once per three tokens, so the MTP-on figure adds one third of the snapshot.
 
 Context 2048, MTP off, is 12.58 ms, 79.50 tok/s.
 
@@ -89,17 +126,42 @@ Context 2048, MTP off, is 12.58 ms, 79.50 tok/s.
 | `kv_attend_write` | 20 | 2.1 |
 | `gemv_fp8_vec` head | 1 | 1927.4 |
 
-Context 65536, MTP off, uses the same projections and replaces the attention rows. `prefill_fp8_m8` is 112.0 µs, `kv_softmax_max` 7.4 µs, `kv_softmax_prob` 9.4 µs, `kv_softmax_close` 5.2 µs, `kv_cast_blocks` 8.5 µs, `kv_pv_split8` 48.0 µs, and `kv_restore_sum` 26.0 µs, each 20 calls. That token is 15.89 ms, 62.94 tok/s.
+- Context 65536, MTP off, uses the same projections and replaces the attention rows.
+- `prefill_fp8_m8` is 112.0 µs, `kv_softmax_max` 7.4 µs, `kv_softmax_prob` 9.4 µs, `kv_softmax_close` 5.2 µs, `kv_cast_blocks` 8.5 µs, `kv_pv_split8` 48.0 µs, and `kv_restore_sum` 26.0 µs, each 20 calls.
+- That token is 15.89 ms, 62.94 tok/s.
 
-The 90% test for decode uses these kernel ceilings. A draft reads the resident MTP file, the dense MTP matrices, `lm_head` again, and the MTP key/value plane, and it copies the DeltaNet state and the convolution history. Those extra bytes are 637,570,048 at context 2048 and 704,613,376 at context 65536. Added to the language byte count, context 2048 is 3,443,357,184 bytes, 11.37 ms, 87.92 tok/s, and context 65536 is 4,282,493,952 bytes, 14.15 ms, 70.69 tok/s.
+- The 90% test for decode uses these kernel ceilings.
+- A draft reads the resident MTP file, the dense MTP matrices, `lm_head` again, and the MTP key/value plane, and it copies the DeltaNet state and the convolution history.
+- Those extra bytes are 637,570,048 at context 2048 and 704,613,376 at context 65536.
+- Added to the language byte count, context 2048 is 3,443,357,184 bytes, 11.37 ms, 87.92 tok/s, and context 65536 is 4,282,493,952 bytes, 14.15 ms, 70.69 tok/s.
 
-One draft at context 2048, without the snapshot, is 2.35 ms. The snapshot is 481.9 µs. MTP on at context 2048 is 15.09 ms, 66.25 tok/s. MTP on at context 65536 is 18.74 ms, 53.36 tok/s. The draft's head is `gemv_fp8_vec` at 1895.6 µs, and `argmax_span` plus `argmax_index` are 9.8 µs.
+- One draft at context 2048, without the snapshot, is 2.35 ms.
+- The snapshot is 481.9 µs.
+- MTP on at context 2048 is 15.09 ms, 66.25 tok/s.
+- MTP on at context 65536 is 18.74 ms, 53.36 tok/s.
+- The draft's head is `gemv_fp8_vec` at 1895.6 µs, and `argmax_span` plus `argmax_index` are 9.8 µs.
 
-Those MTP-on figures are the serial verify: one language token plus one draft. The paired verify is a different forward. `gemv_fp8_pair`, `gdn_in_proj_fp8_pair`, `attn_qkv_fp8_pair`, and `shared_gate_silu_pair` read each dense fp8 weight once for two activation rows. Gated DeltaNet, attention, and the routed experts still run once per token. On 31 October 2026 an M5 Pro with 48 GB timed `gemv_fp8_pair` against `gemv_fp8_vec`, one command buffer then a wait, the first sample discarded, the median of the next four. At 8192 rows the pair took 264.9 µs and the single row 194.1 µs. At 248320 rows the pair took 1861.6 µs and the single row 2252.2 µs. The pair step has not been timed as its own kernel sum.
+- Those MTP-on figures are the serial verify: one language token plus one draft.
+- The paired verify is a different forward.
+- `gemv_fp8_pair`, `gdn_in_proj_fp8_pair`, `attn_qkv_fp8_pair`, and `shared_gate_silu_pair` read each dense fp8 weight once for two activation rows.
+- Gated DeltaNet, attention, and the routed experts still run once per token.
+- On 31 October 2026 an M5 Pro with 48 GB timed `gemv_fp8_pair` against `gemv_fp8_vec`, one command buffer then a wait, the first sample discarded, the median of the next four.
+- At 8192 rows the pair took 264.9 µs and the single row 194.1 µs.
+- At 248320 rows the pair took 1861.6 µs and the single row 2252.2 µs.
+- The pair step has not been timed as its own kernel sum.
 
 ## Half decode
 
-Measured on 7 November 2026. The live score is `prefill_f16_m8`. The value mix is `kv_cast_blocks`, `kv_pv_f16_split8`, and `kv_restore_sum`, with values stored `[head, channel, token]` and a token stride of 262144. Each block is 512 keys. Each figure is one command buffer, then a wait, the first sample discarded, the median of the next four. One call is the eight query rows of one key/value head. The forward launches that call 20 times. The softmax rows are the 30 October figures: those kernels did not change. The other rows of the 30 October token are unchanged. A half key and a half value are two bytes per channel.
+- Measured on 7 November 2026.
+- The live score is `prefill_f16_m8`.
+- The value mix is `kv_cast_blocks`, `kv_pv_f16_split8`, and `kv_restore_sum`, with values stored `[head, channel, token]` and a token stride of 262144.
+- Each block is 512 keys.
+- Each figure is one command buffer, then a wait, the first sample discarded, the median of the next four.
+- One call is the eight query rows of one key/value head.
+- The forward launches that call 20 times.
+- The softmax rows are the 30 October figures: those kernels did not change.
+- The other rows of the 30 October token are unchanged.
+- A half key and a half value are two bytes per channel.
 
 | Kernel | Context 2048 µs | Context 65536 µs |
 |---|---:|---:|
@@ -111,17 +173,41 @@ Measured on 7 November 2026. The live score is `prefill_f16_m8`. The value mix i
 | `kv_pv_f16_split8` | 28.1 | 242.6 |
 | `kv_restore_sum` | 12.2 | 107.0 |
 
-Twenty calls make the attention 2.66 ms at context 2048 and 12.30 ms at context 65536. Added to the unchanged remainder of the 30 October token, context 2048 is 14.11 ms, 70.9 tok/s, and context 65536 is 23.86 ms, 41.9 tok/s. The 90% test for a half decode uses these kernel ceilings.
+- Twenty calls make the attention 2.66 ms at context 2048 and 12.30 ms at context 65536.
+- Added to the unchanged remainder of the 30 October token, context 2048 is 14.11 ms, 70.9 tok/s, and context 65536 is 23.86 ms, 41.9 tok/s.
+- The 90% test for a half decode uses these kernel ceilings.
 
 ## Half prefill
 
-Measured on 7 November 2026. A score window is `prefill_f16_n64` and the value mix is `prefill_f16_n64_stride`, 16384 query rows, value token stride 262144. The softmax, probability cast, scale, and add rows are the fp8 prefill figures above: those kernels did not change. One 2048-key window is 4488.1 µs. One 4096-key window is 7639.8 µs. The first chunk, one 2048-key window per head, is 1248.9 ms, 1639.8 tok/s. A prompt of 65536 tokens, with the same window counts as the fp8 prompt, is 77645.5 ms, 843.8 tok/s. The 90% test for a half prefill uses this kernel ceiling. Those two totals subtract the 14 November `gdn_chunk_solve` gap below.
+- Measured on 7 November 2026.
+- A score window is `prefill_f16_n64` and the value mix is `prefill_f16_n64_stride`, 16384 query rows, value token stride 262144.
+- The softmax, probability cast, scale, and add rows are the fp8 prefill figures above: those kernels did not change.
+- One 2048-key window is 4488.1 µs.
+- One 4096-key window is 7639.8 µs.
+- The first chunk, one 2048-key window per head, is 1248.9 ms, 1639.8 tok/s.
+- A prompt of 65536 tokens, with the same window counts as the fp8 prompt, is 77645.5 ms, 843.8 tok/s.
+- The 90% test for a half prefill uses this kernel ceiling.
+- Those two totals subtract the 14 November `gdn_chunk_solve` gap below.
 
 ## Prefill
 
-One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks. The resident projections restore an fp8 matrix into a per-row int8 stage, quantize the half activation, multiply with `prefill_i8_n64`, and scale the int32 product back to float. `in_proj_a` and `in_proj_b` stay on `prefill_fp4_e8m0`. Routed experts are one 64-row tile for each of the 256 experts. `moe_group` splits the 16384 assignments into 16 slices and keeps token order inside each expert. The 3366.9 µs row is the single-thread kernel. The Gated DeltaNet recurrence is 32 sub-chunks of 64 tokens (Yang et al., §3.3). A score window is 16384 query rows by up to 4096 keys. The first chunk's limit is 2048 keys, so that chunk is the one 2048-key window per head in the table. A later chunk walks 4096-key windows and, when the limit is not a multiple of 4096, one 2048-key tail. The value product uses token stride 262144.
+- One chunk of 2048 tokens, then a prompt of 65536 tokens as 32 of those chunks.
+- The resident projections restore an fp8 matrix into a per-row int8 stage, quantize the half activation, multiply with `prefill_i8_n64`, and scale the int32 product back to float.
+- `in_proj_a` and `in_proj_b` stay on `prefill_fp4_e8m0`.
+- Routed experts are one 64-row tile for each of the 256 experts.
+- `moe_group` splits the 16384 assignments into 16 slices and keeps token order inside each expert.
+- The 3366.9 µs row is the single-thread kernel.
+- The Gated DeltaNet recurrence is 32 sub-chunks of 64 tokens (Yang et al., §3.3).
+- A score window is 16384 query rows by up to 4096 keys.
+- The first chunk's limit is 2048 keys, so that chunk is the one 2048-key window per head in the table.
+- A later chunk walks 4096-key windows and, when the limit is not a multiple of 4096, one 2048-key tail.
+- The value product uses token stride 262144.
 
-The int8 rows are one command buffer each, the median of four samples after one discarded sample, measured on 25 October 2026. qkv and q are the same 8192 by 2048 shape. That restore was still falling after seven dispatches, from 1455 µs to 579 µs, and the matmul from 1886 µs to 1112 µs. The repeated dispatch settled at 288.0 µs and 1112.9 µs. Those settled figures are the qkv and q rows. The other int8 rows had already settled.
+- The int8 rows are one command buffer each, the median of four samples after one discarded sample, measured on 25 October 2026. qkv and q are the same 8192 by 2048 shape.
+- That restore was still falling after seven dispatches, from 1455 µs to 579 µs, and the matmul from 1886 µs to 1112 µs.
+- The repeated dispatch settled at 288.0 µs and 1112.9 µs.
+- Those settled figures are the qkv and q rows.
+- The other int8 rows had already settled.
 
 | Kernel | Count in one chunk | µs per call |
 |---|---:|---:|
@@ -184,12 +270,30 @@ The int8 rows are one command buffer each, the median of four samples after one 
 | `scatter_add_grouped` | 40 | 609.1 |
 | `residual_rows` | 40 | 55.9 |
 
-On 14 November 2026 the substitution and the state-row dot in `gdn_chunk_solve` each keep four partial sums. Sixteen dispatches in one command buffer, the first sample discarded, the median of the next four, the previous shader interleaved with this one: 304.2 µs before, 244.0 µs after. The table row stays on the 25 October scale, 316.4 − 60.2 = 256.2. One chunk drops by 57.792 ms.
+- On 14 November 2026 the substitution and the state-row dot in `gdn_chunk_solve` each keep four partial sums.
+- Sixteen dispatches in one command buffer, the first sample discarded, the median of the next four, the previous shader interleaved with this one: 304.2 µs before, 244.0 µs after.
+- The table row stays on the 25 October scale, 316.4 − 60.2 = 256.2.
+- One chunk drops by 57.792 ms.
 
-The attention window is the only part of a chunk that changes with the keys already stored. Without that window, one chunk is 1159.171 ms. A 2048-key window is `prefill_fp8_n64` 651.8 µs, `kv_softmax_max_rows` 245.5 µs, `kv_softmax_prob_rows` 1074.5 µs, `kv_softmax_close` 61.9 µs, `kv_cast_probs` 923.4 µs, `prefill_fp8_n64_stride` 775.9 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 161.0 µs, 3954.6 µs together. A 4096-key window is `prefill_fp8_n64` 1295.8 µs, `kv_softmax_max_rows` 370.5 µs, `kv_softmax_prob_rows` 1564.6 µs, `kv_softmax_close` 63.9 µs, `kv_cast_probs` 2422.4 µs, `prefill_fp8_n64_stride` 1570.1 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 177.7 µs, 7525.6 µs together. The first chunk, one 2048-key window per head, is 1238.3 ms, 1653.9 tok/s.
+- The attention window is the only part of a chunk that changes with the keys already stored.
+- Without that window, one chunk is 1159.171 ms.
+- A 2048-key window is `prefill_fp8_n64` 651.8 µs, `kv_softmax_max_rows` 245.5 µs, `kv_softmax_prob_rows` 1074.5 µs, `kv_softmax_close` 61.9 µs, `kv_cast_probs` 923.4 µs, `prefill_fp8_n64_stride` 775.9 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 161.0 µs, 3954.6 µs together.
+- A 4096-key window is `prefill_fp8_n64` 1295.8 µs, `kv_softmax_max_rows` 370.5 µs, `kv_softmax_prob_rows` 1564.6 µs, `kv_softmax_close` 63.9 µs, `kv_cast_probs` 2422.4 µs, `prefill_fp8_n64_stride` 1570.1 µs, `kv_scale_partial` 60.6 µs, and `kv_acc_add` 177.7 µs, 7525.6 µs together.
+- The first chunk, one 2048-key window per head, is 1238.3 ms, 1653.9 tok/s.
 
-A prompt of 65536 tokens is 32 chunks. Chunk n sees n×2048 keys: the floor of n/2 windows of 4096 keys, and one 2048-key window when n is odd. One head walks 256 windows of 4096 keys and 16 windows of 2048 keys. Ten layers and two heads make 20 of each. That prompt is 76890.1 ms, 852.1 tok/s. That is the kernel ceiling for prefill.
+- A prompt of 65536 tokens is 32 chunks.
+- Chunk n sees n×2048 keys: the floor of n/2 windows of 4096 keys, and one 2048-key window when n is odd.
+- One head walks 256 windows of 4096 keys and 16 windows of 2048 keys.
+- Ten layers and two heads make 20 of each.
+- That prompt is 76890.1 ms, 852.1 tok/s.
+- That is the kernel ceiling for prefill.
 
-The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per window. On this record the projections and the shared expert are fp8, and 2,048 of the 10,240 expert images are fp8. One first chunk is 28,688,637,952 bytes. The 65536-token prompt is 4,257,677,574,144 bytes, 14.06 s at 302.74 GB/s, 4659.90 tok/s. The 90% test for prefill uses this kernel ceiling. The int8 rows are the resident projections the forward launches. The packed-tile rows for `in_proj_a`, `in_proj_b`, and the routed experts remain the earlier fp4-weight measurement.
+- The byte count repeats the projections, all 256 expert images, and the float16 routers on every chunk, and adds the GDN state read and write, the K and V bytes of each window, the float32 score and probability writes, the float16 probability scratch, and one float scale per row per window.
+- On this record the projections and the shared expert are fp8, and 2,048 of the 10,240 expert images are fp8.
+- One first chunk is 28,688,637,952 bytes.
+- The 65536-token prompt is 4,257,677,574,144 bytes, 14.06 s at 302.74 GB/s, 4659.90 tok/s.
+- The 90% test for prefill uses this kernel ceiling.
+- The int8 rows are the resident projections the forward launches.
+- The packed-tile rows for `in_proj_a`, `in_proj_b`, and the routed experts remain the earlier fp4-weight measurement.
 
 The embed, the coefficient row, the top-8 pick, the query/gate split, RoPE, the key/value store, and the grouped SiLU after the expert tile are not in this total.

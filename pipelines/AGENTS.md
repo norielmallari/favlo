@@ -2,7 +2,7 @@
 
 One package is one write set. Leave every other package's files untouched. The official list of packages is the root README. This file does not name one.
 
-The as-built note for the package under edit is the README under `docs/` whose folder name matches that package. A process change updates `ARCHITECTURE.md`.
+The README under `docs/` whose folder name matches that package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder. A process change updates the root `ARCHITECTURE.md`. A language-pipeline setup change loads the language-setup skill.
 
 ## Layout
 
@@ -10,7 +10,7 @@ A package name is an identifier. Layout is `pipelines/<model>/<runtime>/`. Impor
 
 Re-export `main` and `PIPELINE` from the package `__init__.py`. Use a regular package. A shader is a text file the module reads. Do not load a hyphenated entry file by path.
 
-One module, one responsibility. Line count is not the trigger. Imports point one way: `formats` to `convert` or `session`, then `runtime`, then `commands`. When two modules need each other, move the shared names into a third module or leave the pieces together. Keep one class in one file. Do not split a class into mixins. Move a large source string, such as a Metal shader, into a text file the module reads. A namespace package is for one name split across distributions. A new model does not edit another package. Do not edit `src/favlo/cli.py` to register a runtime. Update that package's note in the same change that moves one of its modules.
+One module, one responsibility. Line count is not the trigger. Imports point one way: `formats` to `convert` or `session`, then `runtime`, then `commands`. When two modules need each other, move the shared names into a third module or leave the pieces together. Keep one class in one file. Do not split a class into mixins. Move a large source string, such as a Metal shader, into a text file the module reads. A namespace package is for one name split across distributions. A new model does not edit another package. Do not edit `src/favlo/cli.py` to register a runtime. Update that package's `ARCHITECTURE.md` in the same change that moves one of its modules. Update the README when the summary changes.
 
 `favlo serve` is the inference entry. `GET /v1/models` lists the registry. The `model` field on `POST /v1/responses` loads that row. `POST /v1/chat/completions` translates into that request and translates the Response back. Quantize and the other non-serve commands use `favlo --<model>`.
 
@@ -24,7 +24,7 @@ A seam task may edit `language_pipeline.py`, `embeddings_pipeline.py`, `media_pi
 
 ## Algorithms
 
-Every equation comes from a public paper, spec, or vendor document, then maps onto a Metal op an M5 Pro with 48 GB runs. Another repository's source, tests, comments, and design notes are not a reference. Score a formula on this package's own forward. An int4 argmax is not evidence the equation is right. Check the BF16 shader dot of the checkpoint values. Record a package citation in that package's note, and a process citation in `REFERENCES.md`. The as-built form goes in that note, or in `ARCHITECTURE.md` when the change is the listener, the registry, or the console.
+Every equation comes from a public paper, spec, or vendor document, then maps onto a Metal op an M5 Pro with 48 GB runs. Another repository's source, tests, comments, and design notes are not a reference. Score a formula on this package's own forward. An int4 argmax is not evidence the equation is right. Check the BF16 shader dot of the checkpoint values. Record a package citation in that package's `ARCHITECTURE.md`, and a process citation in `REFERENCES.md`. The as-built form goes in that package's `ARCHITECTURE.md`, or in the root `ARCHITECTURE.md` when the change is the listener, the registry, or the console.
 
 Allocate the input path and the output path first. The input path is the key/value cache and the prefill workspace. The output path is decode. An expert atlas, a staging buffer, and a scratch buffer the forward can rebuild receive what remains. When a formula needs more device memory, leave those three allocated, name another module to drop, and say which bytes it returns. A missing kernel stays missing. A host GEMV or a CPU matmul is not a stand-in. A language-model package does not fuse a whole layer. An image, video, music, or voice package may place several kernels of one generation in one command buffer.
 

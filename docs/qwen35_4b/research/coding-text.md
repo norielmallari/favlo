@@ -14,12 +14,17 @@ On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MT
 
 ## Rule
 
-MTP is off. Thinking on uses the thinking card. The banner prints the loaded plane. This row is the run whose banner printed `kv fp8_e4m3`, `mtp off`, `thinking on`, and `vision off`. A banner that prints `half` or `vision on` is a different row. Request 2 loaded the prefix from disk.
+- MTP is off.
+- Thinking on uses the thinking card.
+- The banner prints the loaded plane.
+- This row is the run whose banner printed `kv fp8_e4m3`, `mtp off`, `thinking on`, and `vision off`.
+- A banner that prints `half` or `vision on` is a different row.
+- Request 2 loaded the prefix from disk.
 
 ## Command
 
 ```text
-uv run python -m harness.coding --model qwen35_4b --thinking on --mtp off
+uv run python -m harness.coding --model qwen35-4b --thinking on --mtp off
 ```
 
 The banner prints the loaded plane, MTP, thinking, and vision.
@@ -32,7 +37,11 @@ The banner prints the loaded plane, MTP, thinking, and vision.
 
 ## Search
 
-15 November 2026. Queries: "738.46 OR 28.26 Qwen3.5-4B coding agent fp8_e4m3 vision off tok/s M5 Pro", "Qwen3.5-4B fp8 coding agent text harness M5 Pro tok/s 2026 vision off thinking", and "738.46 OR 28.26 Qwen3.5-4B oMLX Token Atlas text coding agent fp8 M5 Pro". The predecessors in this note are the overlaps those queries returned. The search did not find 738.46 and 28.26 in those sources.
+15 November 2026.
+
+- Queries: "738.46 OR 28.26 Qwen3.5-4B coding agent fp8_e4m3 vision off tok/s M5 Pro", "Qwen3.5-4B fp8 coding agent text harness M5 Pro tok/s 2026 vision off thinking", and "738.46 OR 28.26 Qwen3.5-4B oMLX Token Atlas text coding agent fp8 M5 Pro".
+- The predecessors in this note are the overlaps those queries returned.
+- The search did not find 738.46 and 28.26 in those sources.
 
 ## Corrections
 

@@ -1,6 +1,6 @@
 # Clip ceiling
 
-Measurement note for the `wan22_ti2v_5b` pipeline. The serving contract is [../README.md](../README.md). The per-dispatch rows are in [../ceilings.md](../ceilings.md). This file records the isolated DiT sum and two printed 832×480 clips. It is a measurement of this implementation.
+Measurement note for the `wan22_ti2v_5b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The per-dispatch rows are in [../ceilings.md](../ceilings.md). This file records the isolated DiT sum and two printed 832×480 clips. It is a measurement of this implementation.
 
 ## Remainder
 
@@ -15,11 +15,21 @@ On an M5 Pro with 48 GB the isolated DiT sum at 576×320 and 9 frames is 4.267 s
 
 ## Rule
 
-Each listed kernel runs in its own command buffer. The sample is the median of three dispatches after one discarded sample. The isolated grid is 576×320 and 9 frames, token rows padded from 540 to 576, four knots, and 30 blocks. The native rows are 1280×704 and 121 frames, token rows padded from 27280 to 27328. The printed clips are 832×480 and 9 frames. Host uploads sit outside the isolated times.
+- Each listed kernel runs in its own command buffer.
+- The sample is the median of three dispatches after one discarded sample.
+- The isolated grid is 576×320 and 9 frames, token rows padded from 540 to 576, four knots, and 30 blocks.
+- The native rows are 1280×704 and 121 frames, token rows padded from 27280 to 27328.
+- The printed clips are 832×480 and 9 frames.
+- Host uploads sit outside the isolated times.
 
 ## Command
 
-`uv run favlo --wan22_ti2v_5b ceilings` reprints the isolated medians. The 4.267 s sum is the arithmetic in [../ceilings.md](../ceilings.md) from 25 October 2026. `uv run favlo --wan22_ti2v_5b smoke` prints the `dit` and `decode` lines. The lines below are that print from 26 October 2026. `kernels` checks a synthetic tile and does not regenerate this table.
+- `uv run favlo --wan22_ti2v_5b ceilings` reprints the isolated medians.
+- The 4.267 s sum is the arithmetic in [../ceilings.md](../ceilings.md) from 25 October 2026.
+- `uv run favlo --wan22_ti2v_5b smoke` prints the `dit` and `decode` lines.
+- That smoke subcommand is gone; new clips use `favlo media` only.
+- The lines below are that print from 26 October 2026.
+- `kernels` checks a synthetic tile and does not regenerate this table.
 
 ## Table
 

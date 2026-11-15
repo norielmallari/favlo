@@ -1,14 +1,24 @@
 # Ceilings
 
-Kernel and bandwidth ceilings for one 576×320 clip of 9 frames and 4 Euler steps. The latent is 3×40×72, which is 2160 tokens. `matmul2d` rows are padded to 2176. Eight of the forty blocks are fp8. Text and time stay fp4. The head weight is float16; these times were measured when it was fp4. Reuse these figures while the kernels named here are unchanged. Recompute this note when one of them changes.
+Kernel and bandwidth ceilings for one 576×320 clip of 9 frames and 4 Euler steps.
+
+- The latent is 3×40×72, which is 2160 tokens. `matmul2d` rows are padded to 2176.
+- Eight of the forty blocks are fp8. Text and time stay fp4.
+- The head weight is float16. These times were measured when it was fp4.
+- Reuse these figures while the kernels named here are unchanged. Recompute this note when one of them changes.
 
 Each time is one command buffer, then a wait. The time is `GPUEndTime − GPUStartTime`. Each kernel is timed alone. The figure is the median of five dispatches after one discarded sample.
 
-A 2 GiB copy finished in 15.503 ms, which is 277.04 GB/s counting the read and the write. The bandwidth ceiling divides bytes by 277.04 GB/s.
+A 2 GiB copy finished in 15.503 ms. That is 277.04 GB/s counting the read and the write. The bandwidth ceiling divides bytes by 277.04 GB/s.
 
 ## DiT
 
-Four steps and forty layers. A layer projects six token rows of 5120×5120 (self q, k, v, o, and cross q, o), two text rows of 5120×5120 (cross k, v), one feed-forward up of 13824×5120, and one feed-forward down of 5120×13824. Each projection is `scale_gather`, `matmul_fp4` or `matmul_fp8`, `rescale_rows`, and `add_bias`. The layer also runs self-attention over 2160 tokens and cross-attention over the 512 text positions, 40 heads of 128. Thirty-two layers in a step are fp4 and eight are fp8, so the four steps are 128 fp4 layers and 32 fp8 layers.
+Four steps and forty layers.
+
+- A layer projects six token rows of 5120×5120 (self q, k, v, o, and cross q, o), two text rows of 5120×5120 (cross k, v), one feed-forward up of 13824×5120, and one feed-forward down of 5120×13824.
+- Each projection is `scale_gather`, `matmul_fp4` or `matmul_fp8`, `rescale_rows`, and `add_bias`.
+- The layer also runs self-attention over 2160 tokens and cross-attention over the 512 text positions, 40 heads of 128.
+- Thirty-two layers in a step are fp4 and eight are fp8. The four steps are 128 fp4 layers and 32 fp8 layers.
 
 | Kernel | Shape | Count | ms |
 |---|---|---:|---:|
@@ -28,7 +38,12 @@ Four steps and forty layers. A layer projects six token rows of 5120×5120 (self
 | `attend_q4` | 2160×2160, 40×128 | 160 | 51.875 |
 | `attend_q4` | 2160×512, 40×128 | 160 | 10.664 |
 
-The 512-row `matmul_fp4` with K 5120 counts the cross k and v projections and the second text embedding. The K 4096 row is the first text embedding. The 64-row rows are the time embedding and the time projection. The 2176×64 row is the head. Layer norms, gates, and the feed-forward activation run once per layer. `patch_embed` and the Euler update run once per step.
+- The 512-row `matmul_fp4` with K 5120 counts the cross k and v projections and the second text embedding.
+- The K 4096 row is the first text embedding.
+- The 64-row rows are the time embedding and the time projection.
+- The 2176×64 row is the head.
+- Layer norms, gates, and the feed-forward activation run once per layer.
+- `patch_embed` and the Euler update run once per step.
 
 | Kernel | Where | Count | ms |
 |---|---|---:|---:|
@@ -59,11 +74,20 @@ The 512-row `matmul_fp4` with K 5120 counts the cross k and v projections and th
 
 The gather, rescale, and bias for the text, time, and head projections, plus `gelu_tanh` on the text rows, `silu`, `add_embed_half`, `sinusoid`, `unpatchify`, `condition36`, and `axpy`, add 0.002 s. The unrounded median sum for the DiT is 32.017 s.
 
-`attend_q4` reads each query once, writes the destination once, and walks each key and each value once for every group of four queries. One self-attention call is 47,864,217,600 bytes. One hundred sixty calls are 27.643 s at 277.04 GB/s. The measured self-attention is 8.300 s. One cross-attention call is 11,413,094,400 bytes. One hundred sixty calls are 6.591 s at the same bandwidth. The measured cross-attention is 1.706 s.
+`attend_q4` reads each query once and writes the destination once. It walks each key and each value once for every group of four queries.
+
+- One self-attention call is 47,864,217,600 bytes. One hundred sixty calls are 27.643 s at 277.04 GB/s. The measured self-attention is 8.300 s.
+- One cross-attention call is 11,413,094,400 bytes. One hundred sixty calls are 6.591 s at the same bandwidth. The measured cross-attention is 1.706 s.
 
 ## umT5
 
-The smoke prompt is 9 tokens. `matmul_f16` pads those rows to 64. Each of the 24 layers runs four 4096×4096 linears, two 10240×4096 linears, one 4096×10240 linear, `attend_bias` over 9×9 with 64 heads of 64, two RMSNorms, a gated GELU, and two residual adds. One final RMSNorm follows the stack. A linear is `cast_half` and half `matmul2d`. The unrounded sum is 0.049 s.
+The smoke prompt is 9 tokens. `matmul_f16` pads those rows to 64.
+
+- Each of the 24 layers runs four 4096×4096 linears, two 10240×4096 linears, one 4096×10240 linear, `attend_bias` over 9×9 with 64 heads of 64, two RMSNorms, a gated GELU, and two residual adds.
+- One final RMSNorm follows the stack.
+- A linear is `cast_half` and half `matmul2d`.
+
+The unrounded sum is 0.049 s.
 
 | Kernel | Shape | Count | ms |
 |---|---|---:|---:|
@@ -77,7 +101,13 @@ The token-row read from the checkpoint is outside this sum.
 
 ## VAE
 
-Encode walks the first pixel frame, then two groups of four. Decode walks the three latent frames. A convolution of at least 32 output channels, 1024 outputs, and 64 taps is `conv_pack` once, then `conv_im2col`, half `matmul_f16`, and `conv_scatter` for each 4096-row tile. That dispatch is one command buffer. Smaller convolutions stay on float `conv3d`. The shapes at or above 0.25 s in aggregate:
+Encode walks the first pixel frame, then two groups of four. Decode walks the three latent frames.
+
+- A convolution of at least 32 output channels, 1024 outputs, and 64 taps is `conv_pack` once, then `conv_im2col`, half `matmul_f16`, and `conv_scatter` for each 4096-row tile.
+- That dispatch is one command buffer.
+- Smaller convolutions stay on float `conv3d`.
+
+The shapes at or above 0.25 s in aggregate:
 
 | Input | Weight | Count | ms |
 |---|---|---:|---:|
@@ -89,10 +119,21 @@ Encode walks the first pixel frame, then two groups of four. Decode walks the th
 | 384×3×80×144 | 384×384×3×3×3 | 8 | 45.172 |
 | 384×4×80×144 | 384×384×3×3×3 | 8 | 60.824 |
 
-The other 49 shapes are 143 calls and add 1.074 s. All 207 calls sum to 6.733 s. `spatial_attend_lane` runs six times at 384 channels over 40×72, median 419.941 ms, 2.520 s. The channel RMS, clipped SiLU, causal cache, resample, and the latent affine are 859 calls and add 0.524 s. The VAE sum is 9.777 s.
+The other 49 shapes are 143 calls and add 1.074 s. All 207 calls sum to 6.733 s.
+
+`spatial_attend_lane` runs six times at 384 channels over 40×72. Median 419.941 ms. Total 2.520 s.
+
+The channel RMS, clipped SiLU, causal cache, resample, and the latent affine are 859 calls and add 0.524 s. The VAE sum is 9.777 s.
 
 ## Clip
 
 The DiT, the 9-token encoder, and the VAE sum to 41.843 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 34.234 s. The expert pack read and the AVI pack are outside the kernel sum.
 
-A 9-frame 576×320 smoke printed umT5 2.42 s, VAE encode 2.61 s, four steps 8.01 s, 8.02 s, 8.00 s, and 8.04 s, and VAE decode 3.96 s. Those stages sum to 41.06 s, within 41.843 s / 0.9.
+A 9-frame 576×320 smoke printed:
+
+- umT5 2.42 s
+- VAE encode 2.61 s
+- four steps 8.01 s, 8.02 s, 8.00 s, and 8.04 s
+- VAE decode 3.96 s
+
+Those stages sum to 41.06 s, within 41.843 s / 0.9.

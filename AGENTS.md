@@ -4,7 +4,7 @@ Rules for coding agents in **Favlo**.
 
 Read this file first. Then read [ARCHITECTURE.md](ARCHITECTURE.md) for the map and the write set. The package being edited has its own note. Papers and specifications are [REFERENCES.md](REFERENCES.md). Measured research claims are [RESEARCH.md](RESEARCH.md). Cite this software from [CITATION.cff](CITATION.cff). A package's own citations live in its note. The product name, the one-pipeline rule, and the official package list are [README.md](README.md). AI-assisted features are [docs/ai-assistance](docs/ai-assistance/README.md).
 
-[ARCHITECTURE.md](ARCHITECTURE.md) wins for the listener, the registry, the console, and which files an agent may edit. A package note wins for that package's kernels.
+[ARCHITECTURE.md](ARCHITECTURE.md) wins for the listener, the registry, the console, and which files an agent may edit. `docs/<model>/ARCHITECTURE.md` wins for that package's kernels. That package's README is a summary.
 
 ## Where instructions live
 
@@ -26,7 +26,7 @@ Cursor loads this file for every chat. A nested `AGENTS.md` applies when the wor
 
 The official list is the Supported Models table and the checkpoint license table in the root README. This file does not name a package.
 
-Skills in [`.cursor/skills`](.cursor/skills) hold the procedures. Load the skill whose description matches the task. A GPU smoke is smoke-testing. The listener is favlo-server. A language or embeddings shell check is seam-checks. Media preemption is media-preemption. A web happy path is web-happy-path. A measured claim is research-claims. A new package is bootstrap-new-model. A prefix store is prefix-caching. Language-model rate work is optimization-loop. Image generation time is optimization-image.
+Skills in [`.cursor/skills`](.cursor/skills) hold the procedures. Load the skill whose description matches the task. A GPU smoke is smoke-testing. The listener is favlo-server. A language or embeddings shell check is seam-checks. Media preemption is media-preemption. A web happy path is web-happy-path. A measured claim is research-claims. A new package is bootstrap-new-model. A language-pipeline setup is language-setup. A prefix store is prefix-caching. Language-model rate work is optimization-loop. Image generation time is optimization-image.
 
 ## Changes
 
@@ -80,13 +80,13 @@ A chat debug uses the Favlo horse only. That is the seeded agent named Favlo, on
 
 Write algorithms from public research documents: papers, published specifications, and vendor hardware documentation. Do not open another application's tree and port its implementation. That covers local checkouts of inference runtimes and of corpus builders. Do not launch another application's environment.
 
-A package's calibration strings are data, not an algorithm. The registry default is the language model a bare request loads. Its as-built note is the README under `docs/` whose folder matches that registry row.
+A package's calibration strings are data, not an algorithm. The registry default is the language model a bare request loads. Its README under `docs/` is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder.
 
-Do not invent routing hits, calibration energies, or hidden-state errors. A measurement belongs in that package's note.
+Do not invent routing hits, calibration energies, or hidden-state errors. A measurement belongs in that package's research file.
 
 ## Docs
 
-A package change updates that package's `docs/<model>/` note in the same change. A process change (listener, registry, console, or the write set) updates [ARCHITECTURE.md](ARCHITECTURE.md). An AI-assisted feature change updates [docs/ai-assistance](docs/ai-assistance/README.md) in the same change. Add a page under that folder when the feature needs its own note, and list the page from that folder's README. Do not edit another package's note to describe this one.
+A package change updates that package's `docs/<model>/` files in the same change. The README there is a summary: what the package is, how to run it, the checkpoint and license, and links. Kernel layout, record bytes, forward order, and registry field tables go in `ARCHITECTURE.md` in that same folder. A caller-visible default changes the README. A dispatch or layout change changes `ARCHITECTURE.md`. A process change (listener, registry, console, or the write set) updates [ARCHITECTURE.md](ARCHITECTURE.md). An AI-assisted feature change updates [docs/ai-assistance](docs/ai-assistance/README.md) in the same change. Add a page under that folder when the feature needs its own note, and list the page from that folder's README. Do not edit another package's note to describe this one.
 
 `docs/` is as-built only, plus a measured research remainder at `docs/<model>/research/<slug>.md`. That file does not change the serving note until the behavior ships. Do not commit plan or option-comparison notes under `docs/`. Load research-claims before documenting a research claim. A needle or coding-agent run that printed a prefill sum and a decode sum is that claim.
 

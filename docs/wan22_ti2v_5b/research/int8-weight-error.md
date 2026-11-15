@@ -1,6 +1,6 @@
 # Int8 weight error
 
-Measurement note for the `wan22_ti2v_5b` pipeline. The serving contract is [../README.md](../README.md). This file records the worst relative RMS of this quantizer. It is a measurement of the checkout.
+Measurement note for the `wan22_ti2v_5b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records the worst relative RMS of this quantizer. It is a measurement of the checkout.
 
 ## Remainder
 
@@ -15,7 +15,7 @@ The worst int8 relative RMS is 0.014504 on `blocks.11.ffn.2`. A search on 26 Oct
 
 ## Rule
 
-Relative RMS is the RMS of the residual divided by the RMS of the source matrix, scored in float32 after the int8 codes are multiplied by the row scale. A zero source scores 0. The half-step bound is 1/254 of the row peak. The relative RMS uses the matrix RMS as the denominator, so a matrix whose peak is set by a few weights can score above that bound.
+Relative RMS is the RMS of the residual divided by the RMS of the source matrix. It is scored in float32 after the int8 codes are multiplied by the row scale. A zero source scores 0. The half-step bound is 1/254 of the row peak. The relative RMS uses the matrix RMS as the denominator. A matrix whose peak is set by a few weights can score above that bound.
 
 ## Command
 

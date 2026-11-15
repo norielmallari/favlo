@@ -1,14 +1,14 @@
 # Generation time
 
-Measurement note for the `z_image_base` pipeline. The serving contract is [../README.md](../README.md). This file records two printed generations of the int8 record. It is a measurement of this implementation.
+Measurement note for the `z_image_base` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records two printed generations of the int8 record. It is a measurement of this implementation.
 
 ## Remainder
 
-On an M5 Pro with 48 GB, one 512 image at 50 steps and guidance 4 printed 70.47 s, and one 1024 image at the same step count and guidance printed 362.05 s. A search on 9 November 2026 did not find those prints.
+On an M5 Pro with 48 GB, one 512 image at 50 steps and guidance 4 printed 70.47 s. One 1024 image at the same step count and guidance printed 362.05 s. A search on 9 November 2026 did not find those prints.
 
 ## Predecessors
 
-- Method. Cai et al. ([arXiv:2511.22699](https://arxiv.org/abs/2511.22699)) define the single-stream diffusion transformer and the flow-matching sampler. The [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image) card recommends 28–50 steps and guidance 3–5, and its example uses 50 steps and guidance 4.
+- Method. Cai et al. ([arXiv:2511.22699](https://arxiv.org/abs/2511.22699)) define the single-stream diffusion transformer and the flow-matching sampler. The [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image) card recommends 28–50 steps and guidance 3–5. Its example uses 50 steps and guidance 4.
 - Task. [mlx-teacache](https://github.com/IonDen/mlx-teacache/blob/main/docs/variants/z-image-base.md) reports a 227.4 s median for a 512 image at 50 steps and guidance 4 with 8-bit MLX weights on an M1 Max with 32 GB. [vram16](https://vram16.ullu-egg.com/en/models/z-image-base/) reports 13.21 s for a 1024 image at 25 steps with int8 weights on an RTX 5080. [ixim/Z-Image-INT8](https://huggingface.co/ixim/Z-Image-INT8) reports 46.79 s average for a 1024 image at 50 steps and guidance 4 with weight-only int8 on an RTX 5090. [ComfyUI-ZImage-Triton](https://github.com/newgrit1004/ComfyUI-ZImage-Triton/blob/main/benchmark/BENCHMARK.md) reports 15.32 s for a 1024 image at 30 steps and guidance 4 with int8 Hadamard kernels.
 - Measurement. Those figures are other engines, other machines, or another step count. They do not publish these two prints.
 - Mechanism. The activation is quantized in groups of 128 along K. A positive guidance runs the prompt velocity and the negative velocity inside the printed step time.

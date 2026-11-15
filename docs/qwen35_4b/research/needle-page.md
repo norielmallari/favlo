@@ -14,9 +14,18 @@ On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values, MTP o
 
 ## Rule
 
-`--mode page` is the default. Thinking is off. MTP is off. Seed is 0. Depth is 0.5. The loaded plane is the registry `kv_cache` after aliases. An omitted registry cache uses `fp8_e4m3`. This table is the row whose banner printed `kv fp8_e4m3`, `mtp off`, and `thinking off`. A banner that prints `half`, `mtp on`, thinking on, or another depth is a different row.
+- `--mode page` is the default.
+- Thinking is off.
+- MTP is off.
+- Seed is 0.
+- Depth is 0.5.
+- The loaded plane is the registry `kv_cache` after aliases.
+- An omitted registry cache uses `fp8_e4m3`.
+- This table is the row whose banner printed `kv fp8_e4m3`, `mtp off`, and `thinking off`.
+- A banner that prints `half`, `mtp on`, thinking on, or another depth is a different row.
 
-The file is replayed inside tool results, so the finished transcript has to fit the served window. This run closed at 11989 prompt tokens over six requests.
+- The file is replayed inside tool results, so the finished transcript has to fit the served window.
+- This run closed at 11989 prompt tokens over six requests.
 
 ## Command
 
@@ -34,7 +43,11 @@ The banner prints the loaded plane, MTP, thinking, and mode.
 
 ## Search
 
-3 November 2026. Queries: "Qwen3.5-4B needle-in-a-haystack 65536 tok/s Apple Silicon Metal fp8", "Qwen3.5-4B oMLX prefill decode tok/s M5 Pro 2026", and "863.02 OR 25.58 Qwen3.5-4B needle page fp8_e4m3". The predecessors in this note are the overlaps those queries returned. The search did not find 863.02 and 25.58 in those sources.
+3 November 2026.
+
+- Queries: "Qwen3.5-4B needle-in-a-haystack 65536 tok/s Apple Silicon Metal fp8", "Qwen3.5-4B oMLX prefill decode tok/s M5 Pro 2026", and "863.02 OR 25.58 Qwen3.5-4B needle page fp8_e4m3".
+- The predecessors in this note are the overlaps those queries returned.
+- The search did not find 863.02 and 25.58 in those sources.
 
 ## Corrections
 
@@ -42,7 +55,12 @@ Later finds are appended here. The sections above stay as committed.
 
 ### 5 November 2026 — same page needle
 
-Same plane, MTP off, thinking off, 65536 tokens, depth 0.5, seed 0. The run passed. Prefill summed to 864.79 tok/s and decode to 25.81 tok/s over six requests that closed at 11989 prompt tokens. A search on 5 November 2026 did not find that table. Queries: "864.79 OR 25.81 Qwen3.5-4B needle page 65536 tok/s", and "Qwen3.5-4B 65536 needle-in-a-haystack prefill decode tok/s M5 Pro fp8 2026". The closest 64k rate is [oMLX on an M5 with 32 GB](https://omlx.ai/benchmarks/performance/oxv7o7p8) at 681.9 tok/s prompt processing and 24.0 tok/s generation for a 4-bit build. [Andrew Rose](https://andrewroseit.com/posts/e21j-multikey-needle-4b-context-curve/) records a multikey needle pass or fail from 128k to 512k. Neither is this page-needle sum on the fp8 record with `fp8_e4m3` keys and values.
+Same plane, MTP off, thinking off, 65536 tokens, depth 0.5, seed 0. The run passed. Prefill summed to 864.79 tok/s and decode to 25.81 tok/s over six requests that closed at 11989 prompt tokens. A search on 5 November 2026 did not find that table.
+
+- Queries: "864.79 OR 25.81 Qwen3.5-4B needle page 65536 tok/s", and "Qwen3.5-4B 65536 needle-in-a-haystack prefill decode tok/s M5 Pro fp8 2026".
+- The closest 64k rate is [oMLX on an M5 with 32 GB](https://omlx.ai/benchmarks/performance/oxv7o7p8) at 681.9 tok/s prompt processing and 24.0 tok/s generation for a 4-bit build.
+- [Andrew Rose](https://andrewroseit.com/posts/e21j-multikey-needle-4b-context-curve/) records a multikey needle pass or fail from 128k to 512k.
+- Neither is this page-needle sum on the fp8 record with `fp8_e4m3` keys and values.
 
 ```text
 uv run python -m harness.needle --model qwen35-4b --tokens 65536 --depth 0.5 --mtp off --thinking off --mode page

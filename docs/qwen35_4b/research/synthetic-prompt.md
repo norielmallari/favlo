@@ -4,7 +4,13 @@ Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHI
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MTP off passed a cold instruct prompt. A 512-token prompt prefilled at 2239.26 tok/s and decoded 61 tokens at 40.79 tok/s. A 10000-token prompt prefilled at 991.90 tok/s and decoded 128 tokens at 14.28 tok/s. The end-to-end rates, prefill plus decode, were 331.21 tok/s and 531.93 tok/s. A search on 4 November 2026 did not find that table.
+On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MTP off passed a cold instruct prompt.
+
+- A 512-token prompt prefilled at 2239.26 tok/s and decoded 61 tokens at 40.79 tok/s.
+- A 10000-token prompt prefilled at 991.90 tok/s and decoded 128 tokens at 14.28 tok/s.
+- The end-to-end rates, prefill plus decode, were 331.21 tok/s and 531.93 tok/s.
+
+A search on 4 November 2026 did not find that table.
 
 ## Predecessors
 
@@ -14,7 +20,16 @@ On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MT
 
 ## Rule
 
-MTP is off. Thinking is off, so the request uses the instruct card and `reasoning.effort` `none`. The banner prints the loaded plane. Each measured prompt is one user message and encodes to that length under the chat template, including the template tokens. A 64-token warmup runs first. The measured prompts start with different labels, so each prefill is a cache miss. Decode is capped at 128 tokens. A stop before that cap is the kept length. The end-to-end rate adds the prefill tokens to the decode tokens and adds those two clocks. A banner that prints `half`, `mtp on`, or `thinking on` is a different row.
+- MTP is off.
+- Thinking is off, so the request uses the instruct card and `reasoning.effort` `none`.
+- The banner prints the loaded plane.
+- Each measured prompt is one user message and encodes to that length under the chat template, including the template tokens.
+- A 64-token warmup runs before the measured prompts.
+- The measured prompts start with different labels, so each prefill is a cache miss.
+- Decode is capped at 128 tokens.
+- A stop before that cap is the kept length.
+- The end-to-end rate adds the prefill tokens to the decode tokens and adds those two clocks.
+- A banner that prints `half`, `mtp on`, or `thinking on` is a different row.
 
 ## Command
 
@@ -33,7 +48,11 @@ The banner prints the loaded plane, MTP, thinking, and the decode cap.
 
 ## Search
 
-4 November 2026. Queries: "Qwen3.5-4B pp512 tg128 prefill tok/s Metal OR MLX OR llama.cpp M5 Pro 2026", and "2239.26 OR 991.90 OR 331.21 OR 531.93 Qwen3.5-4B synthetic prompt fp8_e4m3". The predecessors in this note are the overlaps those queries returned. The search did not find 2239.26 and 40.79, or 991.90 and 14.28, in those sources.
+4 November 2026.
+
+- Queries: "Qwen3.5-4B pp512 tg128 prefill tok/s Metal OR MLX OR llama.cpp M5 Pro 2026", and "2239.26 OR 991.90 OR 331.21 OR 531.93 Qwen3.5-4B synthetic prompt fp8_e4m3".
+- The predecessors in this note are the overlaps those queries returned.
+- The search did not find 2239.26 and 40.79, or 991.90 and 14.28, in those sources.
 
 ## Corrections
 
@@ -41,10 +60,15 @@ Later finds are appended here. The sections above stay as committed.
 
 ### 15 November 2026 — 2048-token prompt
 
-Same plane, MTP off, and the instruct card. A cold 2048-token prompt prefilled at 1471.55 tok/s and decoded 128 tokens at 26.63 tok/s. End to end was 350.97 tok/s. A search on 15 November 2026 did not find 1471.55 and 26.63 in these sources. Queries: "1471.55 OR 26.63 OR 350.97 Qwen3.5-4B prefill decode tok/s", and "Qwen3.5-4B pp2048 tg128 MLX M5 Pro fp8 prefill tok/s 2026". Closest overlaps were [oMLX Qwen3.5-4B-8bit on a 20-core M5 Pro](https://omlx.ai/benchmarks/performance/x0t6bie9) at 2643 tok/s prefill and 55.4 tok/s decode at 4096 context, [oMLX Qwen3.5-4B-MLX-8bit on a 20-core M5 Pro](https://omlx.ai/benchmarks/performance/wia8vwen) at 2564 tok/s prefill and 52.5 tok/s decode at 4096 context, and [FastFlowLM](https://fastflowlm.com/docs/benchmarks/qwen3.5_results/) at 445.63 tok/s prefill and 15.6 tok/s decode for Qwen3.5-4B at 2048 tokens on XDNA2. None of them is this `fp8_e4m3` table. The 512 and 10000 rows above stay the 4 November measurement.
+Same plane, MTP off, and the instruct card. A cold 2048-token prompt prefilled at 1471.55 tok/s and decoded 128 tokens at 26.63 tok/s. End to end was 350.97 tok/s. A search on 15 November 2026 did not find 1471.55 and 26.63 in these sources.
+
+- Queries: "1471.55 OR 26.63 OR 350.97 Qwen3.5-4B prefill decode tok/s", and "Qwen3.5-4B pp2048 tg128 MLX M5 Pro fp8 prefill tok/s 2026".
+- Closest overlaps were [oMLX Qwen3.5-4B-8bit on a 20-core M5 Pro](https://omlx.ai/benchmarks/performance/x0t6bie9) at 2643 tok/s prefill and 55.4 tok/s decode at 4096 context, [oMLX Qwen3.5-4B-MLX-8bit on a 20-core M5 Pro](https://omlx.ai/benchmarks/performance/wia8vwen) at 2564 tok/s prefill and 52.5 tok/s decode at 4096 context, and [FastFlowLM](https://fastflowlm.com/docs/benchmarks/qwen3.5_results/) at 445.63 tok/s prefill and 15.6 tok/s decode for Qwen3.5-4B at 2048 tokens on XDNA2.
+- None of them is this `fp8_e4m3` table.
+- The 512 and 10000 rows above stay the 4 November measurement.
 
 ```text
-uv run python -m harness.synthetic --model qwen35_4b --tokens 2048 --decode 128 --thinking off --mtp off
+uv run python -m harness.synthetic --model qwen35-4b --tokens 2048 --decode 128 --thinking off --mtp off
 ```
 
 | Prompt tokens | Prefill | Decode | End to end |

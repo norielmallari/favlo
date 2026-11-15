@@ -23,7 +23,7 @@ def read_guide(name: str) -> str:
 
 
 def setup_pipelines(root: Path | None = None) -> tuple[str, ...]:
-    """Pipeline ids that have ``docs/<pipeline>/SETUP.md``."""
+    """Pipeline ids that have ``docs/<pipeline>/README.md``."""
     base = repo_root() if root is None else root
     known = set(pipeline_names(base))
     docs = base / "docs"
@@ -32,7 +32,7 @@ def setup_pipelines(root: Path | None = None) -> tuple[str, ...]:
     found = [
         path.name
         for path in sorted(docs.iterdir())
-        if path.name in known and (path / "SETUP.md").is_file()
+        if path.name in known and (path / "README.md").is_file()
     ]
     return tuple(found)
 
@@ -46,4 +46,4 @@ def read_setup(pipeline: str, root: Path | None = None) -> str:
         message = f"unknown setup guide {name}; known: {listed}"
         raise ValueError(message)
     base = repo_root() if root is None else root
-    return (base / "docs" / name / "SETUP.md").read_text(encoding="utf-8")
+    return (base / "docs" / name / "README.md").read_text(encoding="utf-8")

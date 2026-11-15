@@ -1,6 +1,6 @@
 # Int8 weight error
 
-Measurement note for the `wan22_i2v` pipeline. The serving contract is [../README.md](../README.md).
+Measurement note for the `wan22_i2v` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## Remainder
 
@@ -8,14 +8,18 @@ The worst int8 relative RMS against BF16 is 0.017063 on high-noise `blocks.0.sel
 
 ## Predecessors
 
-- Method. Symmetric per-channel int8 stores one scale per output channel. [shraey/umt5-xxl-mlx](https://huggingface.co/shraey/umt5-xxl-mlx) uses that scheme for umT5 and reports a worst cosine of 0.998631. [unsloth/Wan2.2-I2V-A14B-FP8](https://huggingface.co/unsloth/Wan2.2-I2V-A14B-FP8) uses torchao per-channel int8 weights and reports a same-seed first-frame LPIPS of 0.15. [berryber09/Wan2.2-I2V-14B-INT8-W8A8](https://huggingface.co/berryber09/Wan2.2-I2V-14B-INT8-W8A8) uses learned tensorwise scales and calls the result near-lossless. [LightX2V](https://huggingface.co/lightx2v/Wan2.2-Distill-Models/tree/main) publishes int8 4-step expert files.
+- Method. Symmetric per-channel int8 stores one scale per output channel.
+  - [shraey/umt5-xxl-mlx](https://huggingface.co/shraey/umt5-xxl-mlx) uses that scheme for umT5 and reports a worst cosine of 0.998631.
+  - [unsloth/Wan2.2-I2V-A14B-FP8](https://huggingface.co/unsloth/Wan2.2-I2V-A14B-FP8) uses torchao per-channel int8 weights and reports a same-seed first-frame LPIPS of 0.15.
+  - [berryber09/Wan2.2-I2V-14B-INT8-W8A8](https://huggingface.co/berryber09/Wan2.2-I2V-14B-INT8-W8A8) uses learned tensorwise scales and calls the result near-lossless.
+  - [LightX2V](https://huggingface.co/lightx2v/Wan2.2-Distill-Models/tree/main) publishes int8 4-step expert files.
 - Task. [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B). [google/umt5-xxl](https://huggingface.co/google/umt5-xxl).
 - Measurement. Those sources publish cosine, LPIPS, or a qualitative label. They do not publish this relative-RMS table.
 - Mechanism. Each code is the nearest integer in −127…127. The scale is the channel peak divided by 127. Half a step is that peak divided by 254.
 
 ## Rule
 
-Relative RMS is the RMS of the residual divided by the RMS of the BF16 matrix, scored in float32 after the int8 codes are multiplied by the channel scale. A zero source scores 0. The half-step bound is 1/254 of the channel peak. The relative RMS uses the matrix RMS as the denominator, so a matrix whose peak is set by a few weights can score above that bound.
+Relative RMS is the RMS of the residual divided by the RMS of the BF16 matrix. It is scored in float32 after the int8 codes are multiplied by the channel scale. A zero source scores 0. The half-step bound is 1/254 of the channel peak. The relative RMS uses the matrix RMS as the denominator. A matrix whose peak is set by a few weights can score above that bound.
 
 ## Command
 

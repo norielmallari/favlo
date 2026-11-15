@@ -1,8 +1,19 @@
 # Ceilings
 
-Kernel ceilings from `uv run favlo --wan22_ti2v_5b ceilings` on 25 October 2026. Each time is one command buffer, then a wait, the median of three dispatches after one discarded sample. Host uploads sit outside the timed region. A generation may submit several of these kernels before it waits. This table still times each kernel on its own.
+Kernel ceilings from `uv run favlo --wan22_ti2v_5b ceilings` on 25 October 2026.
 
-These rows time the 576×320, 9-frame token grid: four knots, 30 blocks, token rows padded from 540 to 576. The served smoke is 832×480 and 9 frames for both clips. A native clip is 1280×704, 121 frames, token rows padded from 27280 to 27328. Self-attention counts one query tile of 64 against 27296 keys.
+- Each time is one command buffer, then a wait.
+- The time is the median of three dispatches after one discarded sample.
+- Host uploads sit outside the timed region.
+- A generation may submit several of these kernels before it waits.
+- This table still times each kernel on its own.
+
+These rows time the 576×320, 9-frame token grid.
+
+- Four knots, 30 blocks, token rows padded from 540 to 576.
+- The recorded clips are 832×480 and 9 frames.
+- A native clip is 1280×704, 121 frames, token rows padded from 27280 to 27328.
+- Self-attention counts one query tile of 64 against 27296 keys.
 
 | Kernel | Shape | Count | Seconds |
 |---|---|---:|---:|
@@ -24,4 +35,6 @@ The smoke DiT sum is **4.267 s**. Text, the VAE, and the host copies around thes
 | `gemm_f16_tn` | 64×27296, K 128 | 1,229,760 | 0.000233 |
 | `gemm_f16_nn` | 64×128, K 27296 | 1,229,760 | 0.000554 |
 
-The native linears sum to **23.224 s**. The native down GEMM reached 52.64 TOPS. The native attention sum is **967.822 s**, one launch per query tile per head. A streaming copy was not in this command, so this note does not state a bandwidth ceiling.
+The native linears sum to **23.224 s**. The native down GEMM reached 52.64 TOPS.
+
+The native attention sum is **967.822 s**, one launch per query tile per head. A streaming copy was not in this command, so this note does not state a bandwidth ceiling.

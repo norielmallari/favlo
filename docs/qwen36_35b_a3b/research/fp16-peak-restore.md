@@ -1,10 +1,18 @@
 # Float16 peak restore
 
-Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The forward already divides each value-mix window by its peak before the float16 product and multiplies that peak back onto the partial. This file records the float16 code-point bound for that cast. It does not record the `matmul2d` product error, the fp8 value error, or a hidden-state error on the [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkout.
+- Measurement note for the `qwen36_35b_a3b` pipeline.
+- The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md).
+- The forward already divides each value-mix window by its peak before the float16 product and multiplies that peak back onto the partial.
+- This file records the float16 code-point bound for that cast.
+- It does not record the `matmul2d` product error, the fp8 value error, or a hidden-state error on the [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkout.
 
 ## Remainder
 
-Softmax stores `exp(score / 16 − m)`, where `m` is the running max of the scaled scores and a score at that max has weight 1. A direct cast of that weight to float16 flushes to zero at `2^-25`. Dividing by the window peak first maps the largest weight in the window to 1, which float16 holds, and the partial is multiplied by the peak afterward. A window whose own peak is at or below `2^-25` is dropped by the direct cast and kept by the restore. A search on 21 October 2026 did not find this bound for a per-window peak ahead of a float16 value mix.
+- Softmax stores `exp(score / 16 − m)`, where `m` is the running max of the scaled scores and a score at that max has weight 1.
+- A direct cast of that weight to float16 flushes to zero at `2^-25`.
+- Dividing by the window peak first maps the largest weight in the window to 1, which float16 holds, and the partial is multiplied by the peak afterward.
+- A window whose own peak is at or below `2^-25` is dropped by the direct cast and kept by the restore.
+- A search on 21 October 2026 did not find this bound for a per-window peak ahead of a float16 value mix.
 
 ## Predecessors
 
@@ -37,7 +45,10 @@ A weight flushes when its absolute value is at most `2^-25` after the scale this
 
 ## Search
 
-21 October 2026. Query: "softmax attention rescale probabilities by block maximum float16 GEMM underflow". The predecessors in this note are the overlaps that query returned. The search did not find the `2^-25` bound for a measured per-window peak stored beside a float16 value mix.
+- 21 October 2026.
+- Query: "softmax attention rescale probabilities by block maximum float16 GEMM underflow".
+- The predecessors in this note are the overlaps that query returned.
+- The search did not find the `2^-25` bound for a measured per-window peak stored beside a float16 value mix.
 
 ## Corrections
 

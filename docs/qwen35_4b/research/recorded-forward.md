@@ -15,7 +15,10 @@ On an M5 Pro with 48 GB, on `Qwen3.5-4B-fp8` with the default `f16` cache, the c
 
 ## Rule
 
-Prefill is the summed prompt time. Decode is the summed sampled-token time. The carrot rows are the lines `tests/test_qwen35_4b_smoke.py` printed under the smoke lock on 2 November 2026 after the mid-width GEMV change. The coding-agent row is the harness summary of the same day's thinking-card run: 25569 prompt tokens and 2172 sampled tokens.
+- Prefill is the summed prompt time.
+- Decode is the summed sampled-token time.
+- The carrot rows are the lines `tests/test_qwen35_4b_smoke.py` printed under the smoke lock on 2 November 2026 after the mid-width GEMV change.
+- The coding-agent row is the harness summary of the same day's thinking-card run: 25569 prompt tokens and 2172 sampled tokens.
 
 ## Command
 
@@ -24,7 +27,9 @@ uv run python -m pytest tests/test_qwen35_4b_smoke.py -s
 uv run python -m harness.coding --model qwen35-4b --thinking on
 ```
 
-The pytest command prints the carrot rows. The coding command prints `passed` when `ledger.py` `collect` returns 6, 0, and -6. No committed command reprints the 1673.36 and 40.77 tok/s rows.
+- The pytest command prints the carrot rows.
+- The coding command prints `passed` when `ledger.py` `collect` returns 6, 0, and -6.
+- No committed command reprints the 1673.36 and 40.77 tok/s rows.
 
 ## Table
 
@@ -37,7 +42,11 @@ The pytest command prints the carrot rows. The coding command prints `passed` wh
 
 ## Search
 
-2 November 2026. Queries: "Qwen3.5-4B prefill tok/s int8 Apple Silicon M5 Pro 2026", "Qwen3.5-4B oMLX OR mlx OR MTPLX decode tok/s M5 Pro", "Qwen3.5-4B-fp8 1673.36 OR 40.77 OR 47.63 tok/s Favlo coding", and "Qwen 3.5 4B on M5 Pro: 66 tok/s". The predecessors in this note are the overlaps those queries returned. The search did not find 1673.36 and 40.77, or 47.63, 46.90, and 45.66, on this harness.
+2 November 2026.
+
+- Queries: "Qwen3.5-4B prefill tok/s int8 Apple Silicon M5 Pro 2026", "Qwen3.5-4B oMLX OR mlx OR MTPLX decode tok/s M5 Pro", "Qwen3.5-4B-fp8 1673.36 OR 40.77 OR 47.63 tok/s Favlo coding", and "Qwen 3.5 4B on M5 Pro: 66 tok/s".
+- The predecessors in this note are the overlaps those queries returned.
+- The search did not find 1673.36 and 40.77, or 47.63, 46.90, and 45.66, on this harness.
 
 ## Corrections
 

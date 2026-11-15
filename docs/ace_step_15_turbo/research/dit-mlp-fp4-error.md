@@ -1,10 +1,22 @@
 # DiT MLP fp4 error
 
-Measurement note for the `ace_step_15_turbo` pipeline. The serving contract is [../README.md](../README.md). This file records the per-layer fp4 relative error of the [ACE-Step/acestep-v15-xl-turbo](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo) DiT MLPs. It does not record a generation-time sum.
+Measurement note for the `ace_step_15_turbo` pipeline.
+
+The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md).
+
+This file records the per-layer fp4 relative error of the [ACE-Step/acestep-v15-xl-turbo](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo) DiT MLPs.
+
+It does not record a generation-time sum.
 
 ## Remainder
 
-Each of the 32 DiT MLP layers is scored by the RMS of its BF16 matrix against the restored fp4 matrix, divided by the source RMS. Gate, up, and down share the worst of those three scores. The six highest layers are 0, 1, 2, 3, 4, and 21, and those layers are stored as fp8. A search on 24 October 2026 did not find this table.
+Each of the 32 DiT MLP layers is scored by the RMS of its BF16 matrix against the restored fp4 matrix, divided by the source RMS.
+
+Gate, up, and down share the worst of those three scores.
+
+The six highest layers are 0, 1, 2, 3, 4, and 21, and those layers are stored as fp8.
+
+A search on 24 October 2026 did not find this table.
 
 ## Predecessors
 
@@ -15,15 +27,27 @@ Each of the 32 DiT MLP layers is scored by the RMS of its BF16 matrix against th
 
 ## Rule
 
-The sort key is the maximum of the three relative errors in one layer. The budget is the largest whole count that does not exceed 20% of 32, which is 6. An equal score keeps the lower layer index. The other 26 MLP layers stay fp4.
+The sort key is the maximum of the three relative errors in one layer.
+
+The budget is the largest whole count that does not exceed 20% of 32, which is 6.
+
+An equal score keeps the lower layer index.
+
+The other 26 MLP layers stay fp4.
 
 ## Command
 
-`uv run favlo --ace_step_15_turbo quantize` writes `models/acestep-v15-xl-turbo-fp8-fp4/mlp_error.json` while it packs `models/acestep-v15-xl-turbo`. A later run returns without rescoring when `manifest.json` is already `complete` and `mlp_fp8_percent` is 20. The table below is that file, rounded to six digits.
+`uv run favlo --ace_step_15_turbo quantize` writes `models/acestep-v15-xl-turbo-fp8-fp4/mlp_error.json` while it packs `models/acestep-v15-xl-turbo`.
+
+A later run returns without rescoring when `manifest.json` is already `complete` and `mlp_fp8_percent` is 20.
+
+The table below is that file, rounded to six digits.
 
 ## Table
 
-`layer` is the maximum of gate, up, and down. `store` is the width kept for all three matrices.
+`layer` is the maximum of gate, up, and down.
+
+`store` is the width kept for all three matrices.
 
 | Layer | Gate | Up | Down | Layer | Store |
 |---:|---:|---:|---:|---:|---|
@@ -62,6 +86,12 @@ The sort key is the maximum of the three relative errors in one layer. The budge
 
 ## Search
 
-24 October 2026. Queries: "ACE-Step v1.5 XL Turbo DiT MLP fp4 fp8 mixed precision relative RMS quantization error layers", then "ACE-Step XL Turbo MXFP4 NVFP4 layer sensitivity cosine similarity DiT MLP promoted layers". The predecessors in this note are the overlaps those queries returned. The search did not find the 32-layer relative-error table above.
+24 October 2026.
+
+Queries: "ACE-Step v1.5 XL Turbo DiT MLP fp4 fp8 mixed precision relative RMS quantization error layers", then "ACE-Step XL Turbo MXFP4 NVFP4 layer sensitivity cosine similarity DiT MLP promoted layers".
+
+The predecessors in this note are the overlaps those queries returned.
+
+The search did not find the 32-layer relative-error table above.
 
 ## Corrections

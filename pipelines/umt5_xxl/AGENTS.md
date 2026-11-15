@@ -2,4 +2,4 @@
 
 This package exports no typed `pipeline`. It is the shared pack library. It is not a CLI flag. Do not describe a sibling package here.
 
-The as-built note is the README under `docs/` whose folder name matches this package.
+The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder.

@@ -16,7 +16,11 @@ The rates below are from a finished file-reading run on the earlier fp4 record. 
 | 4 | 46583 | hit 46516 | 6.21 tok/s (67 tok in 10.80 s) | 11.33 tok/s (34 tok in 3.00 s) |
 | 5 | 73810 | hit 46617 | 516.28 tok/s (27193 tok in 52.67 s) | 18.19 tok/s (70 tok in 3.85 s) |
 
-The summary is prefill 512.01 tok/s (73617 tok in 143.78 s) and decode 15.81 tok/s (263 tok in 16.63 s). The prefill kernel ceiling for 65536 tokens from position 0 was 1047.86 tok/s. The decode kernel ceiling at context 65536 was 82.97 tok/s. Those ceilings were measured when the value mix read float16 attention weights. The ceilings for the current value mix are in [ceilings.md](ceilings.md).
+- The summary is prefill 512.01 tok/s (73617 tok in 143.78 s) and decode 15.81 tok/s (263 tok in 16.63 s).
+- The prefill kernel ceiling for 65536 tokens from position 0 was 1047.86 tok/s.
+- The decode kernel ceiling at context 65536 was 82.97 tok/s.
+- Those ceilings were measured when the value mix read float16 attention weights.
+- The ceilings for the current value mix are in [ceilings.md](ceilings.md).
 
 ## File agent
 
@@ -26,7 +30,10 @@ Instruct card. `enable_thinking` is false. Omitted sampling fields come from tha
 uv run python -m harness --model qwen36-35b-a3b
 ```
 
-The server stops after the first turn and starts again, so the next turn loads the stored prefix. Later turns stay on that server. This run is `Qwen3.6-35B-A3B-fp8-e20`, after `moe_group` splits assignments into 16 slices. It reached 102507 prompt tokens over four requests on 23 October 2026, before the resident projections restored into an int8 stage.
+- The server stops after the first turn and starts again, so the next turn loads the stored prefix.
+- Later turns stay on that server.
+- This run is `Qwen3.6-35B-A3B-fp8-e20`, after `moe_group` splits assignments into 16 slices.
+- It reached 102507 prompt tokens over four requests on 23 October 2026, before the resident projections restored into an int8 stage.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
@@ -124,7 +131,11 @@ On 1 November 2026 the same command ran on that machine and record, with MTP off
 
 The summary is prefill 815.15 tok/s (2959 tok in 3.63 s) and decode 64.04 tok/s (1138 tok in 17.77 s).
 
-On 3 November 2026 the command ran with `--thinking off` on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`, with the key/value cache at half and MTP off. The harness printed `mtp off depth 3 thinking off`. The hidden suite passed. It reached 3031 prompt tokens over nine requests. The half decode kernel ceiling at context 2048 is 66.0 tok/s.
+- On 3 November 2026 the command ran with `--thinking off` on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`, with the key/value cache at half and MTP off.
+- The harness printed `mtp off depth 3 thinking off`.
+- The hidden suite passed.
+- It reached 3031 prompt tokens over nine requests.
+- The half decode kernel ceiling at context 2048 is 66.0 tok/s.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
@@ -214,7 +225,11 @@ The summary is prefill 134.29 tok/s (419 tok in 3.12 s) and decode 34.19 tok/s (
 
 ## Synthetic prompt
 
-On 4 November 2026 the command ran on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`, with the key/value cache at `fp8_e4m3` and MTP off. The harness printed `kv fp8_e4m3 mtp off depth 3 thinking off decode 128`. Each prompt was one user message, a cache miss, and the instruct card. Decode was capped at 128 tokens. The end-to-end column adds the prefill tokens to the decode tokens and adds those two clocks.
+- On 4 November 2026 the command ran on an M5 Pro with 48 GB, on `Qwen3.6-35B-A3B-fp8-e20`, with the key/value cache at `fp8_e4m3` and MTP off.
+- The harness printed `kv fp8_e4m3 mtp off depth 3 thinking off decode 128`.
+- Each prompt was one user message, a cache miss, and the instruct card.
+- Decode was capped at 128 tokens.
+- The end-to-end column adds the prefill tokens to the decode tokens and adds those two clocks.
 
 ```text
 uv run python -m harness.synthetic --model qwen36-35b-a3b

@@ -1,22 +1,58 @@
 # umT5-XXL
 
-Shared text-encoder pack for Wan video pipelines. Not a Favlo CLI pipeline.
-`favlo --wan22_i2v umt5` (or `--wan22_ti2v_5b umt5`) downloads the BF16
-encoder from [google/umt5-xxl](https://huggingface.co/google/umt5-xxl)
-and packs it as int8 under `models/google/umt5-xxl-int8`. The tokenizer files
-live in that pack. Wan I2V and TI2V open that directory through `parts.umt5` and read
-the same bytes. The pack library lives under `pipelines/umt5_xxl/metal41/`.
+Shared text-encoder pack for Wan video pipelines. It is not a Favlo CLI pipeline
+or flag.
+
+Wan I2V and TI2V:
+
+- obtain this library through `umt5 setup` and `umt5 quantize` on their own CLI rows
+- open the packed int8 directory through `parts.umt5`
+- read the same tokenizer and weights during a clip
+
+As-built detail: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+Wan registry keys and `parts.umt5` are in [the I2V note](../wan22_i2v/ARCHITECTURE.md#registry)
+and [the TI2V note](../wan22_ti2v_5b/ARCHITECTURE.md#registry).
+
+## Setup
+
+- How to download and pack the shared umT5 int8 record.
+- Wan I2V and TI2V open that pack for text.
+- The encoder weights are under the Apache License, Version 2.0.
+- There is no `favlo --umt5_xxl` flag: either Wan pipeline owns the commands.
+
+### Download
 
 ```bash
 uv run favlo --wan22_i2v umt5 setup
+```
+
+- That writes `models/google/umt5-xxl/` with `models_t5_umt5-xxl-enc-bf16.pth`
+  and the tokenizer files.
+- `--umt5 org/name` downloads that repository instead.
+- `favlo --wan22_ti2v_5b umt5 setup` is the same pack.
+
+### Pack
+
+```bash
 uv run favlo --wan22_i2v umt5 quantize --format wan
 ```
 
-`umt5 setup --umt5 org/name` downloads that repository instead. `umt5 quantize`
-defaults to `--format wan`. `--format hf` packs a Hugging Face
-`.safetensors` encoder; pass `--src` for that file. `--keep-source` leaves the
-BF16 checkout in place. The default pack removes it after a successful write.
+- That writes `models/google/umt5-xxl-int8`.
+- It copies every tokenizer file into that directory.
+- It removes the BF16 checkout.
+- A clip never opens the BF16 file.
+- `--keep-source` leaves the checkout in place.
 
-## Registry
+A Hugging Face `.safetensors` encoder uses `--format hf` and `--src` for that file:
 
-This pack is not a registry row. The writable field is `parts.umt5` on the Wan row that opens the clip. The value is this int8 directory. The field is copied at open, so close the resident model after the write. The keys, the fallbacks, and the other fields on those rows are in [the I2V note](../wan22_i2v/README.md#registry) and [the TI2V note](../wan22_ti2v_5b/README.md#registry). A clip never opens the BF16 file.
+```bash
+uv run favlo --wan22_i2v umt5 quantize --format hf \
+  --src models/google/umt5-xxl-realistic_bf16/umt5-xxl-realistic_bf16.safetensors \
+  --out models/google/umt5-xxl-realistic-int8 \
+  --tokenizer models/google/umt5-xxl-int8 \
+  --keep-source
+```
+
+- Point a Wan video row at the pack with `parts.umt5`.
+- Or let `quantize` on that video pipeline store the shared path.

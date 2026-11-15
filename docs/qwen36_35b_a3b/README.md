@@ -2,9 +2,14 @@
 
 Summary for the `qwen36_35b_a3b` language pipeline. Kernels, the packed record, the forward path, chat template, and registry fields are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-`handle_responses` is a `LanguagePipeline` served through `favlo serve`. After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it. `kernels`, `quantize`, `mtp-fp8`, `bf16`, `complete`, and `models` require `favlo --qwen36_35b_a3b`, which loads `qwen36_35b_a3b.metal41`.
+- `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
+- After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
+- `kernels`, `quantize`, `mtp-fp8`, `bf16`, `complete`, and `models` require `favlo --qwen36_35b_a3b`, which loads `qwen36_35b_a3b.metal41`.
 
-The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B). Those weights are under the Apache License, Version 2.0. Registration sets `default_variant` to `thinking` and `mtp_depth` to 3 unless the request overrides them. The served context window is 131072 tokens; the default packed record is `Qwen3.6-35B-A3B-fp8-e20`.
+- The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B).
+- Those weights are under the Apache License, Version 2.0.
+- Registration sets `default_variant` to `thinking` and `mtp_depth` to 3 unless the request overrides them.
+- The served context window is 131072 tokens; the default packed record is `Qwen3.6-35B-A3B-fp8-e20`.
 
 After changing an open-time registry field, unload the resident model:
 
@@ -26,7 +31,13 @@ How to download, pack, and talk to `qwen36_35b_a3b`. The kernel contract is [ARC
 - A network path to `huggingface.co`
 - Free disk for the BF16 checkout and the packed record at the same time
 
-The default pack is `fp8-e20`. `setup` reserves 21.8 GiB for that record (the language expert images and the resident weights). MTP weights are not in the pack. Another `--expert-fp8` value reserves the size of that pack instead. The checkout is whatever the repository publishes. `setup` adds those two sizes and stops when the volume does not have that much free. After the record is registered, the checkout is removed.
+- The default pack is `fp8-e20`.
+- `setup` reserves 21.8 GiB for that record (the language expert images and the resident weights).
+- MTP weights are not in the pack.
+- Another `--expert-fp8` value reserves the size of that pack instead.
+- The checkout is whatever the repository publishes.
+- `setup` adds those two sizes and stops when the volume does not have that much free.
+- After the record is registered, the checkout is removed.
 
 8 GB is not enough to run a model capable of real-world agentic workflows. On 16 GB the runtime keeps a smaller set of expert images in memory and reads the rest from the record.
 
@@ -55,7 +66,11 @@ That command does four things:
 
 A finished directory has `manifest.json` with `complete: true`. Running `setup` again on that directory registers it, if it is not already registered, and returns.
 
-An empty registry on a terminal runs `favlo --qwen35_4b setup` before the daemon starts. It first checks that a small shader compiles at Metal 4.1. A machine that cannot compile that version prints `this runtime cannot run here` and exits. `uv run favlo serve --non-interactive` does not download. A pipe does not download.
+- An empty registry on a terminal runs `favlo --qwen35_4b setup` before the daemon starts.
+- It first checks that a small shader compiles at Metal 4.1.
+- A machine that cannot compile that version prints `this runtime cannot run here` and exits.
+- `uv run favlo serve --non-interactive` does not download.
+- A pipe does not download.
 
 ### Talk to it
 
@@ -75,13 +90,22 @@ curl http://127.0.0.1:8129/v1/responses \
   -d '{"model":"qwen36-35b-a3b:instruct","input":"Hello"}'
 ```
 
-`GET /v1/models` lists the registered ids. A bare `qwen36_35b_a3b` uses the thinking card (temperature 1.0, top-p 0.95, top-k 20, presence penalty 1.5, `reasoning_effort` `high`). `qwen36-35b-a3b:instruct` uses temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5, and `reasoning_effort` `none`. A request `reasoning.effort` wins when set (`none` or `high`; the other listed names map onto those). When the request omits effort, the selected variant's `reasoning_effort` is used. The server does not check an API key. A client that requires one can send any placeholder, such as `favlo`.
+- `GET /v1/models` lists the registered ids.
+- A bare `qwen36_35b_a3b` uses the thinking card (temperature 1.0, top-p 0.95, top-k 20, presence penalty 1.5, `reasoning_effort` `high`).
+- `qwen36-35b-a3b:instruct` uses temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5, and `reasoning_effort` `none`.
+- A request `reasoning.effort` wins when set (`none` or `high`; the other listed names map onto those).
+- When the request omits effort, the selected variant's `reasoning_effort` is used.
+- The server does not check an API key.
+- A client that requires one can send any placeholder, such as `favlo`.
 
 A user message can include a still image. The template does not accept an audio part. The served window stops at 131072 tokens.
 
 ### If setup stops
 
-Run the same command again. Files already written stay on disk, and the next run continues from them. A line that names a GiB count is free space: the volume needs room for the checkout and the record together until the checkout is removed. A `download failed` line is the HTTP error from `huggingface.co`.
+- Run the same command again.
+- Files already written stay on disk, and the next run continues from them.
+- A line that names a GiB count is free space: the volume needs room for the checkout and the record together until the checkout is removed.
+- A `download failed` line is the HTTP error from `huggingface.co`.
 
 ### Quantization
 
@@ -97,7 +121,14 @@ uv run favlo --qwen36_35b_a3b setup --expert-fp8 0
 uv run favlo --qwen36_35b_a3b setup --repo example-org/example-model --expert-fp8 100
 ```
 
-The first command packs `models/Qwen3.6-35B-A3B-fp4`. The second packs `models/example-model-fp8-e100`. `quantize` accepts the same `--expert-fp8` and does not download. With no `--src`, it reads `models/Qwen3.6-35B-A3B-bf16`. `--src` names another checkout. After a successful quantize, a checkout under `models/` is removed. `--keep-bf16` leaves it. A `--src` outside `models/` is left in place.
+- The first command packs `models/Qwen3.6-35B-A3B-fp4`.
+- The second packs `models/example-model-fp8-e100`.
+- `quantize` accepts the same `--expert-fp8` and does not download.
+- With no `--src`, it reads `models/Qwen3.6-35B-A3B-bf16`.
+- `--src` names another checkout.
+- After a successful quantize, a checkout under `models/` is removed.
+- `--keep-bf16` leaves it.
+- A `--src` outside `models/` is left in place.
 
 `setup` does not pack MTP. `mtp-fp8` adds it to a finished record from a local checkout. Every MTP routed expert and the dense MTP matrices are stored as fp8. Language experts stay as packed. The checkout is left in place. A record that already has those weights can keep them.
 
@@ -116,7 +147,11 @@ uv run favlo --qwen36_35b_a3b setup --repo example-org/example-model
 uv run favlo --qwen36_35b_a3b setup --repo https://huggingface.co/example-org/example-model
 ```
 
-The checkout is `models/example-org--example-model-bf16`. It is removed after `models/example-model-fp8-e20` is registered. `--keep-bf16` leaves the checkout. The client model field is `example-model-fp8-e20`. `example-model-fp8-e20:instruct` and `example-model-fp8-e20:thinking` select the same cards as the official alias.
+- The checkout is `models/example-org--example-model-bf16`.
+- It is removed after `models/example-model-fp8-e20` is registered.
+- `--keep-bf16` leaves the checkout.
+- The client model field is `example-model-fp8-e20`.
+- `example-model-fp8-e20:instruct` and `example-model-fp8-e20:thinking` select the same cards as the official alias.
 
 `--name` replaces that folder. The name is used as written, and it is the registry id.
 
@@ -135,7 +170,12 @@ uv run favlo --qwen36_35b_a3b delete example-model-fp8-e20
 uv run favlo --qwen36_35b_a3b delete qwen36-35b-a3b
 ```
 
-`delete` takes the folder name or the alias. A `:instruct` or `:thinking` suffix deletes that same model. The command removes the registry row, the packed directory under `models/`, and the BF16 checkout when that checkout is still under `models/` and no other row uses it. It also removes that record's prefix files under `~/.favlo/prefix/qwen36-35b-a3b/`. A checkout outside `models/` is left in place. Another model's directory and row stay.
+- `delete` takes the folder name or the alias.
+- A `:instruct` or `:thinking` suffix deletes that same model.
+- The command removes the registry row, the packed directory under `models/`, and the BF16 checkout when that checkout is still under `models/` and no other row uses it.
+- It also removes that record's prefix files under `~/.favlo/prefix/qwen36-35b-a3b/`.
+- A checkout outside `models/` is left in place.
+- Another model's directory and row stay.
 
 ## Further reading
 

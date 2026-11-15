@@ -1,6 +1,11 @@
 # Kernel ceilings
 
-Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The per-dispatch rows are in [../ceilings.md](../ceilings.md). This file records the isolated sum of those dispatches. It is a measurement of this shader library. It does not record a hidden-state error on the [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkout.
+- Measurement note for the `qwen36_35b_a3b` pipeline.
+- The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md).
+- The per-dispatch rows are in [../ceilings.md](../ceilings.md).
+- This file records the isolated sum of those dispatches.
+- It is a measurement of this shader library.
+- It does not record a hidden-state error on the [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkout.
 
 ## Remainder
 
@@ -15,11 +20,18 @@ One command buffer per kernel, then a wait, summed without overlap, is 97.25 tok
 
 ## Rule
 
-Each listed kernel runs in its own command buffer. The sample is the median of four runs after one discarded run. Decode weights are fp4 and the key/value cache is fp8 E4M3. Prefill experts are one 64-row tile per expert. The embed, the top-8 pick, RoPE, and the key/value store are outside the sum.
+- Each listed kernel runs in its own command buffer.
+- The sample is the median of four runs after one discarded run.
+- Decode weights are fp4 and the key/value cache is fp8 E4M3.
+- Prefill experts are one 64-row tile per expert.
+- The embed, the top-8 pick, RoPE, and the key/value store are outside the sum.
 
 ## Command
 
-`favlo --qwen36_35b_a3b kernels` checks that the dispatches compile and match the host formulas in `qwen36_35b_a3b/checks.py`. That command does not print this table. No committed command regenerates the medians. Recompute [../ceilings.md](../ceilings.md) when a listed kernel changes.
+- `favlo --qwen36_35b_a3b kernels` checks that the dispatches compile and match the host formulas in `qwen36_35b_a3b/checks.py`.
+- That command does not print this table.
+- No committed command regenerates the medians.
+- Recompute [../ceilings.md](../ceilings.md) when a listed kernel changes.
 
 ## Table
 
@@ -34,16 +46,34 @@ The first-chunk bandwidth cell is the byte count. The ceilings note does not div
 
 ## Search
 
-21 October 2026. Queries: "Qwen3.6-35B-A3B MLX Apple Silicon inference Gated DeltaNet", and "Qwen3.6-35B-A3B Metal kernel microsecond dispatch prefill decode ceiling matmul2d". The predecessors in this note are the overlaps those queries returned. The search did not find the 97.25 and 815.71 tok/s sums.
+- 21 October 2026.
+- Queries: "Qwen3.6-35B-A3B MLX Apple Silicon inference Gated DeltaNet", and "Qwen3.6-35B-A3B Metal kernel microsecond dispatch prefill decode ceiling matmul2d".
+- The predecessors in this note are the overlaps those queries returned.
+- The search did not find the 97.25 and 815.71 tok/s sums.
 
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
 
-23 October 2026. The `Qwen3.6-35B-A3B-fp8-e20` record stores the language projections, the shared expert, and `lm_head` as fp8, and 2,048 of 10,240 routed experts as fp8. At the same 302.74 GB/s, a decode token that reads the pool mix of those experts is 9.27 ms, 107.90 tok/s at context 2048, and 11.82 ms, 84.61 tok/s at context 65536. A 65536-token prefill is 14.06 s, 4659.90 tok/s. The kernel sums above were measured on fp4 weight images.
+- 23 October 2026.
+- The `Qwen3.6-35B-A3B-fp8-e20` record stores the language projections, the shared expert, and `lm_head` as fp8, and 2,048 of 10,240 routed experts as fp8.
+- At the same 302.74 GB/s, a decode token that reads the pool mix of those experts is 9.27 ms, 107.90 tok/s at context 2048, and 11.82 ms, 84.61 tok/s at context 65536.
+- A 65536-token prefill is 14.06 s, 4659.90 tok/s.
+- The kernel sums above were measured on fp4 weight images.
 
 23 October 2026. The fp8 decode dot indexes a 256-entry E4M3 table and loads both scale blocks of a 2048-wide row before that lookup. The isolated sums in the table stay the fp4-weight measurement.
 
-23 October 2026. `moe_group` splits the assignments into 16 slices. The 3366.9 µs row is the single-thread kernel and was not replaced. Five GPU samples of the new kernel at 2048 tokens were 2630.4, 2621.6, 2623.4, 2612.7, and 1111.7 µs. Two paired 2047-token prefills on the fp8-e20 record, full atlas, were 2.942 s then 2.680 s, and 3.615 s then 3.164 s, the single-thread kernel first. A K-step `matmul2d` of 128 and of 512 on the expert tiles was slower than one contraction over K, 2.602 s and 2.926 s on that same prefill, and was removed.
+- 23 October 2026.
+- `moe_group` splits the assignments into 16 slices.
+- The 3366.9 µs row is the single-thread kernel and was not replaced.
+- Five GPU samples of the new kernel at 2048 tokens were 2630.4, 2621.6, 2623.4, 2612.7, and 1111.7 µs.
+- Two paired 2047-token prefills on the fp8-e20 record, full atlas, were 2.942 s then 2.680 s, and 3.615 s then 3.164 s, the single-thread kernel first.
+- A K-step `matmul2d` of 128 and of 512 on the expert tiles was slower than one contraction over K, 2.602 s and 2.926 s on that same prefill, and was removed.
 
-25 October 2026. On an M5 Pro with 48 GB the resident language projections restore the packed fp8 matrix into a per-row int8 stage, quantize the half activation, and multiply with `prefill_i8_n64`. `in_proj_a`, `in_proj_b`, and the routed experts stay on the packed tiles. Decode stays a GEMV on the packed bytes. A 2048-token first chunk sums to 1296.1 ms, 1580.18 tok/s. A 65536-token prefill sums to 78739.4 ms, 832.32 tok/s. The decode sums in the table stay.
+- 25 October 2026.
+- On an M5 Pro with 48 GB the resident language projections restore the packed fp8 matrix into a per-row int8 stage, quantize the half activation, and multiply with `prefill_i8_n64`.
+- `in_proj_a`, `in_proj_b`, and the routed experts stay on the packed tiles.
+- Decode stays a GEMV on the packed bytes.
+- A 2048-token first chunk sums to 1296.1 ms, 1580.18 tok/s.
+- A 65536-token prefill sums to 78739.4 ms, 832.32 tok/s.
+- The decode sums in the table stay.
