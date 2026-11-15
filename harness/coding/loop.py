@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
+from favlo.prefix import DEFAULT_BUDGET, default_prefix_dir
 from harness.benchmarks.serve import Request, Server
 from harness.coding.agent_tools import coding_tools
 from harness.coding.session import session_for
@@ -17,6 +19,9 @@ from harness.turn_printer import TurnPrinter
 
 # One model call per tool step, then status polls, then a stop.
 SESSION_ROUNDS = 16
+# A fresh partition. The home store can hold a longer file from an earlier
+# run, and the restart check would treat that hit as a different conversation.
+CODING_SCRATCH = "coding"
 
 
 def agent_options(
@@ -41,9 +46,18 @@ def agent_options(
         "extra_body": {
             "favlo:mtp": bool(mtp),
             "favlo:mtp_depth": int(mtp_depth),
+            "favlo:prefix_scratch": CODING_SCRATCH,
+            "favlo:prefix_budget": DEFAULT_BUDGET,
             "preserve_thinking": bool(preserve_thinking),
         },
     }
+
+
+def reset_coding_prefix() -> None:
+    """Remove the coding scratch so this run only loads files it stores."""
+    root = default_prefix_dir().parent / "prefix-scratch" / CODING_SCRATCH
+    if root.exists():
+        shutil.rmtree(root)
 
 
 _PREAMBLE = (

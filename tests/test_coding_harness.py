@@ -237,6 +237,8 @@ def test_thinking_body_omits_sampling_fields() -> None:
     assert options["reasoning"] == {"effort": "medium"}
     assert extra["favlo:mtp"] is True
     assert extra["favlo:mtp_depth"] == 3
+    assert extra["favlo:prefix_scratch"] == "coding"
+    assert extra["favlo:prefix_budget"] == 32 << 30
     assert extra["preserve_thinking"] is False
     assert options["store"] is False
     kept = agent_options(request, mtp=False, mtp_depth=3, store=True)

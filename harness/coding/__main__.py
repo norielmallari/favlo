@@ -10,6 +10,8 @@ After the ledger, that same still is sent again, and that request must extend th
 Each model call prints the reasoning and the reply as the tokens arrive, then
 the tool calls when that call ends. The framework runs the coding tools.
 After the ledger, the same listener runs the chat contract.
+The ledger stores its prefix under a scratch partition that this command
+clears first, so a file from an earlier run cannot satisfy the restart.
 Exit 0 means ``ledger.py`` ``collect`` returns 6, 0, and -6, and every
 contract check held. Which tools the model called is not part of that result.
 Each request's server prefill and decode lines are the thinking series. The
@@ -37,7 +39,7 @@ from pathlib import Path
 from harness.benchmarks.serve import Request, Server
 from harness.coding.compliance import run_contract
 from harness.coding.grade import grade
-from harness.coding.loop import ledger_log, run_session
+from harness.coding.loop import ledger_log, reset_coding_prefix, run_session
 from harness.file_session import (
     format_request,
     format_summary,
@@ -121,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
 
             unload_model()
         preserve = args.preserve_thinking == "on"
+        reset_coding_prefix()
         print(
             f"kv {selection.kv_cache} mtp {args.mtp} depth {args.mtp_depth} "
             f"thinking {args.thinking} vision {vision_flag} store {args.store} "
