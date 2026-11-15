@@ -246,4 +246,4 @@ Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICEN
 | umT5-XXL | Apache License, Version 2.0 | [note](docs/umt5_xxl/README.md) |
 | Wan 2.2 TI2V-5B | Apache License, Version 2.0 on the base card. The source checkpoint's license is unset. | [note](docs/wan22_ti2v_5b/README.md) |
 | ACE-Step 1.5 XL Turbo | MIT License | [note](docs/ace_step_15_turbo/README.md) |
-| VoxCPM2 | Apache License, Version 2.0 | [note](docs/voxcpm2/references.md) |
+| VoxCPM2 | Apache License, Version 2.0 | [note](docs/voxcpm2/README.md) |
