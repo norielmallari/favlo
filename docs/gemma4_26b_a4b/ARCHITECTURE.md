@@ -142,9 +142,9 @@ The file key `default` is the id harnesses and `favlo web` use when none is name
 - The runtime keeps the resident fp8 bytes.
 - Decode reads a projection in `gemv_fp8` and the embedding in `embed_fp8`.
 - The eight routed experts of a token launch from the ids the router wrote on device, one `gemv_fp4_at` and one `gemv_fp8_at` per projection, and the token does not read those ids back.
-- A prefill chunk is 1024 tokens and submits every ten layers, so the prefill count advances while the device runs.
+- A prefill chunk is 1024 tokens on `fp8_e4m3` and 640 tokens on `half`. It submits every ten layers, so the prefill count advances while the device runs.
 - On `fp8_e4m3`, prefill scores every key head of a tile with `matmul_half_64_batch` and decode scores them with `matmul_half_batch`.
-- On `half`, local attention is `attend_span4`, four queries sharing each key load, and global attention is `attend_span`.
+- On `half`, a 640-token prefill span gathers the token-major cache and scores it with `matmul_half_64_batch`. Any other span stays on `attend_span4` or `attend_span`. One token stays on `attend_span4` or `attend_decode`.
 - Expert prefill groups the routed rows on device.
 - The slot tables and the matmul grid stay there, so the host does not read the ids.
 - Expert prefill reads the stored image.
@@ -196,8 +196,8 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - One simd walks a short cache.
 - At 256 keys the walk splits across four simdgroups, and at 1024 keys across eight.
 - They merge one online softmax.
-- Prefill local attention is `attend_span4`.
-- Prefill global attention is `attend_span`.
+- Prefill local attention is `attend_span4`, except a 640-token `half` span.
+- Prefill global attention is `attend_span`, except that same span.
 - On `fp8_e4m3` those walks are the matmul dispatches in the cache section.
 
 - Attention and both feed-forward branches add at scale one.
@@ -250,6 +250,8 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - A prefill chunk commits the command buffer every 1024 keys so the window server can run.
 - A decode step keeps those dispatches in the layer buffer.
 - `half` stores Metal halves in the same token-major layout.
+- A 640-token span gathers that plane with `kv_gather_half` and scores it with `matmul_half_64_batch`.
+- Any other `half` span stays on `attend_span4` or `attend_span`.
 - The cache starts at 256 tokens and doubles.
 - Growth waits for the open prefill chunk, then copies the live tokens into the new buffer.
 - The prefix file stores local keys and values, and global keys and values, in the live cache layout for the loaded plane.

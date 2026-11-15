@@ -78,3 +78,14 @@ Queries the same day: "gemma-4-26B-A4B oMLX M5 Pro 48GB 1721 74.1 4096 site:omlx
 - [oMLX 4-bit on an M5 Pro with 48 GB](https://omlx.ai/benchmarks/performance/6hg5kmhw) reports 2,082 tok/s prefill and 76.9 tok/s generation at 1,024 tokens, and 2,012 tok/s prefill and 74.0 tok/s generation at 4,096 tokens. The returned page text does not list the KV-compression flag.
 - No published Gemma row on this chip uses a 10,000-token prompt. The 16,384-token row above is the nearest longer step on the same machine.
 - The search did not find 940.96, 974.84, 700.91, or 487.04.
+
+15 November 2026. A 640-token half span now gathers the cache and scores it with `matmul_half_64_batch`. Other half spans stay on `attend_span`. The same protocol run recorded:
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 920.39 tok/s (512 tok in 0.56 s) | 32.80 tok/s (128 tok in 3.90 s) | 143.50 tok/s (640 tok in 4.46 s) |
+| 1024 | 947.85 tok/s (1024 tok in 1.08 s) | 32.87 tok/s (128 tok in 3.89 s) | 231.79 tok/s (1152 tok in 4.97 s) |
+| 4096 | 1047.66 tok/s (4096 tok in 3.91 s) | 30.67 tok/s (128 tok in 4.17 s) | 522.77 tok/s (4224 tok in 8.08 s) |
+| 10000 | 977.06 tok/s (10000 tok in 10.23 s) | 28.25 tok/s (128 tok in 4.53 s) | 686.18 tok/s (10128 tok in 14.76 s) |
+
+The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "920.39 OR 947.85 OR 1047.66 OR 977.06 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows named in the correction above are different packs and different prompt lengths.

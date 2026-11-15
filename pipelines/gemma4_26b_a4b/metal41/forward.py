@@ -649,11 +649,12 @@ class Gemma4Runtime:
     def _prefill(self, tokens: list[int], *, finish: bool = True) -> None:
         if self._stop or not tokens:
             return
-        for start in range(0, len(tokens), _CHUNK):
+        step = 640 if self._plain_kv else _CHUNK
+        for start in range(0, len(tokens), step):
             if self._stop:
                 return
             self.refresh_budget()
-            span = tokens[start : start + _CHUNK]
+            span = tokens[start : start + step]
             last = finish and start + len(span) == len(tokens)
             self._span(span, last, noted=start)
 
@@ -827,27 +828,56 @@ class Gemma4Runtime:
                 window=window,
             )
         else:
-            if q_dim == LOCAL_DIM:
-                attend = "attend_span4" if self._plain_kv else "attend_span4_fp8"
+            # Other widths leave the hidden state non-finite. 640 is the width
+            # that stays finite on this half matmul path.
+            if count == 640:
+                attend_fp8(
+                    self,
+                    self.span_q,
+                    cache_k,
+                    cache_v,
+                    self.span_a,
+                    pos0=self.filled,
+                    count=count,
+                    kv_heads=kv_heads,
+                    dim=q_dim,
+                    window=window,
+                    plain=True,
+                )
+            elif q_dim == LOCAL_DIM:
+                attend = "attend_span4"
                 groups = ((count + 3) // 4, Q_HEADS, 1)
+                self.session.encode(
+                    attend,
+                    [self.span_q, cache_k, cache_v, self.span_a],
+                    [
+                        self.session._u32(Q_HEADS),
+                        self.session._u32(kv_heads),
+                        self.session._u32(q_dim),
+                        self.session._u32(group),
+                        self.session._u32(self.filled),
+                        self.session._u32(count),
+                        self.session._u32(window),
+                    ],
+                    groups,
+                    (32, 1, 1),
+                )
             else:
-                attend = "attend_span" if self._plain_kv else "attend_span_fp8"
-                groups = (count, Q_HEADS, 1)
-            self.session.encode(
-                attend,
-                [self.span_q, cache_k, cache_v, self.span_a],
-                [
-                    self.session._u32(Q_HEADS),
-                    self.session._u32(kv_heads),
-                    self.session._u32(q_dim),
-                    self.session._u32(group),
-                    self.session._u32(self.filled),
-                    self.session._u32(count),
-                    self.session._u32(window),
-                ],
-                groups,
-                (32, 1, 1),
-            )
+                self.session.encode(
+                    "attend_span",
+                    [self.span_q, cache_k, cache_v, self.span_a],
+                    [
+                        self.session._u32(Q_HEADS),
+                        self.session._u32(kv_heads),
+                        self.session._u32(q_dim),
+                        self.session._u32(group),
+                        self.session._u32(self.filled),
+                        self.session._u32(count),
+                        self.session._u32(window),
+                    ],
+                    (count, Q_HEADS, 1),
+                    (32, 1, 1),
+                )
         self._gemm(self.span_a, layer.o, q_width, count, self.span_m)
         self._norm_rows(self.span_m, layer.post_attn, self.span_n, count)
         self._axpy(self.span, self.span_n, 1.0, count * HIDDEN)

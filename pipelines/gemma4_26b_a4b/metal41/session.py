@@ -68,6 +68,7 @@ _KERNELS = (
     "attend_fp8_gqa_tile",
     "kv_dequant_head",
     "kv_dequant_heads",
+    "kv_gather_half",
     "kv_cast_q",
     "kv_softmax_raw",
     "kv_acc_add",

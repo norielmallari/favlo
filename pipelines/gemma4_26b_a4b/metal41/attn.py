@@ -43,10 +43,17 @@ def attend_fp8(
     kv_heads: int,
     dim: int,
     window: int,
+    plain: bool = False,
 ) -> None:
-    """Attend ``count`` queries starting at ``pos0``. One key head at a time."""
+    """Attend ``count`` queries starting at ``pos0``. One key head at a time.
+
+    ``plain`` reads a half cache. The score and the value mix stay ``matmul2d``.
+    """
     if count < 1 or count > 1024:
         message = f"attention count {count} is outside 1..1024"
+        raise RuntimeError(message)
+    if plain and count == 1:
+        message = "a half cache scores one token outside this matmul"
         raise RuntimeError(message)
     if count == 1:
         _decode_matmul(runtime, queries, keys, values, destination, pos0, kv_heads, dim, window)
@@ -87,7 +94,7 @@ def attend_fp8(
     while key < length:
         cols = min(tile, length - key)
         cols_pad = (cols + 63) // 64 * 64
-        _dequant_heads(runtime, keys, kv_heads, dim, key, cols, cols_pad, length, 0)
+        _stage_heads(runtime, keys, kv_heads, dim, key, cols, cols_pad, length, 0, plain)
         _matmul64_batch(
             runtime,
             runtime.attn_q,
@@ -115,7 +122,7 @@ def attend_fp8(
                 rows_pad=rows_pad,
                 origins=[plane * 4, plane * 2, 0, 0],
             )
-        _dequant_heads(runtime, values, kv_heads, dim, key, cols, cols_pad, length, 1)
+        _stage_heads(runtime, values, kv_heads, dim, key, cols, cols_pad, length, 1, plain)
         _matmul64_batch(
             runtime,
             runtime.attn_probs,
@@ -283,6 +290,54 @@ def _decode_matmul(
         [_u32(runtime, 1), _u32(runtime, dim), _u32(runtime, Q_HEADS)],
         (1, Q_HEADS, 1),
         (dim, 1, 1),
+    )
+
+
+def _stage_heads(
+    runtime: Any,
+    cache: object,
+    heads: int,
+    dim: int,
+    key: int,
+    cols: int,
+    cols_pad: int,
+    length: int,
+    transposed: int,
+    plain: bool,
+) -> None:
+    if plain:
+        _gather_half(runtime, cache, heads, dim, key, cols, cols_pad, length, transposed)
+        return
+    _dequant_heads(runtime, cache, heads, dim, key, cols, cols_pad, length, transposed)
+
+
+def _gather_half(
+    runtime: Any,
+    cache: object,
+    heads: int,
+    dim: int,
+    key: int,
+    cols: int,
+    cols_pad: int,
+    length: int,
+    transposed: int,
+) -> None:
+    dest = runtime.attn_k if transposed == 0 else runtime.attn_v
+    _encode(
+        runtime,
+        "kv_gather_half",
+        [cache, dest],
+        [
+            _u32(runtime, heads),
+            _u32(runtime, dim),
+            _u32(runtime, key),
+            _u32(runtime, cols),
+            _u32(runtime, cols_pad),
+            _u32(runtime, length),
+            _u32(runtime, transposed),
+        ],
+        (cols_pad, heads, 1),
+        (32, 1, 1),
     )
 
 

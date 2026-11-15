@@ -2,7 +2,7 @@
 
 Bandwidth and kernel ceilings for the kernels `gemma4_26b_a4b` launches. Recompute when any of these kernels changes:
 
-`gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `kv_dequant_heads`, `kv_cast_q`, `kv_softmax_raw`, `kv_acc_add`, `kv_attend_store`, `matmul_half_batch`, `matmul_half_64_batch`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, `sample_topk`.
+`gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `kv_dequant_heads`, `kv_gather_half`, `kv_cast_q`, `kv_softmax_raw`, `kv_acc_add`, `kv_attend_store`, `matmul_half_batch`, `matmul_half_64_batch`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, `sample_topk`.
 
 The CPU reads one sampled token. Expert ids stay on device.
 
@@ -18,9 +18,8 @@ The divisor is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302
 - Dense projections and the tied embedding are fp8.
 - Decode reads them in `gemv_fp8` and `embed_fp8`.
 - The router is one Metal half `matmul_half` of 8 by 128 by 2816.
-- The default cache is `half`. Decode scores it with `matmul_half_batch`, and prefill scores it with `matmul_half_64_batch` on tiles of 256 keys.
+- The default cache is `half`. A 640-token prefill span gathers that cache and scores it with `matmul_half_64_batch` on tiles of 256 keys. Any other prefill span stays on `attend_span4` or `attend_span`. Decode stays `attend_decode`.
 - `fp8_e4m3` dequantizes every key head with `kv_dequant_heads` before those same matmuls.
-- `attend_span` and `attend_decode` remain the `half` cache.
 - A value is an RMSNorm with no scale.
 - A global value is that norm of the key projection and is stored apart from the keys.
 
@@ -71,7 +70,7 @@ One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes 
 - `matmul_fp4_64_at` and `matmul_fp8_64_at` both launch on that grid.
 - The TFLOP/s column counts the slots whose width matches.
 
-The 90% test uses the packed chunk, measured on 3 November 2026. The cache is `fp8_e4m3` and already holds the chunk, so growth is outside the interval. The chunk commits every ten layers: three command buffers, and those intervals do not overlap. The first sample is discarded. The figure is the median of the next four. The union is 588.022 ms, 1741.43 tok/s.
+The 90% test uses the packed chunk, measured on 3 November 2026. The cache is `fp8_e4m3` and already holds the chunk, so growth is outside the interval. A half prefill span of 640 tokens gathers that cache and scores it with `matmul_half_64_batch`. Other half spans stay on `attend_span`. That plane has no separate kernel ceiling in this file. The chunk commits every ten layers: three command buffers, and those intervals do not overlap. The first sample is discarded. The figure is the median of the next four. The union is 588.022 ms, 1741.43 tok/s.
 
 The launch rows below were measured one kernel per command buffer on 2 November 2026. They are not added into this interval. A sum of those rows counts a command-buffer gap on every dispatch, and the packed chunk is faster than that sum.
 

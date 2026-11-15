@@ -2211,6 +2211,44 @@ kernel void kv_dequant_heads(
     }
 }
 
+// Token-major half cache into the matmul tile. transposed 0 writes [key, dim].
+// transposed 1 writes [dim, key].
+kernel void kv_gather_half(
+    device const half* cache [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& heads [[buffer(2)]],
+    constant uint& dim [[buffer(3)]],
+    constant uint& key0 [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant uint& cols_pad [[buffer(6)]],
+    constant uint& length [[buffer(7)]],
+    constant uint& transposed [[buffer(8)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 local [[thread_position_in_threadgroup]])
+{
+    uint key = tgid.x;
+    uint head = tgid.y;
+    uint lane = local.x;
+    if (key >= cols_pad || head >= heads || lane >= 32u || (dim & 31u) != 0u) {
+        return;
+    }
+    uint blocks = dim >> 5;
+    uint kpos = key0 + key;
+    bool live = key < cols && kpos < length;
+    device const half* rec = cache + ((ulong)kpos * heads + head) * dim;
+    ulong plane = transposed == 0u ? (ulong)cols_pad * dim : (ulong)dim * cols_pad;
+    device half* dest = destination + (ulong)head * plane;
+    for (uint block = 0u; block < blocks; ++block) {
+        half value = live ? rec[block * 32u + lane] : half(0.0);
+        uint channel = block * 32u + lane;
+        if (transposed == 0u) {
+            dest[(ulong)key * dim + channel] = value;
+        } else {
+            dest[(ulong)channel * cols_pad + key] = value;
+        }
+    }
+}
+
 // Query rows for one key head: [token, group] then pad, as half [row, dim].
 kernel void kv_cast_q(
     device const float* queries [[buffer(0)]],
