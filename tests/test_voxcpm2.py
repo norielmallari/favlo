@@ -62,14 +62,6 @@ def test_fsq_rounds_tanh_to_the_checkpoint_scale() -> None:
     assert np.array_equal(quantize_bound(projected, 9), expected)
 
 
-def test_speak_cli_requires_a_persona() -> None:
-    from voxcpm2.metal41.commands import main
-
-    with pytest.raises(SystemExit) as caught:
-        main(["speak", "--text", "Hello.", "--out", "clip.wav"])
-    assert caught.value.code == 2
-
-
 def test_parse_requires_a_persona() -> None:
     pipeline = Pipeline()
     with pytest.raises(MediaRequestError, match="persona is required"):

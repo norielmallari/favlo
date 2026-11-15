@@ -1,24 +1,18 @@
-"""setup, quantize, kernels, and smoke."""
+"""setup, quantize, kernels, and ceilings."""
 
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
 import time
 from pathlib import Path
 
 import numpy as np
 
 from favlo.cli import repo_root
-from favlo.logs import favlo_home
-from favlo.registry import parts_for_directory
 from favlo.smoke_lock import hold, release
 from wan22_ti2v_5b.metal41.gpu import Gpu
 from wan22_ti2v_5b.metal41.quant import pack_fp4, pack_fp8, pack_int8, quantize_activation
 from wan22_ti2v_5b.metal41.quantize import quantize
-from wan22_ti2v_5b.metal41.request import VideoRequest
-from wan22_ti2v_5b.metal41.runtime import open_runtime
 from wan22_ti2v_5b.metal41.schedule import require_knots, timesteps
 
 _PIPELINE = "wan22_ti2v_5b"
@@ -40,7 +34,6 @@ def main(argv: list[str] | None = None) -> int:
     quant.add_argument("--copy", default=None)
     sub.add_parser("kernels", help="compile and check matmul2d")
     sub.add_parser("ceilings", help="time the isolated kernels")
-    sub.add_parser("smoke", help="832x480 text clip and still clip")
     args = parser.parse_args(argv)
     if args.command == "setup":
         return _setup(args.student_dir)
@@ -53,8 +46,6 @@ def main(argv: list[str] | None = None) -> int:
         return _locked(_kernels, "kernels")
     if args.command == "ceilings":
         return _locked(_ceilings, "ceilings")
-    if args.command == "smoke":
-        return _locked(_smoke, "smoke")
     return 2
 
 
@@ -299,112 +290,4 @@ def _median(once) -> float:
         samples.append(time.perf_counter() - start)
     samples.sort()
     return samples[1]
-
-
-def _smoke() -> int:
-    card = json.loads((repo_root() / "docs" / _PIPELINE / "smoke.json").read_text(encoding="utf-8"))
-    record = repo_root() / "models" / "Wan2.2-TI2V-5B-int8"
-    runtime = open_runtime(
-        record,
-        "fp8",
-        None,
-        None,
-        owner="wan22_ti2v_5b-smoke",
-        parts=parts_for_directory(record),
-    )
-    home = favlo_home()
-    try:
-        text = _one(runtime, card, image=None, home=home)
-        still_card = dict(card)
-        still_card["width"] = int(card["i2v_width"])
-        still_card["height"] = int(card["i2v_height"])
-        still = _load_image(
-            repo_root() / "docs" / _PIPELINE / "still.png",
-            int(still_card["height"]),
-            int(still_card["width"]),
-        )
-        image = _one(runtime, still_card, image=still, home=home)
-    finally:
-        runtime.close()
-    _mp4(home, text["id"], int(card["frames"]))
-    _mp4(home, image["id"], int(card["frames"]))
-    _drop_student(record)
-    print("smoke ok", flush=True)
-    return 0
-
-
-def _one(runtime, card: dict, image: np.ndarray | None, home: Path) -> dict:
-    request = VideoRequest(
-        prompt=str(card["prompt"]),
-        negative_prompt="",
-        width=int(card["width"]),
-        height=int(card["height"]),
-        frames=int(card["frames"]),
-        seed=int(card["seed"]),
-        quality="high",
-        image=image,
-    )
-    videos: dict = {}
-    payload = runtime.clip.sample(
-        request,
-        video_id="video_smoke_" + ("i2v" if image is not None else "t2v"),
-        home=home,
-        videos=videos,
-        stop=None,
-    )
-    if payload.get("status") != "completed":
-        message = "smoke clip did not finish"
-        raise RuntimeError(message)
-    print(payload["id"], payload["size"], payload["seconds"], flush=True)
-    return payload
-
-
-def _load_image(path: Path, height: int, width: int) -> np.ndarray:
-    """PNG to ``[-1, 1]`` HWC, resized to the clip when the still is another size."""
-    from wan22_ti2v_5b.metal41.png import decode_png
-    from wan22_ti2v_5b.metal41.request import _resize
-
-    image = decode_png(path.read_bytes())
-    if image.shape[0] != height or image.shape[1] != width:
-        image = _resize(image, width, height)
-    return image.astype(np.float32) / np.float32(127.5) - np.float32(1.0)
-
-
-def _mp4(home: Path, video_id: str, frames: int) -> None:
-    path = home / "videos" / f"{video_id}.mp4"
-    if not path.is_file() or path.stat().st_size < 1000:
-        message = "mp4 is missing"
-        raise RuntimeError(message)
-    probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-count_frames",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=nb_read_frames",
-            "-of",
-            "csv=p=0",
-            str(path),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if probe.returncode != 0 or probe.stdout.strip() != str(frames):
-        message = "mp4 frame count does not match"
-        raise RuntimeError(message)
-
-
-def _drop_student(record: Path) -> None:
-    source = record / "source.json"
-    if not source.is_file():
-        return
-    payload = json.loads(source.read_text(encoding="utf-8"))
-    weights = Path(str(payload.get("weights", "")))
-    if weights.is_file() and weights.name == "model.pt":
-        weights.unlink()
-        print("removed student checkpoint", flush=True)
 

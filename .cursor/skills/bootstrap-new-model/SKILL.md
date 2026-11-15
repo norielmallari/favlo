@@ -41,7 +41,7 @@ Read the sibling package `AGENTS.md` for that seam before writing the class. Wri
 
 ## CLI
 
-`pipeline.main` is `favlo --<pipeline>`. Media commands are `setup`, `quantize`, `kernels`, and `smoke`, plus an offline `generate` when the pipeline has one. `setup` downloads the official checkpoint. `quantize` writes the packed record and registers it. `kernels` compiles the shader library and checks a dispatch. `smoke` runs one recorded generation. A GPU command takes `favlo.smoke_lock`.
+`pipeline.main` is `favlo --<pipeline>`. Media commands on that flag are `setup`, `quantize`, and `kernels`. `setup` downloads the official checkpoint. `quantize` writes the packed record and registers it. `kernels` compiles the shader library and checks a dispatch. A GPU command takes `favlo.smoke_lock`. Generation is `favlo media`.
 
 `favlo media --pipeline <pipeline>` is the listener path. It does not start `serve`. The body fields are the ones `parse` accepts. Do not add a route under `/v1/images`.
 

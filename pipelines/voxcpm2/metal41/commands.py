@@ -28,12 +28,6 @@ def main(argv: list[str] | None = None) -> int:
     inspect = sub.add_parser("inspect", help="summarize model.safetensors")
     inspect.add_argument("--src", type=Path, default=None)
     sub.add_parser("kernels", help="compile the shader library and check the host formulas")
-    speak = sub.add_parser("speak", help="speak one line to a wav file")
-    speak.add_argument("--text", required=True)
-    speak.add_argument("--out", type=Path, required=True)
-    speak.add_argument("--persona", required=True)
-    speak.add_argument("--max-len", type=int, default=None)
-    speak.add_argument("--seed", type=int, default=None)
     models = sub.add_parser("models", help="list or edit the flavor registry")
     models_sub = models.add_subparsers(dest="models_command")
     add = models_sub.add_parser("add", help="register a finished checkout")
@@ -50,8 +44,6 @@ def main(argv: list[str] | None = None) -> int:
         return _inspect(args.src)
     if args.command == "kernels":
         return _kernels()
-    if args.command == "speak":
-        return _speak(args.text, args.out, args.persona, args.max_len, args.seed)
     if args.command == "models":
         return _models(args)
     return 2
@@ -86,25 +78,6 @@ def _kernels() -> int:
     print("bias_pack")
     stack_matches()
     print("stack")
-    return 0
-
-
-def _speak(text: str, dest: Path, persona: str, max_len: int | None, seed: int | None) -> int:
-    from favlo.cli import repo_root
-    from voxcpm2.metal41.audio import encode_wav
-    from voxcpm2.metal41.runtime import open_runtime
-
-    runtime = open_runtime(checkout(repo_root()), owner="voxcpm2:speak")
-    try:
-        samples = runtime.speak(text, persona=persona, max_len=max_len, seed=seed)
-    finally:
-        runtime.close()
-    payload = encode_wav(samples, runtime.config.out_sample_rate)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    temporary = dest.with_suffix(dest.suffix + ".tmp")
-    temporary.write_bytes(payload)
-    temporary.replace(dest)
-    print(dest)
     return 0
 
 
