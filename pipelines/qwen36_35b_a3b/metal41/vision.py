@@ -417,12 +417,17 @@ def _install_rows(
 
 def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int]) -> list[int]:
     """Expand each image to its merged grid and install mRoPE. The tower waits for the prefix hit."""
+    runtime._image_lengths = []
+    runtime._image_token = None
     blobs = _image_blobs(messages)
     if not blobs:
         release_vision(runtime)
+        runtime._image_lengths = []
+        runtime._image_token = None
         return ids
     vision, image_id = _vision_config(runtime.root)
     _check_config(vision)
+    runtime._image_token = image_id
     lengths: list[int] = []
     grids: list[tuple[int, int]] = []
     for blob, low, high in blobs:
@@ -432,6 +437,7 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
         lengths.append(merged_h * merged_w)
         grids.append((merged_h, merged_w))
     expanded, spans = expand_image_tokens(ids, lengths, image_id)
+    runtime._image_lengths = lengths
     last = len(expanded) - 1
     if any(
         start <= last < start + height * width

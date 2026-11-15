@@ -1,6 +1,6 @@
 # Kernel ceilings
 
-Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../README.md](../README.md). The per-dispatch rows are in [../ceilings.md](../ceilings.md). This file records the isolated sum of those dispatches. It is a measurement of this shader library. It does not record a hidden-state error on the [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkout.
+Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The per-dispatch rows are in [../ceilings.md](../ceilings.md). This file records the isolated sum of those dispatches. It is a measurement of this shader library. It does not record a hidden-state error on the [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkout.
 
 ## Remainder
 

@@ -136,3 +136,15 @@ def test_chat_effort_fields_map_onto_reasoning() -> None:
         }
     )
     assert by_body["reasoning"] == {"effort": "medium"}
+
+
+def test_chat_prefix_fields_stay_on_the_responses_body() -> None:
+    translated = chat_to_responses(
+        {
+            "messages": [{"role": "user", "content": "x"}],
+            "favlo:prefix_budget": 1,
+            "favlo:prefix_scratch": "file-agent-evict",
+        }
+    )
+    assert translated["favlo:prefix_budget"] == 1
+    assert translated["favlo:prefix_scratch"] == "file-agent-evict"

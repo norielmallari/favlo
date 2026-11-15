@@ -1,6 +1,6 @@
 # Recorded forward
 
-Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../README.md](../README.md). The request rows are in [../performance.md](../performance.md). This file records the summed prefill and decode of those runs. The isolated dispatch sum is [kernel-ceilings.md](kernel-ceilings.md).
+Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The request rows are in [../performance.md](../performance.md). This file records the summed prefill and decode of those runs. The isolated dispatch sum is [kernel-ceilings.md](kernel-ceilings.md).
 
 ## Remainder
 

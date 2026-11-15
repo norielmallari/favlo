@@ -2257,6 +2257,13 @@ class Qwen36Runtime:
             self._cached_tokens = 0
             return []
         prompt = [int(token) for token in prompt]
+        from favlo.prefix import aim_session
+
+        aim_session(
+            self.prefix,
+            budget=getattr(self, "_prefix_budget", None),
+            scratch=getattr(self, "_prefix_scratch", None),
+        )
         self._note("prompt", tokens=len(prompt))
         if not self._grow(len(prompt)):
             message = f"prompt length {len(prompt)} does not fit the memory budget"
@@ -2295,15 +2302,34 @@ class Qwen36Runtime:
             from qwen36_35b_a3b.metal41.chat import generation_cut
             from qwen36_35b_a3b.metal41.prefill import prefill_ids
 
-            cut = generation_cut(self.root, prompt)
-            if cut is not None and hit < cut:
-                # The next encode drops this suffix when historical thinking is
-                # omitted. The file that stops here is the one that follow-up hits.
+            cuts: list[int] = []
+            stable = getattr(self, "_stable_cut", None)
+            self._stable_cut = None
+            if isinstance(stable, int) and 0 < stable < len(prompt):
+                cuts.append(stable)
+            gen = generation_cut(self.root, prompt)
+            if gen is not None and gen not in cuts:
+                cuts.append(gen)
+            # The user-turn cut is the file a later user message still shares.
+            # A prompt that already ends on that user message uses the
+            # generation suffix instead. Pin it so a later full-prompt save
+            # cannot evict it.
+            held = stable if isinstance(stable, int) and stable in cuts else gen
+            for cut in cuts:
+                if hit >= cut:
+                    if cut == held:
+                        self._keep_boundary(prompt[:cut])
+                    continue
+                # The next user message drops think blocks after the latest
+                # user turn. The generation suffix is the within-turn cut.
+                # Each file stops where that later prompt still matches.
                 self._prefill_base = 0
                 prefill_ids(self, prompt[hit:cut], hit, follow=prompt[cut])
                 self.filled = cut
                 self.prefix.note(prompt[:cut])
                 self._store_prefix(note=False)
+                if cut == held:
+                    self._keep_boundary(prompt[:cut])
                 hit = cut
                 suffix = prompt[hit:]
             if len(suffix) > 1:
@@ -2686,6 +2712,16 @@ class Qwen36Runtime:
             self.step(int(token), hit + index, logits=False, download=False)
         self.filled = hit + len(canonical)
         return canonical
+
+    def _keep_boundary(self, tokens: list[int]) -> None:
+        """Pin the stored file for these tokens so eviction leaves it in place."""
+        from favlo.prefix import object_name
+
+        store = self.prefix.store
+        name = object_name(store.model, store.digest, store.tag, tokens)
+        path = store.directory / f"{name}.bin"
+        if path.is_file():
+            store.pin(path)
 
     def _store_prefix(self, *, note: bool = True) -> None:
         try:

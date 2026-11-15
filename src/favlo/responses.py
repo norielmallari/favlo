@@ -102,9 +102,14 @@ def chat_to_responses(body: dict[str, Any]) -> dict[str, Any]:
     for source, target in (
         ("mtp", "favlo:mtp"),
         ("mtp_depth", "favlo:mtp_depth"),
+        ("prefix_budget", "favlo:prefix_budget"),
+        ("prefix_scratch", "favlo:prefix_scratch"),
     ):
-        if source in body:
+        if source in body and target not in translated:
             translated[target] = body[source]
+    for key in ("favlo:mtp", "favlo:mtp_depth", "favlo:prefix_budget", "favlo:prefix_scratch"):
+        if key in body and key not in translated:
+            translated[key] = body[key]
     kwargs = body.get("chat_template_kwargs")
     if isinstance(kwargs, dict):
         if "mtp" in kwargs and "favlo:mtp" not in translated:

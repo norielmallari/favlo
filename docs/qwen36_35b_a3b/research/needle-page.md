@@ -1,6 +1,6 @@
 # Page needle
 
-Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../README.md](../README.md). This file records one page-mode needle run on `half` with MTP off. It is a recorded run, not a format bound. Page mode is a long-transcript rate. It is not a retrieval claim.
+Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records one page-mode needle run on `half` with MTP off. It is a recorded run, not a format bound. Page mode is a long-transcript rate. It is not a retrieval claim.
 
 ## Remainder
 

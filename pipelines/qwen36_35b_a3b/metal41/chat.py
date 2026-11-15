@@ -177,14 +177,13 @@ def _chat_preserve(body: dict[str, Any]) -> bool | None:
     return _preserve_flag(kwargs.get("preserve_thinking"))
 
 
-def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = None) -> bool:
+def preserve_thinking(body: dict[str, Any], registry: bool | None = None) -> bool:
     """Whether historical reasoning stays in the prompt.
 
     A top-level ``preserve_thinking`` wins over ``chat_template_kwargs``.
-    Either wins over ``settings.json``. Omitted is off, matching the card's
-    interleaved default: only the think block for the latest user message
-    stays. True keeps historical traces so a later prompt can extend the
-    stored prefix.
+    Either wins over this pipeline's registry row. Omitted is off: only the
+    think block for the latest user message stays. True keeps historical
+    traces so a later prompt can extend the stored prefix.
     """
     requested = (
         _preserve_flag(body.get("preserve_thinking"))
@@ -195,14 +194,9 @@ def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = No
         requested = _chat_preserve(body)
     if requested is not None:
         return requested
-    if settings is None:
-        from favlo.logs import favlo_home, load_settings
-
-        settings = load_settings(favlo_home())
-    value = settings.get("preserve_thinking")
-    if value is None:
+    if registry is None:
         return False
-    return bool(value)
+    return bool(registry)
 
 
 def _bridge_omitted_assistant(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -291,6 +285,57 @@ def generation_cut(root: Path, prompt: list[int]) -> int | None:
         if count and len(prompt) > count and prompt[-count:] == suffix:
             return len(prompt) - count
     return None
+
+
+def user_turn_cut(
+    root: Path,
+    messages: list[dict[str, Any]],
+    tools: Any,
+    thinking: bool,
+) -> int | None:
+    """Tokens through the latest user message, before the generation suffix.
+
+    Historical thinking is omitted on the next user message, including the
+    traces this turn kept after that message. The file that stops here is the
+    one that message still shares. A prompt that already ends on the user
+    message uses ``generation_cut``.
+    """
+    last = None
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            last = index
+    if last is None or last + 1 == len(messages):
+        return None
+    head = encode_chat(
+        root,
+        messages[: last + 1],
+        tools,
+        thinking,
+        preserve_thinking=False,
+    )
+    return generation_cut(root, head)
+
+
+def _expanded_cut(runtime: Any, text_prompt: list[int], cut: int | None) -> int | None:
+    """Map a text-token cut through the image pads ``prepare_prompt`` expanded."""
+    if cut is None:
+        return None
+    lengths = getattr(runtime, "_image_lengths", None)
+    image_id = getattr(runtime, "_image_token", None)
+    if not isinstance(lengths, list) or not lengths or not isinstance(image_id, int):
+        return cut
+    extra = 0
+    seen = 0
+    for position, token in enumerate(text_prompt):
+        if position >= cut:
+            break
+        if token != image_id:
+            continue
+        if seen >= len(lengths):
+            break
+        extra += int(lengths[seen]) - 1
+        seen += 1
+    return cut + extra
 
 
 def instruct_forbid(root: Path) -> set[int]:
@@ -432,7 +477,8 @@ def _respond(
     frequency = _frequency(prepared)
     messages, _ = template_messages(prepared)
     try:
-        keep_thinking = preserve_thinking(prepared)
+        row = getattr(selection, "preserve_thinking", None)
+        keep_thinking = preserve_thinking(prepared, row if isinstance(row, bool) else None)
     except RuntimeError as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
@@ -452,7 +498,10 @@ def _respond(
             preserve_thinking=keep_thinking,
         )
         prompt = _fit_prompt(runtime, prepared, messages, tools, thinking, keep_thinking, prompt)
+        text_cut = None if keep_thinking else user_turn_cut(runtime.root, messages, tools, thinking)
+        text_prompt = prompt
         prompt = prepare_prompt(runtime, messages, prompt)
+        runtime._stable_cut = _expanded_cut(runtime, text_prompt, text_cut)
     except RequestError as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
@@ -464,6 +513,7 @@ def _respond(
         blocked = tool_call_forbid(runtime.root)
         forbid = blocked if forbid is None else forbid | blocked
     stream = bool(prepared.get("stream", False))
+    _prefix_run(runtime, prepared)
     mtp_body = _mtp_body(prepared)
     mtp = _mtp_flag(mtp_body, selection)
     mtp_depth = _mtp_depth(mtp_body, selection)
@@ -591,6 +641,20 @@ def _usage(runtime: Any, prompt_tokens: int, completion_tokens: int) -> dict[str
             "predicted_n": completion_tokens,
         },
     }
+
+
+def _prefix_run(runtime: Any, prepared: dict[str, Any]) -> None:
+    """Copy a scratch prefix budget onto the runtime for this request.
+
+    Absent fields clear a previous scratch run so the next chat uses the home
+    partition again.
+    """
+    budget = prepared.get("favlo:prefix_budget")
+    scratch = prepared.get("favlo:prefix_scratch")
+    runtime._prefix_budget = (
+        budget if isinstance(budget, int) and not isinstance(budget, bool) and budget > 0 else None
+    )
+    runtime._prefix_scratch = scratch if isinstance(scratch, str) and scratch else None
 
 
 def _mtp_body(prepared: dict[str, Any]) -> dict[str, Any]:

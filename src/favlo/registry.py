@@ -51,6 +51,7 @@ class Selection:
     default_variant: str | None = None
     enable_thinking: bool | None = None
     reasoning_effort: str | None = None
+    preserve_thinking: bool | None = None
     runtime: str = ""
     pipeline_root: str = ""
     parts: dict[str, Path] | None = None
@@ -1106,6 +1107,7 @@ def _selection(
         default_variant=default,
         enable_thinking=_enable_thinking(entry),
         reasoning_effort=_resolved_effort(entry, stored, variant, default),
+        preserve_thinking=_preserve_thinking(entry),
         runtime=_require_runtime(entry, folder),
         pipeline_root=pipeline_root_of(entry),
         parts=_parts(entry),
@@ -1302,6 +1304,16 @@ def _enable_thinking(entry: dict[str, Any]) -> bool | None:
     if "enable_thinking" not in entry:
         return None
     return bool(entry.get("enable_thinking"))
+
+
+def _preserve_thinking(entry: dict[str, Any]) -> bool | None:
+    if "preserve_thinking" not in entry:
+        return None
+    value = entry.get("preserve_thinking")
+    if not isinstance(value, bool):
+        message = "preserve_thinking must be true or false"
+        raise ValueError(message)
+    return value
 
 
 def _reasoning_effort(entry: dict[str, Any]) -> str | None:

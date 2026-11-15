@@ -567,6 +567,7 @@ def _selection_payload(selection: Any) -> dict[str, Any]:
         "default_variant": selection.default_variant,
         "enable_thinking": getattr(selection, "enable_thinking", None),
         "reasoning_effort": getattr(selection, "reasoning_effort", None),
+        "preserve_thinking": getattr(selection, "preserve_thinking", None),
         "runtime": selection.runtime,
         "pipeline_root": getattr(selection, "pipeline_root", "") or "",
         "parts": {str(key): str(path) for key, path in parts.items()},
@@ -788,6 +789,11 @@ def _open(
         reasoning_effort=(
             raw.get("reasoning_effort")
             if isinstance(raw.get("reasoning_effort"), str)
+            else None
+        ),
+        preserve_thinking=(
+            raw["preserve_thinking"]
+            if isinstance(raw.get("preserve_thinking"), bool)
             else None
         ),
         runtime=str(raw.get("runtime") or ""),

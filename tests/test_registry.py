@@ -136,6 +136,23 @@ def test_model_row_includes_configured_max_prompt_tokens(tmp_path) -> None:
     assert resolve("short", root=tmp_path).max_prompt_tokens == 65536
 
 
+def test_preserve_thinking_comes_from_the_registry_row(tmp_path) -> None:
+    _record(tmp_path, "packed")
+    add_model("packed", alias="short", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
+    assert resolve("short", root=tmp_path).preserve_thinking is None
+    data = load_registry(tmp_path)
+    data["models"]["packed"]["preserve_thinking"] = True
+    save_registry(data, tmp_path)
+    assert resolve("short", root=tmp_path).preserve_thinking is True
+    data["models"]["packed"]["preserve_thinking"] = False
+    save_registry(data, tmp_path)
+    assert resolve("short", root=tmp_path).preserve_thinking is False
+    data["models"]["packed"]["preserve_thinking"] = "yes"
+    save_registry(data, tmp_path)
+    with pytest.raises(ValueError, match="preserve_thinking"):
+        resolve("short", root=tmp_path)
+
+
 def test_a_finished_record_stays_unregistered(tmp_path) -> None:
     folder = "Qwen3.8-Flash-Next-h128-fp4-c384-fp4"
     _record(tmp_path, folder)

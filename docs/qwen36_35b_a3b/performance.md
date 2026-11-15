@@ -1,6 +1,6 @@
 # Rates
 
-Kernel and bandwidth ceilings are in [ceilings.md](ceilings.md). The pipeline contract is [README.md](README.md).
+Kernel and bandwidth ceilings are in [ceilings.md](ceilings.md). The pipeline contract is [ARCHITECTURE.md](ARCHITECTURE.md).
 
 The file-agent series and the coding-agent series stay separate. Prefill is the summed suffix time. Decode is the summed sampled-token time.
 

@@ -361,6 +361,52 @@ def test_close_drops_device_buffers_before_another_pipeline() -> None:
     assert runtime._held == []
 
 
+def test_a_later_turn_shares_the_user_turn_not_the_open_think() -> None:
+    root = _chat_root()
+    if root is None:
+        pytest.skip("chat template is not installed")
+    from qwen36_35b_a3b.metal41.chat import encode_chat, generation_cut, user_turn_cut
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    call = (
+        "<tool_call>\n<function=read_file>\n<parameter=path>\n"
+        "a.py\n</parameter>\n</function>\n</tool_call>"
+    )
+    user = {"role": "user", "content": "Read a.py"}
+    assistant = {
+        "role": "assistant",
+        "reasoning_content": "I should read the file first.",
+        "content": call,
+    }
+    tool = {"role": "tool", "tool_call_id": "call_0", "content": "print(1)\n"}
+    mid = [user, assistant, tool]
+    prompt = encode_chat(root, mid, tools, True, preserve_thinking=False)
+    cut = user_turn_cut(root, mid, tools, True)
+    suffix = generation_cut(root, prompt)
+    assert cut is not None and suffix is not None and cut < suffix
+    assert prompt[:cut] == encode_chat(root, [user], tools, True, preserve_thinking=False)[:cut]
+    follow = [
+        *mid,
+        {"role": "assistant", "reasoning_content": "The file prints one.", "content": "It prints 1."},
+        {"role": "user", "content": "Now change it."},
+    ]
+    nxt = encode_chat(root, follow, tools, True, preserve_thinking=False)
+    assert nxt[:cut] == prompt[:cut]
+    assert nxt[:suffix] != prompt[:suffix]
+
+
 def test_a_dropped_think_shares_the_prompt_before_the_generation_suffix() -> None:
     root = _chat_root()
     if root is None:
@@ -1470,39 +1516,26 @@ def test_kv_widths_and_atlas_budget() -> None:
 def test_preserve_thinking_defaults_off_and_the_request_wins() -> None:
     from qwen36_35b_a3b.metal41.chat import preserve_thinking
 
-    assert preserve_thinking({}, {}) is False
-    assert preserve_thinking({}, {"preserve_thinking": True}) is True
-    assert preserve_thinking({}, {"preserve_thinking": False}) is False
-    assert (
-        preserve_thinking(
-            {"chat_template_kwargs": {"preserve_thinking": False}},
-            {"preserve_thinking": True},
-        )
-        is False
-    )
-    assert (
-        preserve_thinking(
-            {"chat_template_kwargs": {"preserve_thinking": True}},
-            {},
-        )
-        is True
-    )
-    assert preserve_thinking({"chat_template_kwargs": {}}, {"preserve_thinking": True}) is True
-    assert preserve_thinking({"chat_template_kwargs": {}}, {}) is False
-    assert preserve_thinking({"preserve_thinking": True}, {}) is True
-    assert preserve_thinking({"preserve_thinking": False}, {"preserve_thinking": True}) is False
+    assert preserve_thinking({}) is False
+    assert preserve_thinking({}, None) is False
+    assert preserve_thinking({}, True) is True
+    assert preserve_thinking({}, False) is False
+    assert preserve_thinking({"chat_template_kwargs": {"preserve_thinking": False}}, True) is False
+    assert preserve_thinking({"chat_template_kwargs": {"preserve_thinking": True}}) is True
+    assert preserve_thinking({"chat_template_kwargs": {}}) is False
+    assert preserve_thinking({"preserve_thinking": True}, False) is True
+    assert preserve_thinking({"preserve_thinking": False}, True) is False
     assert (
         preserve_thinking(
             {
                 "preserve_thinking": True,
                 "chat_template_kwargs": {"preserve_thinking": False},
-            },
-            {},
+            }
         )
         is True
     )
     try:
-        preserve_thinking({"preserve_thinking": "true"}, {})
+        preserve_thinking({"preserve_thinking": "true"})
     except RuntimeError:
         pass
     else:

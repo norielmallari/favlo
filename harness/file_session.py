@@ -2,15 +2,21 @@
 
 A Microsoft Agent Framework agent calls ``read_file``, then analyzes the file
 it got back. The corpus is ``src/favlo`` only, so the ladder does not depend on
-any pipeline package. The model id is the pipeline name under test. The request
-sets ``reasoning.effort`` to ``none`` and opens the ``:instruct`` sampling card.
-``--mtp on`` or ``--mtp off`` sends ``favlo:mtp``; omitted, the registry row
-decides. The first completion of each task is required to call ``read_file``.
-The harness reuses ``127.0.0.1:8129``. After the first task it unloads the
-resident model, so the next task loads the prefix from disk. Later tasks keep
-that listener. A request that does not extend the stored token ids stops the
-run. Each model call streams its reply and tool calls. Each request also
-prints the server's prefill and decode lines. Those lines are the instruct series.
+any pipeline package. The model id is the pipeline name under test.
+``--thinking off`` sets ``reasoning.effort`` to ``none`` and opens the
+``:instruct`` card. ``--thinking on`` sets ``reasoning.effort`` to ``medium``
+and opens the ``:thinking`` card. ``--preserve-thinking`` sends that bool.
+Omitted flags are off. ``--mtp on`` or ``--mtp off`` sends ``favlo:mtp``;
+omitted, the registry row decides. The first completion of each task is
+required to call ``read_file``. The harness reuses ``127.0.0.1:8129``. After
+the first task it unloads the resident model, so the next task loads the
+prefix from disk. Later tasks keep that listener. A request that does not
+extend the stored token ids stops the run. ``--evict`` reads one file under a
+1-byte scratch budget. With ``preserve_thinking`` off it sends that read again
+from a new agent. With the flag on it sends one more user message on the same
+session, because the pin is the tool turn's generation cut. Exit 0 means that
+replay loaded the pinned prefix. Each model call streams its reply and tool
+calls. Each request also prints the server's prefill and decode lines.
 """
 
 from __future__ import annotations
@@ -72,8 +78,14 @@ def model_stem(model: str) -> str:
 
 
 def instruct_model(model: str) -> str:
-    """Instruct variant of the pipeline. The file agent never opens thinking."""
+    """Instruct variant of the pipeline."""
     return f"{model_stem(model)}:instruct"
+
+
+def card_model(model: str, *, thinking: bool) -> str:
+    """Sampling card. Thinking and instruct are different rows."""
+    stem = model_stem(model)
+    return f"{stem}:thinking" if thinking else f"{stem}:instruct"
 
 
 def shared_package(root: Path) -> Path:
@@ -326,6 +338,38 @@ def _stored_load(request: RequestRate) -> bool:
     )
 
 
+def prefix_was_hit(request: RequestRate) -> bool:
+    """True when this request loaded a stored prefix instead of starting cold."""
+    return not request.missed and request.prefix_hit not in (None, 0)
+
+
+def boundary_reloaded(first: RequestRate, replay: RequestRate) -> bool:
+    """True when the replay is the first read and it loaded that read's pinned boundary."""
+    return (
+        replay.prefix_load is not None
+        and replay.prefix_hit == replay.prefix_load
+        and replay.prefix_hit not in (None, 0)
+        and replay.prefix_hit < replay.prompt_tokens
+        and abs(replay.prompt_tokens - first.prompt_tokens) <= 8
+    )
+
+
+def preserved_reloaded(previous: RequestRate, replay: RequestRate) -> bool:
+    """True when a later user message kept historical thinking and loaded that prefix.
+
+    The flag-on pin is the generation cut of the tool-turn prompt. The next
+    message extends that prompt, the prompt minus its generation suffix, or the
+    prompt plus the completion. A short user-turn hit means the think blocks
+    were dropped.
+    """
+    hit = replay.prefix_hit
+    if not _stored_load(replay) or hit is None or hit >= replay.prompt_tokens:
+        return False
+    if hit in {_applied(previous), previous.prompt_tokens}:
+        return True
+    return previous.prompt_tokens - hit in (2, 4)
+
+
 def prefix_so_far(requests: list[RequestRate]) -> bool:
     """True while these requests can still finish as one restart load and in-memory extensions.
 
@@ -417,6 +461,7 @@ class Log:
     def __init__(self) -> None:
         self._lines: list[str] = []
         self._lock = threading.Lock()
+        self.mark = ""
 
     def append(self, line: str) -> None:
         with self._lock:
@@ -463,9 +508,35 @@ class Server:
     owned: bool = False
 
 
+def log_since(text: str, mark: str) -> str:
+    """Bytes after ``mark``. A mark the file no longer holds means the file rotated."""
+    if mark and mark in text:
+        return text[text.rfind(mark) + len(mark) :]
+    return text
+
+
+def _disk_log() -> str:
+    from favlo.logs import favlo_home, log_path
+
+    path = log_path(favlo_home())
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _disk_mark() -> str:
+    """The log tail at the start of a run. Later lines are the only ones that count."""
+    tail = _disk_log()[-480:]
+    newline = tail.find("\n")
+    if newline != -1 and newline + 1 < len(tail):
+        tail = tail[newline + 1 :]
+    return tail
+
+
 def _model_requests(log: Log, model: str) -> list[RequestRate]:
-    """Parse request rates for ``model`` only. Other pipelines on the shared log stay out."""
-    return parse_requests(pipeline_log(log.text(), model_stem(model)))
+    """Parse this run's request rates for ``model``. Older lines in the log stay out."""
+    text = log_since(_disk_log(), log.mark)
+    return parse_requests(pipeline_log(text, model_stem(model)))
 
 
 def _wait_requests(
@@ -529,6 +600,10 @@ def _completions(log: Log) -> str:
     return "\n---\n".join(blocks[-2:])
 
 
+EVICT_BUDGET = 1
+EVICT_SCRATCH = "file-agent-evict"
+
+
 def _open_agent(
     base_url: str,
     model: str,
@@ -536,19 +611,29 @@ def _open_agent(
     *,
     mtp: bool | None,
     mtp_depth: int,
+    evict: bool = False,
+    thinking: bool = False,
+    preserve_thinking: bool = False,
 ) -> tuple[object, Agent]:
-    client = open_chat_client(instruct_model(model), base_url)
+    client = open_chat_client(card_model(model, thinking=thinking), base_url)
     # One tool call, then the framework asks for a reply with tools disabled.
     client.function_invocation_configuration["max_iterations"] = 1
     options: dict[str, object] = {
         "tool_choice": {"mode": "required", "required_function_name": "read_file"},
-        "reasoning": {"effort": "none"},
+        "reasoning": {"effort": "medium" if thinking else "none"},
     }
+    extra: dict[str, object] = {"preserve_thinking": bool(preserve_thinking)}
     if mtp is not None:
-        options["extra_body"] = {
-            "favlo:mtp": mtp,
-            "favlo:mtp_depth": mtp_depth,
-        }
+        extra["favlo:mtp"] = mtp
+        extra["favlo:mtp_depth"] = mtp_depth
+    if evict:
+        # One byte keeps the file just written and the pinned boundary.
+        # The replay is the first read, which is that boundary plus the
+        # generation suffix, so the longer files are not a prefix of it.
+        extra["favlo:prefix_budget"] = EVICT_BUDGET
+        extra["favlo:prefix_scratch"] = EVICT_SCRATCH
+    if extra:
+        options["extra_body"] = extra
     agent = Agent(
         client=client,
         name="file-agent",
@@ -568,6 +653,9 @@ async def run_file_agent(
     model: str,
     mtp: bool | None = None,
     mtp_depth: int = 3,
+    evict: bool = False,
+    thinking: bool = False,
+    preserve_thinking: bool = False,
 ) -> RunResult:
     """Read shared package files until ``prompt tokens`` reaches ``target``.
 
@@ -586,17 +674,31 @@ async def run_file_agent(
     task = {"path": ""}
     read = _read_tool(root, allowed, loaded, task)
     base_url = f"http://127.0.0.1:{server.port}/v1"
-    chat, agent = _open_agent(base_url, model, read, mtp=mtp, mtp_depth=mtp_depth)
+    chat, agent = _open_agent(
+        base_url,
+        model,
+        read,
+        mtp=mtp,
+        mtp_depth=mtp_depth,
+        evict=evict,
+        thinking=thinking,
+        preserve_thinking=preserve_thinking,
+    )
     session = agent.create_session()
     printer = TurnPrinter(sys.stdout)
     seen = 0
     turn = 0
+    first_rel = ""
     requests: list[RequestRate] = []
     try:
         for index, path in enumerate(files):
+            if evict and turn >= 1:
+                break
             if turn >= 2 and requests and requests[-1].prompt_tokens >= target:
                 break
             rel = path.relative_to(package).as_posix()
+            if not first_rel:
+                first_rel = rel
             task["path"] = rel
             print(f"turn {turn + 1} read {SHARED_PACKAGE.as_posix()}/{rel}", flush=True)
             before_requests = len(_model_requests(log, model))
@@ -614,6 +716,39 @@ async def run_file_agent(
             turn += 1
             if turn == 1 and index + 1 < len(files):
                 _restart(server, log)
+        if evict:
+            if not requests or not prefix_so_far(requests):
+                note = "prefix did not extend\n" + _completions(log)
+                return RunResult(requests, False, False, note)
+            if preserve_thinking:
+                # The flag-on pin is the tool turn's generation cut. A bare
+                # replay of the first read is shorter than that file, so it
+                # cannot load it. One more user message on this session can.
+                replay = await _replay_continued(agent, session, log, server, model, printer)
+                held = preserved_reloaded(requests[-1], replay)
+            else:
+                replay_chat, replay_agent = _open_agent(
+                    base_url,
+                    model,
+                    read,
+                    mtp=mtp,
+                    mtp_depth=mtp_depth,
+                    evict=True,
+                    thinking=thinking,
+                    preserve_thinking=False,
+                )
+                try:
+                    replay = await _replay_first(
+                        replay_agent, log, server, model, first_rel, printer
+                    )
+                finally:
+                    await close_chat_client(replay_chat)
+                held = boundary_reloaded(requests[0], replay)
+            requests = [*requests, replay]
+            print(format_request(len(requests), replay), flush=True)
+            if not held:
+                return RunResult(requests, False, True, "prefix was evicted")
+            return RunResult(requests, True, True, "")
     finally:
         printer.close()
         if chat is not None:
@@ -637,10 +772,14 @@ def _spawn(
     port: int = 8129,
 ) -> Server:
     from favlo.cli import repo_root
-    from favlo.daemon import alive, follow, read_pid, telemetry_path
+    from favlo.daemon import alive, follow, read_pid
+    from favlo.logs import favlo_home, log_path
     from favlo.smoke_lock import open_attached
 
-    path = telemetry_path(port)
+    # The listener copies durable lines into favlo.log. The daemon's
+    # serve-<port>.log is only that process's stdout, and an interactive
+    # `favlo serve` does not write it.
+    path = log_path(favlo_home())
     before = path.stat().st_size if path.is_file() else 0
     attached = open_attached(
         root=repo_root(),
@@ -658,7 +797,7 @@ def _spawn(
     def on_line(line: str) -> None:
         log.append(line + "\n")
 
-    path = telemetry_path(attached.port)
+    path = log_path(favlo_home())
     size = path.stat().st_size if path.is_file() else 0
     # A rolled log keeps its newest bytes. Starting at 0 would replay them.
     offset = before if size >= before else size
@@ -677,6 +816,62 @@ def _stop_server(server: Server) -> None:
         return
     stop_pid(server.pid)
     print(f"stopped 127.0.0.1:{server.port}", flush=True)
+
+
+async def _replay_first(
+    agent: Agent,
+    log: Log,
+    server: Server,
+    model: str,
+    path: str,
+    printer: TurnPrinter,
+) -> RequestRate:
+    """Send the first read again, on a new agent, with no tool history.
+
+    The turn's later stores are longer than this prompt. A one-byte budget
+    deletes those longer files' predecessors. The new agent's defaults are the
+    same tool choice. Passing those options again appends the instructions a
+    second time, and that longer prompt is not this boundary.
+    """
+    print(f"replay {SHARED_PACKAGE.as_posix()}/{path}", flush=True)
+    before = len(_model_requests(log, model))
+    stream = agent.run(
+        read_prompt(path),
+        stream=True,
+        session=agent.create_session(),
+    )
+    async for update in stream:
+        printer.take(update)
+    requests = _wait_requests(log, before, server, model=model)
+    # The tool round's second call is the file analysis. The boundary load is
+    # the first call, the same short read as the opening request.
+    return requests[before]
+
+
+async def _replay_continued(
+    agent: Agent,
+    session: object,
+    log: Log,
+    server: Server,
+    model: str,
+    printer: TurnPrinter,
+) -> RequestRate:
+    """Send one more user message on the same session, after the model was unloaded.
+
+    Historical thinking stays in the prompt. The first call of this turn is the
+    load. The tool round's later call is the analysis.
+    """
+    print("replay continued session", flush=True)
+    before = len(_model_requests(log, model))
+    stream = agent.run(
+        "Name the file you read.",
+        stream=True,
+        session=session,
+    )
+    async for update in stream:
+        printer.take(update)
+    requests = _wait_requests(log, before, server, model=model)
+    return requests[before]
 
 
 def _restart(server: Server, log: Log) -> None:
@@ -701,6 +896,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-memory", default=None, help="serve memory cap, such as 16GiB")
     parser.add_argument("--mtp", choices=("on", "off"), default=None)
     parser.add_argument("--mtp-depth", type=int, default=3)
+    parser.add_argument(
+        "--evict",
+        action="store_true",
+        help="one read, then replay it under a 1-byte scratch prefix budget",
+    )
+    parser.add_argument("--thinking", choices=("on", "off"), default="off")
+    parser.add_argument("--preserve-thinking", choices=("on", "off"), default="off")
     args = parser.parse_args(argv)
     if args.tokens < 1:
         print("token target must be positive")
@@ -714,12 +916,17 @@ def main(argv: list[str] | None = None) -> int:
     mtp = None if args.mtp is None else args.mtp == "on"
     try:
         server = _spawn(log, stem, args.max_memory, args.port or 8129)
-        # A rolled serve log can re-deliver retained lines from earlier sessions.
-        # Drop anything the follower already pushed before this agent run starts.
-        time.sleep(0.2)
-        log.clear()
+        log.mark = _disk_mark()
         if args.mtp is not None:
             print(f"mtp {args.mtp} depth {args.mtp_depth}", flush=True)
+        thinking = args.thinking == "on"
+        preserve = args.preserve_thinking == "on"
+        print(
+            f"thinking {args.thinking} preserve {args.preserve_thinking}",
+            flush=True,
+        )
+        if args.evict:
+            print(f"evict budget {EVICT_BUDGET} scratch {EVICT_SCRATCH}", flush=True)
         result = asyncio.run(
             run_file_agent(
                 args.repo,
@@ -729,6 +936,9 @@ def main(argv: list[str] | None = None) -> int:
                 model=stem,
                 mtp=mtp,
                 mtp_depth=args.mtp_depth,
+                evict=args.evict,
+                thinking=thinking,
+                preserve_thinking=preserve,
             )
         )
     except Exception as exc:

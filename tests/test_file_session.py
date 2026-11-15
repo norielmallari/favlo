@@ -4,9 +4,15 @@ from pathlib import Path
 
 import pytest
 from harness.file_session import (
+    RequestRate,
     extensions_hold,
+    log_since,
     model_stem,
     parse_requests,
+    pipeline_log,
+    boundary_reloaded,
+    preserved_reloaded,
+    prefix_was_hit,
     printed_requests,
     read_repository_file,
     source_files,
@@ -191,4 +197,45 @@ prefill 1.00 tok/s (16 tok in 2.00s)
 decode 1.00 tok/s (1 tok in 1.00s)
 """
     assert extensions_hold(parse_requests(warm))
+
+
+def test_prefix_was_hit_requires_a_loaded_prefix() -> None:
+    miss = RequestRate(10, None, True, "", "", "", 1, "", ())
+    cold = RequestRate(10, 0, False, "", "", "", 1, "", ())
+    hit = RequestRate(12, 8, False, "", "", "", 1, "", ())
+    assert prefix_was_hit(miss) is False
+    assert prefix_was_hit(cold) is False
+    assert prefix_was_hit(hit) is True
+    first = RequestRate(365, None, True, "", "", "", 25, "", ())
+    loaded = RequestRate(365, 361, False, "", "", "", 25, "", (), 361)
+    longer = RequestRate(13581, 440, False, "", "", "", 100, "", ())
+    memory = RequestRate(365, 361, False, "", "", "", 25, "", ())
+    assert boundary_reloaded(first, loaded) is True
+    assert boundary_reloaded(first, longer) is False
+    assert boundary_reloaded(first, memory) is False
+    previous = RequestRate(13531, 390, False, "", "", "", 475, "", ())
+    applied = RequestRate(15000, 14006, False, "", "", "", 10, "", (), 14006)
+    suffix = RequestRate(15000, 13527, False, "", "", "", 10, "", (), 13527)
+    short = RequestRate(15000, 361, False, "", "", "", 10, "", (), 361)
+    assert preserved_reloaded(previous, applied) is True
+    assert preserved_reloaded(previous, suffix) is True
+    assert preserved_reloaded(previous, short) is False
+
+
+def test_log_since_keeps_only_the_lines_after_the_mark() -> None:
+    mark = "prompt tokens 10\ncache miss\n"
+    older = "request open qwen36_35b_a3b\n" + mark
+    fresh = (
+        "request open qwen36_35b_a3b\n"
+        "prompt tokens 12\n"
+        "prefix load 8 tokens\n"
+        "cache hit 8\n"
+        "prefill 1.00 tok/s (4 tok in 4.00s)\n"
+        "decode 1.00 tok/s (1 tok in 1.00s)\n"
+    )
+    parsed = parse_requests(pipeline_log(log_since(older + fresh, mark), "qwen36_35b_a3b"))
+    assert len(parsed) == 1
+    assert parsed[0].prompt_tokens == 12
+    assert prefix_was_hit(parsed[0])
+    assert log_since(fresh, "missing mark") == fresh
 

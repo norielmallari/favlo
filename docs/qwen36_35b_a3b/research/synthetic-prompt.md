@@ -1,6 +1,6 @@
 # Synthetic prompt
 
-Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../README.md](../README.md). This file records one synthetic-prompt run. It is a recorded run, not a format bound.
+Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records one synthetic-prompt run. It is a recorded run, not a format bound.
 
 ## Remainder
 

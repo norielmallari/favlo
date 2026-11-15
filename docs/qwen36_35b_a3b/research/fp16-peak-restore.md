@@ -1,6 +1,6 @@
 # Float16 peak restore
 
-Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../README.md](../README.md). The forward already divides each value-mix window by its peak before the float16 product and multiplies that peak back onto the partial. This file records the float16 code-point bound for that cast. It does not record the `matmul2d` product error, the fp8 value error, or a hidden-state error on the [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkout.
+Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The forward already divides each value-mix window by its peak before the float16 product and multiplies that peak back onto the partial. This file records the float16 code-point bound for that cast. It does not record the `matmul2d` product error, the fp8 value error, or a hidden-state error on the [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkout.
 
 ## Remainder
 
