@@ -9,7 +9,6 @@ import pytest
 from favlo.console import Console
 from favlo.logs import (
     DEFAULT_LOG_MAX_BYTES,
-    RollingLog,
     configured_thinking_budget,
     ensure_settings,
     heartbeat_seconds,
@@ -17,9 +16,11 @@ from favlo.logs import (
     load_settings,
     log_max_bytes,
     log_path,
+    open_log,
     output_token_limit,
     set_heartbeat_seconds,
     settings_path,
+    write_log,
 )
 
 
@@ -50,17 +51,19 @@ def test_a_bad_log_cap_falls_back(tmp_path) -> None:
     assert log_max_bytes({"log_max_bytes": "nope"}) == DEFAULT_LOG_MAX_BYTES
 
 
-def test_the_log_keeps_only_the_newest_bytes(tmp_path) -> None:
+def test_the_log_rotates_at_the_cap(tmp_path) -> None:
     path = log_path(tmp_path)
-    rolling = RollingLog(path, 48)
-    for index in range(20):
-        rolling.write(f"line-{index:02d} pad")
-    blob = path.read_bytes()
+    handler = open_log(path, 48)
+    try:
+        for index in range(20):
+            write_log(handler, f"line-{index:02d} pad")
+        blob = path.read_bytes()
+    finally:
+        handler.close()
     assert len(blob) <= 48
-    text = blob.decode("utf-8")
-    assert text.startswith("line-")
-    assert "line-19" in text
-    assert "line-00" not in text
+    assert b"line-19" in blob
+    assert b"line-00" not in blob
+    assert path.with_name(path.name + ".1").is_file()
 
 
 def test_stdio_stays_under_the_configured_cap(tmp_path, monkeypatch) -> None:
@@ -84,6 +87,7 @@ def test_stdio_stays_under_the_configured_cap(tmp_path, monkeypatch) -> None:
         install_rolling_stdio()
         assert sys.stdout is again
         assert sys.stderr is again
+        sys.stdout.close()
     finally:
         sys.stdout, sys.stderr = original
 
@@ -98,7 +102,7 @@ def test_console_lines_land_in_the_rolling_log(tmp_path) -> None:
     ui.end(progress, "prefill 4 tok in 1.0s")
     ui.report("RuntimeError: boom\n")
     text = log_path(tmp_path).read_text(encoding="utf-8")
-    assert "favlo 0.5.0" in text
+    assert "favlo 0.6.0" in text
     assert "listening on http://127.0.0.1:8129" in text
     assert "prefill 4 tok in 1.0s" in text
     assert "RuntimeError: boom" in text

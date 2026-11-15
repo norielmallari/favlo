@@ -259,8 +259,8 @@ def _skipped_prefix(path: Path, offset: int) -> bytes:
 def _delivered_prefix(seen: bytes, new: bytes) -> int:
     """Leading bytes of ``new`` that are already a suffix of ``seen``.
 
-    A rolling log replaces the file with its own tail. That tail starts with
-    lines the follower has already delivered.
+    A rotated log starts a new file. A replacement that keeps a tail starts
+    with lines the follower has already delivered.
     """
     if not seen or not new:
         return 0

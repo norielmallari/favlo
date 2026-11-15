@@ -20,12 +20,12 @@ from typing import Any, TextIO
 
 from favlo.daemon import TracebackSkip
 from favlo.host_progress import HostProgress
-from favlo.logs import RollingLog
+from favlo.logs import open_log, write_log
 from favlo.progress import Sanitizer
 
 PHASES = ("load", "download", "quantize", "prefill", "decode", "sample")
 UNITS = ("tok", "layers", "bytes", "shards", "experts", "stages", "files", "blocks")
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 SCHEMA = 1
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -217,8 +217,9 @@ class Console:
         return ui
 
     def attach_log(self, path: Path, max_bytes: int) -> None:
-        """Copy durable lines into a rolling file. The row itself is not copied."""
-        self._recorder = RollingLog(path, max_bytes).write
+        """Copy durable lines into a rotating file. The row itself is not copied."""
+        handler = open_log(path, max_bytes)
+        self._recorder = lambda text: write_log(handler, text)
 
     def _record(self, text: str) -> None:
         recorder = self._recorder

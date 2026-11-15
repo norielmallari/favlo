@@ -1,19 +1,21 @@
-"""Rolling text logs. The process entry owns this module.
+"""Text logs. The process entry owns this module.
 
 ``~/.favlo/logs/favlo.log`` records durable lines. The daemon writes
 ``~/.favlo/logs/serve-<port>.log``. A background download writes
 ``~/.favlo/logs/qwen38-27b-download.log``. ``~/.favlo/settings.json``
-key ``log_max_bytes`` is the most bytes each of those files may hold.
-The default is 1 MiB. An append that would pass the cap leaves the newest
-bytes that still fit. SQLite files are not these logs.
+key ``log_max_bytes`` is the size at which ``RotatingFileHandler`` renames
+that file to the same name plus ``.1`` and opens a new one. The older ``.1``
+is removed. The default is 1 MiB. SQLite files are not these logs.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -215,58 +217,54 @@ def ensure_settings(home: Path) -> dict[str, Any]:
     return payload
 
 
-class RollingLog:
-    """One log file whose size stays at or under ``max_bytes``."""
+class _FileLog(RotatingFileHandler):
+    """``RotatingFileHandler`` that keeps a disk error off the console."""
 
-    def __init__(self, path: Path, max_bytes: int) -> None:
-        if max_bytes < 1:
-            message = "log_max_bytes must be positive"
-            raise ValueError(message)
-        self.path = path
-        self.max_bytes = max_bytes
-        self._lock = threading.Lock()
-
-    def write(self, text: str) -> None:
-        if not text:
-            return
-        payload = text.encode("utf-8")
-        if not payload.endswith(b"\n"):
-            payload += b"\n"
-        with self._lock:
-            try:
-                self._append(payload)
-            except OSError:
-                return
-
-    def _append(self, payload: bytes) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        existing = self.path.read_bytes() if self.path.is_file() else b""
-        if existing and len(existing) + len(payload) <= self.max_bytes:
-            with self.path.open("ab") as handle:
-                handle.write(payload)
-            return
-        combined = existing + payload
-        if len(combined) > self.max_bytes:
-            combined = _tail(combined, self.max_bytes)
-        temporary = self.path.with_name(self.path.name + ".tmp")
-        temporary.write_bytes(combined)
-        temporary.replace(self.path)
+    def handleError(self, record: logging.LogRecord) -> None:
+        del record
 
 
-def _tail(blob: bytes, max_bytes: int) -> bytes:
-    """The newest ``max_bytes`` of ``blob``, starting at a line when one fits."""
-    kept = blob[-max_bytes:]
-    newline = kept.find(b"\n")
-    if newline != -1 and newline < len(kept) - 1:
-        return kept[newline + 1 :]
-    return kept
+def open_log(path: Path, max_bytes: int) -> RotatingFileHandler:
+    """One rotating file. ``max_bytes`` is the active file's rollover size."""
+    if max_bytes < 1:
+        message = "log_max_bytes must be positive"
+        raise ValueError(message)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = _FileLog(
+        path,
+        maxBytes=max_bytes,
+        backupCount=1,
+        encoding="utf-8",
+        delay=True,
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return handler
 
 
-class RollingText:
-    """A text stream. Each finished line is appended through ``RollingLog``."""
+def write_log(handler: RotatingFileHandler, text: str) -> None:
+    """Append ``text`` as one record per line."""
+    if not text:
+        return
+    lines = text.splitlines() or [""]
+    for line in lines:
+        handler.handle(
+            logging.LogRecord(
+                name="favlo",
+                level=logging.INFO,
+                pathname="",
+                lineno=0,
+                msg=line,
+                args=(),
+                exc_info=None,
+            )
+        )
 
-    def __init__(self, rolling: RollingLog) -> None:
-        self._rolling = rolling
+
+class LogStream:
+    """A text stream. Each finished line goes to a ``RotatingFileHandler``."""
+
+    def __init__(self, handler: RotatingFileHandler) -> None:
+        self._handler = handler
         self._pending = ""
         self._lock = threading.Lock()
         self.encoding = "utf-8"
@@ -284,20 +282,24 @@ class RollingText:
         with self._lock:
             self._drain(final=True)
 
+    def close(self) -> None:
+        self.flush()
+        self._handler.close()
+
     def isatty(self) -> bool:
         return False
 
     def _drain(self, *, final: bool) -> None:
         while "\n" in self._pending:
             line, self._pending = self._pending.split("\n", 1)
-            self._rolling.write(line + "\n")
+            write_log(self._handler, line)
         if final and self._pending:
-            self._rolling.write(self._pending)
+            write_log(self._handler, self._pending)
             self._pending = ""
 
 
 def install_rolling_stdio() -> None:
-    """Send this process's stdout and stderr through the rolling file in the env."""
+    """Send this process's stdout and stderr through the rotating file in the env."""
     raw = os.environ.get(_LOG_ENV)
     if not raw or getattr(sys.stdout, "_favlo_rolling", False):
         return
@@ -305,7 +307,7 @@ def install_rolling_stdio() -> None:
     home = path.parent.parent if path.parent.name == "logs" else favlo_home()
     try:
         settings = ensure_settings(home)
-        stream = RollingText(RollingLog(path, log_max_bytes(settings)))
+        stream = LogStream(open_log(path, log_max_bytes(settings)))
     except (OSError, ValueError):
         return
     sys.stdout = stream
@@ -313,7 +315,7 @@ def install_rolling_stdio() -> None:
 
 
 def attach_process_log(console: Any, home: Path | None = None) -> None:
-    """Point ``console`` at the rolling log for ``home`` (default ``~/.favlo``)."""
+    """Point ``console`` at the rotating log for ``home`` (default ``~/.favlo``)."""
     root = favlo_home() if home is None else home
     try:
         settings = ensure_settings(root)
