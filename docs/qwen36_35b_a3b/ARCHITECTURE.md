@@ -220,6 +220,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - The coding agent on that plane, with the horse still, is a measurement in [research/coding-agent.md](research/coding-agent.md).
 - The coding agent on `half` keys and values, with the horse still, is a measurement in [research/coding-agent-half.md](research/coding-agent-half.md).
 - The synthetic prompt on that plane, a cold 512-token prompt and a cold 10000-token prompt, is a measurement in [research/synthetic-prompt.md](research/synthetic-prompt.md).
+- The synthetic prompt on `half` keys and values, at 512, 1024, 4096, and 10000 tokens, is a measurement in [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md).
 
 - The checkpoint position limit is `max_position_embeddings` (262,144).
 - The served window stops at 131072 tokens.
