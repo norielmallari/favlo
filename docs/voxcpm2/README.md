@@ -1,32 +1,39 @@
 # VoxCPM2
 
-Favlo serves tokenizer-free text-to-speech from the OpenBMB checkpoint [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) (Apache-2.0).
+Tokenizer-free text-to-speech from [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2).
 
-`setup` places weights under `models/openbmb/VoxCPM2`.
+Those weights are under the Apache License, Version 2.0.
+
+`setup` downloads the checkout into `models/openbmb/VoxCPM2`.
+
+`models add` registers a finished checkout.
 
 Chat completions are refused.
 
-Speech goes through the voice media path.
+Speech is generated only through `favlo media --pipeline voxcpm2` (or `voxcpm2__generate_voice` on `POST /mcp`).
 
-With `favlo serve` running, `favlo media --pipeline voxcpm2` posts `input` and `persona` to the listener.
+`favlo --voxcpm2` does not speak a line.
 
-It returns a stored audio URI.
-
-MCP clients call `voxcpm2__generate_voice` on `POST /mcp`.
+As-built detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```text
 uv run favlo --voxcpm2 setup
 uv run favlo --voxcpm2 inspect
 uv run favlo --voxcpm2 kernels
+uv run favlo --voxcpm2 models add VoxCPM2
 ```
+
+Start `favlo serve`, then:
 
 ```text
 uv run favlo media --pipeline voxcpm2 input="Hello." persona="Clear adult voice"
 uv run favlo media --pipeline voxcpm2 --model VoxCPM2 --out pack.json input="Hello." persona="Clear adult voice"
 ```
 
-As-built detail is in [ARCHITECTURE.md](ARCHITECTURE.md).
+- `input` and `persona` are required.
+- `voice` must be empty or omitted.
+- Stdout is one `file://` URI.
 
-It covers kernels, registry, listener, and inference behavior.
-
-[references.md](references.md) lists papers and specifications.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — kernels, registry, listener, forward
+- [references.md](references.md) — papers and specifications
+- [smoke.json](smoke.json) — voice smoke-agent line and persona

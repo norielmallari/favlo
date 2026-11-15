@@ -25,7 +25,7 @@ These rows time the 576×320, 9-frame token grid.
 | `gemm_f16_tn` | 576×512, K 128 | 2880 | 0.000182 |
 | `gemm_f16_nn` | 576×128, K 512 | 2880 | 0.000190 |
 
-The smoke DiT sum is **4.267 s**. Text, the VAE, and the host copies around these launches are outside that sum.
+The isolated DiT sum is **4.267 s**. Text, the VAE, and the host copies around these launches are outside that sum.
 
 | Kernel | Shape | Count | Seconds |
 |---|---|---:|---:|

@@ -4,6 +4,7 @@ This page is the as-built detail for the `wan22_ti2v_5b` package. [README.md](RE
 
 - Text-to-video and image-to-video on the Metal 4.1 GPU.
 - The weights are the 5B transformer from the [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) card.
+- `favlo --wan22_ti2v_5b` loads `pipelines/wan22_ti2v_5b/metal41/`.
 - The record is `models/Wan2.2-TI2V-5B-int8`.
 - The umT5 encoder is the int8 pack named by `parts.umt5` on the registry row, `models/google/umt5-xxl-int8`.
 - A clip reads that pack and does not open the BF16 encoder file.
@@ -17,10 +18,10 @@ This page is the as-built detail for the `wan22_ti2v_5b` package. [README.md](RE
 - `wan22_ti2v_5b__generate_video_i2v` conditions the first latent frame on a PNG.
 - The clip is 24 fps.
 - Both tools require `size`.
-- Accepted sizes are `1280x704` and `704x1280`.
+- Edges are multiples of 32.
+- The catalog lists `1280x704` and `704x1280`.
 - MCP `duration` is clip length in seconds.
 - An omitted `duration` is 121 frames.
-- Edges are multiples of 32.
 - `steps` is 0 or 4.
 - `guidance_scale` is omitted or 1.
 - `negative_prompt` is accepted and not encoded.
@@ -67,7 +68,23 @@ The sampler uses four knots, 1000, 960, 888.888889, and 727.272727. Each knot is
 - [MLX-Gen](https://github.com/lpalbou/mlx-gen/blob/main/docs/wan-video.md) already treats that smaller canvas as a routing check.
 - This note does not add a score for the cutoff.
 
-Setup and the first clip are in [README.md](README.md).
+Download, pack, and the first clip are [README.md](README.md). The shared umT5 pack is [../umt5_xxl/README.md](../umt5_xxl/README.md).
+
+```text
+uv run favlo --wan22_ti2v_5b umt5 setup
+uv run favlo --wan22_ti2v_5b umt5 quantize --format wan
+uv run favlo --wan22_ti2v_5b setup
+uv run favlo --wan22_ti2v_5b quantize --weights <checkpoint>
+uv run favlo --wan22_ti2v_5b kernels
+uv run favlo --wan22_ti2v_5b ceilings
+```
+
+- `setup` writes `Wan2.2_VAE.pth` under `models/Wan-AI/Wan2.2-TI2V-5B/`.
+- `--student-dir` optionally downloads the Turbo student `model.pt`.
+- `quantize --weights` packs `models/Wan2.2-TI2V-5B-int8` and registers that folder.
+- The VAE is not packed.
+- `kernels` compiles and checks `matmul2d`.
+- `ceilings` times the isolated kernels.
 
 ## Registry
 
@@ -115,7 +132,7 @@ save_registry(data)
 
 ```text
 uv run favlo media --pipeline wan22_ti2v_5b prompt="A horse gallops at speed. Fixed camera." size=832x480 frames=9
-uv run favlo media --pipeline wan22_ti2v_5b prompt="A horse gallops at speed. Fixed camera." image=file:///absolute/still.png size=832x480 frames=9
+uv run favlo media --pipeline wan22_ti2v_5b --model Wan2.2-TI2V-5B-int8 --out pack.json prompt="A horse gallops at speed. Fixed camera." image=file:///absolute/still.png size=832x480 frames=9
 ```
 
 - `prompt` and `size` are required.
@@ -124,6 +141,18 @@ uv run favlo media --pipeline wan22_ti2v_5b prompt="A horse gallops at speed. Fi
 - `frames` defaults from the tool duration when omitted.
 - This is the command that writes the clip.
 - The pipeline command does not.
+
+`favlo serve` publishes `wan22_ti2v_5b__generate_video_t2v` and `wan22_ti2v_5b__generate_video_i2v` on `POST /mcp`. A path under `/v1/videos` is 404.
+
+## Smoke
+
+`uv run favlo --wan22_ti2v_5b kernels` compiles and checks `matmul2d`.
+
+`uv run pytest tests/test_wan22_ti2v_5b.py -s` is the package check.
+
+There is no `favlo --wan22_ti2v_5b smoke` subcommand. Clips use `favlo media` only.
+
+Kernel ceilings for one 9-frame 576×320 grid are in [ceilings.md](ceilings.md). The isolated sum is a measurement in [research/clip-ceiling.md](research/clip-ceiling.md).
 
 ## Papers
 

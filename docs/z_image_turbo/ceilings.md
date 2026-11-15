@@ -1,6 +1,12 @@
 # Ceilings
 
-Kernel and bandwidth ceilings for one 1280×1280 generation. Reuse these figures while `matmul_fp4`, `scale_to_half`, `bias_cast`, `rmsnorm`, `rope_axes`, `attend`, `attend_flash`, `channel_scale`, `channel_gate`, and `silu_mul` are unchanged. Recompute this note when one of them changes.
+Kernel and bandwidth ceilings for one 1280×1280 generation.
+
+The serving contract is [ARCHITECTURE.md](ARCHITECTURE.md).
+
+Reuse these figures while `matmul_fp4`, `scale_to_half`, `bias_cast`, `rmsnorm`, `rope_axes`, `attend`, `attend_flash`, `channel_scale`, `channel_gate`, and `silu_mul` are unchanged.
+
+Recompute this note when one of them changes.
 
 Each time is one command buffer, then a wait. The time is `GPUEndTime − GPUStartTime`. Overlapping command buffers are not added. The figure is the median of five dispatches after one discarded sample.
 

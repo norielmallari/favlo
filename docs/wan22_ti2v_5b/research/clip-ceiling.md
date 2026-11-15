@@ -26,8 +26,8 @@ On an M5 Pro with 48 GB the isolated DiT sum at 576×320 and 9 frames is 4.267 s
 
 - `uv run favlo --wan22_ti2v_5b ceilings` reprints the isolated medians.
 - The 4.267 s sum is the arithmetic in [../ceilings.md](../ceilings.md) from 25 October 2026.
-- `uv run favlo --wan22_ti2v_5b smoke` prints the `dit` and `decode` lines.
-- That smoke subcommand is gone; new clips use `favlo media` only.
+- Historical (smoke was removed): `uv run favlo --wan22_ti2v_5b smoke` printed the `dit` and `decode` lines.
+- New clips use `favlo media` only.
 - The lines below are that print from 26 October 2026.
 - `kernels` checks a synthetic tile and does not regenerate this table.
 

@@ -10,20 +10,18 @@ This directory wins for this pipeline's records and kernels.
 
 Another pipeline does not edit it.
 
-The model card is [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2).
+## Checkpoint
 
-The report is [arXiv:2606.06928](https://arxiv.org/html/2606.06928).
-
-The VoxCPM formulation is Zhou et al., [arXiv:2509.24650](https://arxiv.org/abs/2509.24650).
-
-The text-semantic stack is MiniCPM-4, [arXiv:2506.07900](https://arxiv.org/abs/2506.07900).
-
-Papers for the kernels are [references.md](references.md).
+- Model card: [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2).
+- Report: [arXiv:2606.06928](https://arxiv.org/html/2606.06928).
+- VoxCPM formulation: Zhou et al., [arXiv:2509.24650](https://arxiv.org/abs/2509.24650).
+- Text-semantic stack: MiniCPM-4, [arXiv:2506.07900](https://arxiv.org/abs/2506.07900).
+- Kernel papers: [references.md](references.md).
 
 `setup` downloads the checkout into `models/openbmb/VoxCPM2`.
 
-- The weight file is `model.safetensors`, 4,580,080,592 bytes, bfloat16.
-- The AudioVAE file is `audiovae.pth`, 376,951,122 bytes.
+- `model.safetensors` is 4,580,080,592 bytes, bfloat16.
+- `audiovae.pth` is 376,951,122 bytes.
 - A file that already has that size is left in place.
 - `setup` does not register a row.
 - `handle_chat` refuses a chat completion.
@@ -49,13 +47,19 @@ It checks the following against the host formulas:
 
 One stack step is checked as a single command buffer.
 
-Generation writes one 48 kHz WAV.
+`favlo --voxcpm2` does not generate audio.
 
-- The checkpoint bfloat16 linears are uploaded as `half`.
+Speech goes through `favlo media` only.
+
+## Generation
+
+`favlo media --pipeline voxcpm2` writes one 48 kHz WAV through the listener.
+
+- Checkpoint bfloat16 linears are uploaded as `half`.
 - `matmul2d` accumulates into float.
 - A language-model step runs as one command buffer.
 - One diffusion estimate, including its conditioning projections and the diffusion stack, runs as one command buffer.
-- Values between those kernels stay float32, and the matmul casts its activation to half.
+- Values between those kernels stay float32; the matmul casts its activation to half.
 - The key and value cache stays float32.
 - The stop head reads two logits on the host.
 - The AudioVAE and the token embedding stay on their current path.
@@ -71,43 +75,40 @@ A named `voice` is refused.
 
 `persona` is required.
 
-Parentheses and sentence punctuation are removed so the phrase is not its own utterance.
-
-The remaining words are wrapped in one pair of parentheses and placed in front of `input`.
-
-A space is inserted when `input` starts with an ASCII letter or digit, so that word keeps the token it has on its own.
-
-The model receives that one string.
-
-The opening parenthesis is its initial token.
+- Parentheses and sentence punctuation are removed so the phrase is not its own utterance.
+- The remaining words are wrapped in one pair of parentheses and placed in front of `input`.
+- A space is inserted when `input` starts with an ASCII letter or digit, so that word keeps the token it has on its own.
+- The model receives that one string.
+- The opening parenthesis is its initial token.
 
 The checkpoint sets `use_mup` false, so a token embedding is unscaled and a residual add is unscaled.
 
-`scalar_quantization_scale` is 9 and `scalar_quantization_latent_dim` is 512.
+- `scalar_quantization_scale` is 9.
+- `scalar_quantization_latent_dim` is 512.
+- The bound is `round(tanh(y) * 9) / 9` after the input projection.
+- Audio positions pass through that bound.
+- Text positions keep the raw hidden state.
 
-The bound is `round(tanh(y) * 9) / 9` after the input projection.
-
-Audio positions pass through that bound.
-
-Text positions keep the raw hidden state.
-
-Each patch is 4 latent frames, 160 ms.
+Each patch is 4 latent frames.
 
 The diffusion transformer takes 10 Euler steps, guidance 2, sway sampling, and CFG-Zero*.
 
-The step at index zero has zero velocity.
+Early Euler steps counted by `zero_init_steps` have zero velocity.
 
 The stop head ends the line after the minimum length of 2 patches.
 
-The patch ceiling is 4096, then `text tokens × 6 + 10`, then the positions left in `max_length` after the text and the audio-start id.
+The patch limit is the smaller of:
+
+- 4096
+- `text tokens × 6 + 10`
+- the positions left in `max_length` after the text and the audio-start id
 
 A sample row counts each diffusion step and the decoder.
 
 - Its detail names the patch and the Euler step before that step's estimates run.
 - The row advances when those command buffers have finished.
 - Each finished patch logs its seconds.
-
-The job records `progress`, `stage`, and `eta` from that count.
+- The job records `progress`, `stage`, and `eta` from that count.
 
 The AudioVAE decoder is float32, weight-normalized, and conditioned on the 48 kHz bin.
 
@@ -197,13 +198,13 @@ uv run favlo media --pipeline voxcpm2 input="Hello." persona="Clear adult voice"
 uv run favlo media --pipeline voxcpm2 --model VoxCPM2 --out pack.json input="Hello." persona="Clear adult voice"
 ```
 
-`input` and `persona` are required.
+- `input` and `persona` are required.
+- `voice` must be empty or omitted.
+- `response_format` defaults to `mp3`.
 
-`voice` must be empty or omitted.
+`media` is the only generation command.
 
-`response_format` defaults to `mp3`.
-
-`media` is the command that goes through serve.
+There is no `speak` CLI.
 
 `handle_voice` is a `MediaPipeline`.
 

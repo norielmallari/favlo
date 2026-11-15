@@ -1,7 +1,10 @@
 # umT5-XXL
 
-Shared text-encoder pack for Wan video pipelines. It is not a Favlo CLI pipeline
-or flag.
+Shared text-encoder pack for Wan video pipelines. Not a Favlo CLI pipeline or flag.
+
+Checkpoint: [google/umt5-xxl](https://huggingface.co/google/umt5-xxl). Apache License, Version 2.0.
+
+Packed folder: `models/google/umt5-xxl-int8`.
 
 Wan I2V and TI2V:
 
@@ -11,48 +14,29 @@ Wan I2V and TI2V:
 
 As-built detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Wan registry keys and `parts.umt5` are in [the I2V note](../wan22_i2v/ARCHITECTURE.md#registry)
-and [the TI2V note](../wan22_ti2v_5b/ARCHITECTURE.md#registry).
+Wan registry keys and `parts.umt5` are in [the I2V note](../wan22_i2v/ARCHITECTURE.md#registry) and [the TI2V note](../wan22_ti2v_5b/ARCHITECTURE.md#registry).
 
-## Setup
-
-- How to download and pack the shared umT5 int8 record.
-- Wan I2V and TI2V open that pack for text.
-- The encoder weights are under the Apache License, Version 2.0.
-- There is no `favlo --umt5_xxl` flag: either Wan pipeline owns the commands.
-
-### Download
+## Download
 
 ```bash
 uv run favlo --wan22_i2v umt5 setup
 ```
 
-- That writes `models/google/umt5-xxl/` with `models_t5_umt5-xxl-enc-bf16.pth`
-  and the tokenizer files.
+- Writes `models/google/umt5-xxl/` with `models_t5_umt5-xxl-enc-bf16.pth` and the tokenizer files.
 - `--umt5 org/name` downloads that repository instead.
 - `favlo --wan22_ti2v_5b umt5 setup` is the same pack.
 
-### Pack
+## Pack
 
 ```bash
 uv run favlo --wan22_i2v umt5 quantize --format wan
 ```
 
-- That writes `models/google/umt5-xxl-int8`.
-- It copies every tokenizer file into that directory.
-- It removes the BF16 checkout.
+- Writes `models/google/umt5-xxl-int8`.
+- Copies every tokenizer file into that directory.
+- Removes the BF16 checkout.
 - A clip never opens the BF16 file.
 - `--keep-source` leaves the checkout in place.
-
-A Hugging Face `.safetensors` encoder uses `--format hf` and `--src` for that file:
-
-```bash
-uv run favlo --wan22_i2v umt5 quantize --format hf \
-  --src models/google/umt5-xxl-realistic_bf16/umt5-xxl-realistic_bf16.safetensors \
-  --out models/google/umt5-xxl-realistic-int8 \
-  --tokenizer models/google/umt5-xxl-int8 \
-  --keep-source
-```
-
+- `--format hf` packs a Hugging Face `.safetensors` encoder; pass `--src` for that file.
 - Point a Wan video row at the pack with `parts.umt5`.
 - Or let `quantize` on that video pipeline store the shared path.

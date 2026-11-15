@@ -1,28 +1,50 @@
-# Architecture
+# Z-Image-Turbo — as-built detail
 
-As-built detail for the `z_image_turbo` package. [README.md](README.md) is the summary.
+This page is the as-built detail for the `z_image_turbo` package.
 
-Eight-step text-to-image pipeline for [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo). `favlo --z_image_turbo` loads `pipelines/z_image_turbo/metal41/z-image-turbo.py`.
+[README.md](README.md) is the summary.
+
+Eight-step text-to-image for [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo).
+
+`favlo --z_image_turbo` loads `pipelines/z_image_turbo/metal41/z-image-turbo.py`.
+
+Those weights are under the Apache License, Version 2.0.
+
+Download, pack, and drawing a picture are in [README.md](README.md).
+
+## Layout
 
 - The DiT, the Qwen3 caption encoder, and the VAE decoder run as Metal shaders.
 - The latent stays on the device across the eight steps.
 - Patchify, the Euler update, the time sinusoid, the pad-token fill, the image and caption join, the RoPE index tables, the VAE scale, and the uint8 clip are shaders.
 - The tokenizer and the PNG container stay on the host.
-- The served pack is symmetric int8.
+- The DiT, the caption encoder, the VAE, the pack, and the shaders live in `pipelines/z_image/metal41/`.
+- This pipeline calls that package.
+
+The served pack is symmetric int8.
+
 - `quantize --int8` reads the original weights and writes `models/Z-Image-Turbo-int8`.
 - Each matrix has one float32 scale per output row, and `N` is padded to 128.
 - The activation is quantized in groups of 128 along K.
 - `matmul2d` multiplies that int8 activation by the int8 weight, and the kernel applies the group scales, the output scale, and the bias.
 - Biases, norms, and the two pad tokens stay float16.
-- `quantize` without `--int8` writes the fp4 E2M1 pack at `models/Z-Image-Turbo-fp4`.
+
+`quantize` without `--int8` writes the fp4 E2M1 pack at `models/Z-Image-Turbo-fp4`.
+
 - That matmul reads float16, and a row whose peak exceeds 60000 is scaled into that range.
 - A noise-refiner output projection reached 81884.
 - The VAE encoder is not packed.
-- Those weights are under the Apache License, Version 2.0.
-- The DiT, the caption encoder, the VAE, the pack, and the shaders live in `pipelines/z_image/metal41/z_image/`.
-- This pipeline calls that package.
 
-Download, pack, and the first image are [README.md](README.md).
+Setup and pack commands:
+
+```text
+uv run favlo --z_image_turbo setup
+uv run favlo --z_image_turbo quantize --int8
+uv run favlo --z_image_turbo quantize
+uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors
+uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors --name example-model
+uv run favlo --z_image_turbo kernels
+```
 
 - `setup` downloads the repository into `models/Z-Image-Turbo` from the Hugging Face resolve URL.
 - `quantize --int8` packs `models/Z-Image-Turbo-int8`, registers that folder, and stores that directory on the row.
@@ -40,14 +62,7 @@ Download, pack, and the first image are [README.md](README.md).
 - The fp4 check compares the dequantized matrix.
 - The int8 check compares the integer product, the row scale, and the channel scale.
 
-```text
-uv run favlo --z_image_turbo setup
-uv run favlo --z_image_turbo quantize --int8
-uv run favlo --z_image_turbo quantize
-uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors
-uv run favlo --z_image_turbo quantize --weights models/example-model.safetensors --name example-model
-uv run favlo --z_image_turbo kernels
-```
+Caller-visible frame rules:
 
 - The default image is 1024×1024.
 - Width and height are multiples of 16 and at most 2560.
@@ -55,10 +70,18 @@ uv run favlo --z_image_turbo kernels
 - The seed selects the initial noise.
 - The publisher's last training stage keeps each edge within 256 pixels of the 1024 grid, from 768 to 1280.
 - Serving accepts up to 2560 on each edge.
+- A picture is `favlo media --pipeline z_image_turbo`.
+- The pipeline command does not draw.
 
 ## Registry
 
-The row key in `models/registry.json` is the packed folder, `Z-Image-Turbo-int8` or `Z-Image-Turbo-fp4`. Registration leaves `alias` null, so that folder is the public id. `directory` is copied at open, so close the resident model after changing it. The listener stays up.
+The row key in `models/registry.json` is the packed folder, `Z-Image-Turbo-int8` or `Z-Image-Turbo-fp4`.
+
+Registration leaves `alias` null, so that folder is the public id.
+
+`directory` is copied at open, so close the resident model after changing it.
+
+The listener stays up.
 
 ```python
 from favlo.registry import load_registry, save_registry, set_pipeline_default
@@ -83,7 +106,6 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - The first image registration fills an empty key.
 - A stored key stays.
 - When that folder is another pipeline, the command uses the row marked `pipeline_default`, then the first folder registered for this pipeline.
-
 - This pipeline has no sampler keys on the row.
 - A request runs eight steps.
 - The sampling card (`generate`, temperature 0) is copied at registration and is not read.
@@ -109,9 +131,23 @@ uv run favlo media --pipeline z_image_turbo prompt="a red cube on a white table"
 uv run favlo media --pipeline z_image_turbo --model Z-Image-Turbo-int8 --out pack.json prompt="a red cube on a white table"
 ```
 
-`prompt` is required. `size` is `auto` or `WIDTHxHEIGHT`. `quality` is `auto`, `low`, `medium`, `high`, `xhigh`, `max`, `standard`, or `hd`. `seed` is an integer. The other fields are the ones `handle_image` accepts.
+`prompt` is required.
 
-`handle_image` is a `MediaPipeline`. `favlo serve` publishes `z_image_turbo__generate_image` on `POST /mcp`. The arguments follow the OpenAI image generation request. A path under `/v1/images` is 404.
+`size` is `auto` or `WIDTHxHEIGHT`.
+
+`quality` is `auto`, `low`, `medium`, `high`, `xhigh`, `max`, `standard`, or `hd`.
+
+`seed` is an integer.
+
+The other fields are the ones `handle_image` accepts.
+
+`handle_image` is a `MediaPipeline`.
+
+`favlo serve` publishes `z_image_turbo__generate_image` on `POST /mcp`.
+
+The arguments follow the OpenAI image generation request.
+
+A path under `/v1/images` is 404.
 
 - `prompt` is required.
 - `model` selects the row.
@@ -183,7 +219,11 @@ Device spans come from the process memory manager.
 
 ## Forward
 
-The caption is the checkpoint chat template with one user turn and a generation prompt. The template's `enable_thinking` flag is left unset, which leaves the think block out. The caption vector is the penultimate Qwen3 layer, then the DiT caption norm and projection.
+The caption is the checkpoint chat template with one user turn and a generation prompt.
+
+The template's `enable_thinking` flag is left unset, which leaves the think block out.
+
+The caption vector is the penultimate Qwen3 layer, then the DiT caption norm and projection.
 
 - Image tokens precede the caption tokens.
 - A 2×2 patch is stored with the channel fastest.
@@ -200,7 +240,6 @@ The caption is the checkpoint chat template with one user turn and a generation 
 - The gate is `tanh` of its slice and multiplies the branch after the second RMSNorm.
 - `w1` is the SwiGLU gate and `w3` is the up projection.
 - The final readout is a parameter-free LayerNorm with epsilon 1e-6, then `(1 + scale)`, where that scale is a SiLU followed by the 3840-wide projection.
-
 - The embedded time is `(1 − sigma) · 1000`, evaluated in float32 on device.
 - Sigma 1 is noise and sigma 0 is the image.
 - The shift is 3.
@@ -208,19 +247,36 @@ The caption is the checkpoint chat template with one user turn and a generation 
 - Head-128 attention is a 32×32 `matmul2d` tile.
 - The scores for that tile stay in the threadgroup.
 - The 512-wide decoder head stays on the scalar attention kernel.
-
-Kernel and bandwidth ceilings for a 1280 generation are in [ceilings.md](ceilings.md). The isolated sum is a measurement in [research/generation-ceiling.md](research/generation-ceiling.md).
-
-On an M5 Pro with 48 GB an fp4 1280 generation of the smoke prompt printed 100.65 s, caption 0.35 s, decoder 10.43 s, steps 11.12–11.32 s. The int8 record printed 51.74 s, caption 0.15 s, decoder 9.27 s, steps 5.24–5.37 s. An fp4 1024 generation printed 55.84 s, caption 0.16 s, decoder 5.12 s, steps 6.28–6.38 s. The int8 record printed 26.01 s, caption 0.16 s, decoder 4.63 s, steps 2.65–2.66 s.
-
 - The VAE latent is `z / 0.3611 + 0.1159`.
 - GroupNorm uses 32 groups and epsilon 1e-5.
 - The mid-block attention is one head of 512 channels.
 - PNG bytes use `(clip(x, −1, 1) + 1) / 2`.
 
+## Ceilings
+
+Kernel and bandwidth ceilings for a 1280 generation are in [ceilings.md](ceilings.md).
+
+The isolated sum is a measurement in [research/generation-ceiling.md](research/generation-ceiling.md).
+
+On an M5 Pro with 48 GB an fp4 1280 generation of the smoke prompt printed 100.65 s, caption 0.35 s, decoder 10.43 s, steps 11.12–11.32 s.
+
+The int8 record printed 51.74 s, caption 0.15 s, decoder 9.27 s, steps 5.24–5.37 s.
+
+An fp4 1024 generation printed 55.84 s, caption 0.16 s, decoder 5.12 s, steps 6.28–6.38 s.
+
+The int8 record printed 26.01 s, caption 0.16 s, decoder 4.63 s, steps 2.65–2.66 s.
+
+A 512 generation from the int8 record printed 4.43 s, with each step at 0.44 s.
+
 ## Smoke
 
-`uv run pytest tests/test_z_image_turbo_smoke.py -s` dispatches the shader check. That check does not need the checkpoint. `uv run favlo --z_image_turbo kernels` is the same check. On an M5 Pro with 48 GB the 64×32 fp4 matmul, the K-144 row, and the causal attention case matched with max absolute error 0.
+`uv run pytest tests/test_z_image_turbo_smoke.py -s` dispatches the shader check.
+
+That check does not need the checkpoint.
+
+`uv run favlo --z_image_turbo kernels` is the same check.
+
+On an M5 Pro with 48 GB the 64×32 fp4 matmul, the K-144 row, and the causal attention case matched with max absolute error 0.
 
 `ZIMAGE_SMOKE=1 uv run pytest tests/test_z_image_turbo_smoke.py -s` also generates the recorded images with seed 0, at 512×512 and at 1024×1024.
 
@@ -232,7 +288,15 @@ On an M5 Pro with 48 GB an fp4 1280 generation of the smoke prompt printed 100.6
 - The int8 record at 1024 printed 26.01 s, with each step at 2.65–2.66s.
 - The decoded images were a red cube on a white table.
 
-`python -m harness.image --pipeline z_image_turbo --tool generate_image --model Z-Image-Turbo-int8` calls that published tool on a serve that is already listening and reads the PNG. It does not score the picture. `python -m harness.image_smoke_agent --pipeline z_image_turbo --tool generate_image --model Z-Image-Turbo-int8` is the vision check. It generates one picture at the pipeline default. The base record is `Z-Image-int8`.
+`python -m harness.image --pipeline z_image_turbo --tool generate_image --model Z-Image-Turbo-int8` calls that published tool on a serve that is already listening and reads the PNG.
+
+It does not score the picture.
+
+`python -m harness.image_smoke_agent --pipeline z_image_turbo --tool generate_image --model Z-Image-Turbo-int8` is the vision check.
+
+It generates one picture at the pipeline default.
+
+The served record is `Z-Image-Turbo-int8`.
 
 ## Citations
 

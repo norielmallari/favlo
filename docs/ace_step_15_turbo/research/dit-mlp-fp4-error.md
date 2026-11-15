@@ -1,39 +1,27 @@
 # DiT MLP fp4 error
 
-Measurement note for the `ace_step_15_turbo` pipeline.
-
-The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md).
-
-This file records the per-layer fp4 relative error of the [ACE-Step/acestep-v15-xl-turbo](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo) DiT MLPs.
-
-It does not record a generation-time sum.
+Measurement note for the `ace_step_15_turbo` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records the per-layer fp4 relative error of the [ACE-Step/acestep-v15-xl-turbo](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo) DiT MLPs. It does not record a generation-time sum.
 
 ## Remainder
 
-Each of the 32 DiT MLP layers is scored by the RMS of its BF16 matrix against the restored fp4 matrix, divided by the source RMS.
-
-Gate, up, and down share the worst of those three scores.
-
-The six highest layers are 0, 1, 2, 3, 4, and 21, and those layers are stored as fp8.
-
-A search on 24 October 2026 did not find this table.
+- Each of the 32 DiT MLP layers is scored by the RMS of its BF16 matrix against the restored fp4 matrix, divided by the source RMS.
+- Gate, up, and down share the worst of those three scores.
+- The six highest layers are 0, 1, 2, 3, 4, and 21, and those layers are stored as fp8.
+- A search on 24 October 2026 did not find this table.
 
 ## Predecessors
 
-- Method. MixQuant ([arXiv:2309.17341](https://arxiv.org/abs/2309.17341)) scores a layer by the mean squared gap between the full-precision weights and the restored quantized weights, then keeps a wider code where that gap is large. The round-up E8M0 miss bound used as a feed-forward budget is recorded for a different checkpoint in [the 27B note](../../qwen38-27b/research/ffn-fp8-budget.md).
+- Method. MixQuant ([arXiv:2309.17341](https://arxiv.org/abs/2309.17341)) scores a layer by the mean squared gap between the full-precision weights and the restored quantized weights, then keeps a wider code where that gap is large. The round-up E8M0 miss bound used as a feed-forward budget is recorded for a different checkpoint in [the 27B note](../../qwen38_27b/research/ffn-fp8-budget.md).
 - Model. [sjoe1244/ACE-Step-v1.5-xl-turbo-nvfp4](https://huggingface.co/sjoe1244/ACE-Step-v1.5-xl-turbo-nvfp4) stores the large linear layers as NVFP4 and leaves norms, biases, embedders, and the output head in BF16. [scragnog/Ace-Step-1.5-MXFP4-Quants](https://huggingface.co/scragnog/Ace-Step-1.5-MXFP4-Quants) keeps embeddings, the output projection, and 1D tensors in float32. [ddalcu/ACE-Step-1.5-XL-Turbo-MLX-Serve-4bit](https://huggingface.co/ddalcu/ACE-Step-1.5-XL-Turbo-MLX-Serve-4bit) keeps the timestep-embedding family at 8-bit and the remaining large linears at 4-bit.
 - Measurement. [arXiv:2603.08747](https://arxiv.org/abs/2603.08747) ranks transformer components by the perplexity change of keeping that component in float16, on Qwen2.5 models. MLP up and down projections rank above the gate. That paper does not score this DiT.
 - Mechanism. Every Euler step reads every DiT MLP, so a layer stored as fp8 costs its extra bytes on every step.
 
 ## Rule
 
-The sort key is the maximum of the three relative errors in one layer.
-
-The budget is the largest whole count that does not exceed 20% of 32, which is 6.
-
-An equal score keeps the lower layer index.
-
-The other 26 MLP layers stay fp4.
+- The sort key is the maximum of the three relative errors in one layer.
+- The budget is the largest whole count that does not exceed 20% of 32, which is 6.
+- An equal score keeps the lower layer index.
+- The other 26 MLP layers stay fp4.
 
 ## Command
 

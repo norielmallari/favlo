@@ -1,36 +1,52 @@
 # Z-Image — architecture
 
-This note is the as-built detail for the `z_image_base` package. [README.md](README.md) is the summary.
+As-built detail for the `z_image_base` package. [README.md](README.md) is the summary.
 
-Text-to-image pipeline for [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image). `favlo --z_image_base` loads `pipelines/z_image_base/metal41/z-image-base.py`. The DiT, the Qwen3 caption encoder, the VAE decoder, and the shaders live in `pipelines/z_image/metal41/z_image/`. This pipeline chooses the step count, the shift, and the classifier-free guidance.
+Text-to-image for [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image).
+
+- `favlo --z_image_base` loads `pipelines/z_image_base/metal41/`.
+- The DiT, the Qwen3 caption encoder, the VAE decoder, and the shaders live in `pipelines/z_image/metal41/z_image/`.
+- This pipeline chooses the step count, the shift, and the classifier-free guidance.
 
 The scheduler file sets shift 6. A request may set another positive shift and from 1 to 100 steps. When the request omits a sampler field, the registry row supplies `steps`, `guidance`, `shift`, `cfg_truncation`, and `cfg_normalization`. A row without a key uses 28, 4, 6, 1, and 0.
 
 - Zero guidance runs one positive velocity.
 - A positive guidance encodes the prompt and the negative caption, then mixes `v_prompt + guidance * (v_prompt − v_negative)`.
-- `cfg_truncation` defaults to 1, which keeps the negative velocity on every knot. A value above 1 does the same. A value at or below 1 skips the negative call once `1 − sigma` exceeds it.
-- `cfg_normalization` defaults to 0, which leaves the mix unchanged. A positive value rescales the mix so its L2 norm does not exceed that multiple of the positive velocity's norm. `true` means 1.
+- `cfg_truncation` defaults to 1, which keeps the negative velocity on every knot.
+- A value above 1 does the same.
+- A value at or below 1 skips the negative call once `1 − sigma` exceeds it.
+- `cfg_normalization` defaults to 0, which leaves the mix unchanged.
+- A positive value rescales the mix so its L2 norm does not exceed that multiple of the positive velocity's norm.
+- `true` means 1.
 
 The packed record defaults to symmetric int8, one float32 scale per output row, the same plane as the served Turbo record. `--fp4` writes the E2M1 pack instead.
 
 - Rank-1 weights and the pad tokens stay float16.
-- The activation is quantized in groups of 128 along K. The int8 product applies those group scales and the output scale.
+- The activation is quantized in groups of 128 along K.
+- The int8 product applies those group scales and the output scale.
 
-The weights are under the Apache License, Version 2.0. On an M5 Pro with 48 GB a printed 512 generation was 70.47 s and a printed 1024 generation was 362.05 s ([research/generation-time.md](research/generation-time.md)).
+Those weights are under the Apache License, Version 2.0.
 
-`handle_image` returns `data[].id`. The PNG stays on disk. The listener pack adds `mediaUri`.
+On an M5 Pro with 48 GB a printed 512 generation was 70.47 s and a printed 1024 generation was 362.05 s ([research/generation-time.md](research/generation-time.md)).
+
+- `handle_image` returns `data[].id`.
+- The PNG stays on disk.
+- The listener pack adds `mediaUri`.
 
 Download, pack, and drawing a picture are in [README.md](README.md).
 
 - `setup` downloads the repository into `models/Z-Image` from the Hugging Face resolve URL.
-- `quantize` packs `models/Z-Image-int8`, registers that folder, and stores that directory on the row. That is the served record.
-- A new row also receives the sampler defaults. A key already on the row is left as written.
+- `quantize` packs `models/Z-Image-int8`, registers that folder, and stores that directory on the row.
+- That is the served record.
+- A new row also receives the sampler defaults.
+- A key already on the row is left as written.
 - `--fp4` packs `models/Z-Image-fp4`.
 - `--weights` is one `.safetensors` file or a directory of shards; with no flag, quantize uses the setup checkout.
 - With no `--name` and no `--out`, that file or directory is packed to `models/<name>-int8`, or `models/<name>-fp4` when `--fp4` is set.
 - `--name` is the folder under `models/` and the registry id.
 - `quantize` copies `tokenizer/` into the packed record, and generation reads that copy.
-- A weights-only path copies the tokenizer from `models/Z-Image` when that checkout is present. Otherwise pass `--tokenizer-source`.
+- A weights-only path copies the tokenizer from `models/Z-Image` when that checkout is present.
+- Otherwise pass `--tokenizer-source`.
 - `kernels` compiles the shared shaders and checks the guidance mix against the host formula.
 
 ```text
@@ -96,7 +112,8 @@ The file key `media.image` is the folder `favlo media` uses when the command omi
 ## Listener
 
 - `favlo serve` must already be listening.
-- `favlo media` does not start it. It exits when that port is closed.
+- `favlo media` does not start it.
+- It exits when that port is closed.
 - The command posts the body to the listener.
 - Stdout is one `file://` URI.
 - `--out` writes the pack JSON, `metadata` and `mediaUri`, and does not copy the PNG.
@@ -114,22 +131,57 @@ uv run favlo media --pipeline z_image_base --model Z-Image-int8 --out pack.json 
 
 `handle_image` is a `MediaPipeline`. `favlo serve` publishes `z_image_base__generate_image` on `POST /mcp`. The arguments follow the OpenAI image generation request, plus `negative_prompt`, `steps`, `guidance`, `shift`, `cfg_truncation`, and `cfg_normalization`. A path under `/v1/images` is 404.
 
-- `prompt` is required. `model` selects the row. A request draws one image.
-- `size` is `auto` or `WIDTHxHEIGHT`, and `auto` is 1024×1024. An omitted `generate_image` size is that same frame. Each edge is a multiple of 16, from 16 to 2560. The aspect ratio is between 1:3 and 3:1.
-- `quality` accepts `auto`, `low`, `medium`, `high`, `xhigh`, `max`, `standard`, and `hd`. Every accepted value runs the same sampler. The response reports `low`, `medium`, `high`, `xhigh`, or `max`. `auto`, `standard`, and `hd` are reported as `high`. That reported value selects the PNG zlib level: `low` is 9, `medium` is 7, `high` is 5, `xhigh` is 3, and `max` is 1. A lower quality uses higher compression. The samples stay the uint8 decode.
-- `background` accepts `auto` and `opaque`. Both leave an opaque RGB PNG. `transparent` is refused.
-- `moderation` accepts `low` and `auto`. `style`, `user`, and `safety_identifier` are accepted. A non-empty `safety_identifier` is echoed. Otherwise a non-empty `user` is echoed.
-- `output_format` must be `png`. `response_format` must be omitted or `b64_json`. `stream` must be omitted or false. `partial_images` must be omitted or 0.
-- An omitted `seed` is a random integer. A provided integer selects the image.
-- `steps` is an integer from 1 to 100. `guidance`, `shift`, `cfg_truncation`, and `cfg_normalization` are numbers. `cfg_normalization` also accepts `true` and `false`. An omitted sampler field uses the registry row for that model.
+- `prompt` is required.
+- `model` selects the row.
+- A request draws one image.
+- `size` is `auto` or `WIDTHxHEIGHT`, and `auto` is 1024×1024.
+- An omitted `generate_image` size is that same frame.
+- Each edge is a multiple of 16, from 16 to 2560.
+- The aspect ratio is between 1:3 and 3:1.
+- `quality` accepts `auto`, `low`, `medium`, `high`, `xhigh`, `max`, `standard`, and `hd`.
+- Every accepted value runs the same sampler.
+- The response reports `low`, `medium`, `high`, `xhigh`, or `max`.
+- `auto`, `standard`, and `hd` are reported as `high`.
+- That reported value selects the PNG zlib level: `low` is 9, `medium` is 7, `high` is 5, `xhigh` is 3, and `max` is 1.
+- A lower quality uses higher compression.
+- The samples stay the uint8 decode.
+- `background` accepts `auto` and `opaque`. Both leave an opaque RGB PNG.
+- `transparent` is refused.
+- `moderation` accepts `low` and `auto`.
+- `style`, `user`, and `safety_identifier` are accepted.
+- A non-empty `safety_identifier` is echoed.
+- Otherwise a non-empty `user` is echoed.
+- `output_format` must be `png`.
+- `response_format` must be omitted or `b64_json`.
+- `stream` must be omitted or false.
+- `partial_images` must be omitted or 0.
+- An omitted `seed` is a random integer.
+- A provided integer selects the image.
+- `steps` is an integer from 1 to 100.
+- `guidance`, `shift`, `cfg_truncation`, and `cfg_normalization` are numbers.
+- `cfg_normalization` also accepts `true` and `false`.
+- An omitted sampler field uses the registry row for that model.
 
-The seed, the prompt, the negative prompt, and the other parameters are written under `generation` in `~/.favlo/images/<id>.png.json` (the shared media metadata schema). The uint8 decode is written to `~/.favlo/images/<id>.rgb`. The PNG is encoded from that file and written to `<id>.png` before the response is built. The handler returns `data[].id`, the file stem. The reply has no PNG bytes.
+The seed, the prompt, the negative prompt, and the other parameters are written under `generation` in `~/.favlo/images/<id>.png.json` (the shared media metadata schema).
+
+- The uint8 decode is written to `~/.favlo/images/<id>.rgb`.
+- The PNG is encoded from that file and written to `<id>.png` before the response is built.
+- The handler returns `data[].id`, the file stem.
+- The reply has no PNG bytes.
 
 `resources/read` of `favlo://images/{id}.png` returns the PNG and that metadata JSON when present. It does not take the request lock. Both files stay until `image_ttl_seconds` in `~/.favlo/settings.json`. The default is five days. A sweep when the listener starts, and again after each image is stored, moves a pair that has reached that age to Trash.
 
 The response is `created`, `background`, `data[].id`, `output_format`, `quality`, `size`, `safety_identifier` when one was sent, and `generation_seconds`. `generation_seconds` is `total`, `caption`, `vae`, and `steps`.
 
-Opening the runtime reads the packed record under a `load` row counted in bytes. Each image opens a `sample` row counted in finished layers: the caption layers and the caption projection for each caption that runs, then each Euler step's two noise refiners, two context refiners, 30 main layers, and the final readout, with a second walk on a guided step, then 25 decoder pieces. The size is logged once when that row opens. The row names `caption`, `step i/n`, or `decode`. Each step line is logged as the velocity returns. The summary line is `generate`, then the caption seconds and the decoder seconds. The row closes as `sample done/total layers`. A pause closes that row as `sample paused` or `sample cancelled`. The next call opens a new row for the caption it runs again, the steps still left, and the decoder.
+Opening the runtime reads the packed record under a `load` row counted in bytes. Each image opens a `sample` row counted in finished layers: the caption layers and the caption projection for each caption that runs, then each Euler step's two noise refiners, two context refiners, 30 main layers, and the final readout, with a second walk on a guided step, then 25 decoder pieces.
+
+- The size is logged once when that row opens.
+- The row names `caption`, `step i/n`, or `decode`.
+- Each step line is logged as the velocity returns.
+- The summary line is `generate`, then the caption seconds and the decoder seconds.
+- The row closes as `sample done/total layers`.
+- A pause closes that row as `sample paused` or `sample cancelled`.
+- The next call opens a new row for the caption it runs again, the steps still left, and the decoder.
 
 Edits and variations are not served. A chat completion on this row is rejected. The message still names `POST /v1/images/generations`.
 
@@ -137,11 +189,32 @@ A running image returns at a stage boundary when `cancel` or `preempt` is set. C
 
 - Cancel is read on the return from the caption encoder, each Euler step, and the VAE decode.
 - Preempt is read on the return from each Euler step and the VAE decode.
-- A chat that arrives while the record loads or the caption runs waits until that step returns. The latent from the step stays on the hold. The Metal dispatch already submitted finishes before that return.
+- A chat that arrives while the record loads or the caption runs waits until that step returns.
+- The latent from the step stays on the hold.
+- The Metal dispatch already submitted finishes before that return.
 - Cancel leaves `status` `in_progress`, keeps the same `id`, writes no further file, and drops the checkpoint.
-- Preempt keeps finished host outputs on `image_hold` and returns the same `status` and `id`. The caption embedding stays on the device, so a resume runs the caption again. A finished Euler step keeps its latent. The resume uploads that latent and continues at the next step. A finished decode keeps the uint8 image. The resume encodes the PNG from those samples. Stored PNGs stay in `data` and are not drawn again. The finished response has no `status`.
-- While the job is in progress, `stage` is `caption`, `step`, `decode`, or `store`. `progress` counts finished steps, decodes, and stored images and stays below 100. `eta` is the remaining Euler steps times the mean finished step.
+- Preempt keeps finished host outputs on `image_hold` and returns the same `status` and `id`.
+- The caption embedding stays on the device, so a resume runs the caption again.
+- A finished Euler step keeps its latent.
+- The resume uploads that latent and continues at the next step.
+- A finished decode keeps the uint8 image.
+- The resume encodes the PNG from those samples.
+- Stored PNGs stay in `data` and are not drawn again.
+- The finished response has no `status`.
+- While the job is in progress, `stage` is `caption`, `step`, `decode`, or `store`.
+- `progress` counts finished steps, decodes, and stored images and stays below 100.
+- `eta` is the remaining Euler steps times the mean finished step.
 
-Device spans come from the process memory manager. `MediaPipeline` calls `ensure_open` before the draw and always calls `close` when the request returns, including a pause or a failure. `ensure_open` runs the shared open gate (`wait_released`, then `room()` vs weights plus scratch for the named size) and reloads the record when closed. A larger ledger grows scratch up to the 2560 square. Scratch that already covers the image stays when a later answer is smaller. `--max-memory` caps that ledger through `memory.set_max_memory`. This package does not keep a second cap. `open_runtime` stamps the owner with the shared helper. `close` finishes the command buffer, sweeps that owner, and waits through the shared close gate until those pages are reclaimable. Caption encoding, each Euler step, and the VAE decode release the temporary spans from that stage when it returns.
+Device spans come from the process memory manager.
+
+- `MediaPipeline` calls `ensure_open` before the draw and always calls `close` when the request returns, including a pause or a failure.
+- `ensure_open` runs the shared open gate (`wait_released`, then `room()` vs weights plus scratch for the named size) and reloads the record when closed.
+- A larger ledger grows scratch up to the 2560 square.
+- Scratch that already covers the image stays when a later answer is smaller.
+- `--max-memory` caps that ledger through `memory.set_max_memory`.
+- This package does not keep a second cap.
+- `open_runtime` stamps the owner with the shared helper.
+- `close` finishes the command buffer, sweeps that owner, and waits through the shared close gate until those pages are reclaimable.
+- Caption encoding, each Euler step, and the VAE decode release the temporary spans from that stage when it returns.
 
 `python -m harness.image --pipeline z_image_base --tool generate_image --model Z-Image-int8` calls that published tool on a serve that is already listening and reads the PNG. It does not score the picture. `python -m harness.image_smoke_agent --pipeline z_image_base --tool generate_image --model Z-Image-int8` is the vision check. It generates one picture at the pipeline default.
