@@ -94,9 +94,9 @@ The gate dispatch reads the 91,914,240-byte image and the 20,480-byte activation
 
 The mixed record `Qwen3.8-27B-fp8-e20`. Twelve language feed-forward layers are fp8 and the other fifty-two are fp4. MTP, the embedding, `lm_head`, the vision tower, and the half vectors are not in the projection image. The data plane plus the scale plane of the language projections is 14,544,732,160 bytes.
 
-Gate, up, and the attention projections use a 64-row tile, so those 10,979,573,760 bytes are read 32 times in a 2048-token chunk. The down projection uses a 32-row tile, so its 3,565,158,400 bytes are read 64 times. Weight traffic is 579,516,497,920 bytes. The chunk also reads 13,891,534,848 bytes of half activations and writes 31,994,150,912 bytes of float outputs. That is 625,402,183,680 bytes. Divided by 254.6 GB/s the projection bandwidth ceiling is 2.456 s, 834 tok/s.
+Gate, up, and the attention projections use a 64-row tile, so those 10,979,573,760 bytes are read 32 times in a 2048-token chunk. The down projection uses a 32-row tile, so its 3,565,158,400 bytes are read 64 times. Weight traffic is 579,516,497,920 bytes. The chunk also reads 13,891,534,848 bytes of half activations and writes 22,867,345,408 bytes. Gate and up are half stores. The other projection stores stay float. That is 616,275,378,176 bytes. Divided by 254.6 GB/s the projection bandwidth ceiling is 2.421 s, 846 tok/s.
 
-One full-attention head in that chunk has 12,288 query rows and one 2048-key window. The key plane and the value plane are 264 bytes per token, and each is read once per 64 query rows. Sixty-four heads move 13,287,555,072 bytes. Adding that traffic makes 638,689,738,752 bytes, 2.509 s, 816 tok/s. A longer window multiplies only this attention term.
+One full-attention head in that chunk has 12,288 query rows and one 2048-key window. The key plane and the value plane are 264 bytes per token, and each is read once per 64 query rows. Sixty-four heads move 13,287,555,072 bytes. Adding that traffic makes 629,562,933,248 bytes, 2.472 s, 828 tok/s. A longer window multiplies only this attention term.
 
 Decode reads the projection image once and adds `lm_head`, 675,430,400 bytes. 15,220,162,560 bytes at 254.6 GB/s is 59.8 ms, 16.7 tok/s.
 
@@ -124,10 +124,9 @@ Each prefill time below is one command buffer, then a wait, the median of five d
 | `gdn_state_rows` | 2048 | 48 | 12234 | 587.23 |
 | `gdn_conv_rows` | 2048 | 48 | 869 | 41.69 |
 | `cast_f32_half` hidden | 2048×5120 | 64 | 244 | 15.64 |
-| `cast_f32_half` intermediate | 2048×17408 | 64 | 798 | 51.04 |
 | `cast_f32_half` z or o | 2048×6144 | 64 | 964 | 61.66 |
 | `zero_f32` | 2048×5120 | 1 | 138 | 0.14 |
-| `swiglu_f32` | 2048×17408 | 64 | 1687 | 107.94 |
+| `swiglu_f16` | 2048×17408 | 64 | 828 | 52.99 |
 | `residual_rows` | 2048×5120 | 64 | 481 | 30.78 |
 | `rmsnorm_rows` | 2048×5120 | 128 | 331 | 42.34 |
 | `split_q_gate_rows` | 2048 | 16 | 726 | 11.62 |
@@ -137,7 +136,9 @@ Each prefill time below is one command buffer, then a wait, the median of five d
 | `kv_softmax_close` | 12288 | 64 | 45 | 2.86 |
 | `kv_acc_add` | 12288×256 | 64 | 41 | 2.59 |
 
-The sum is 5175.6 ms, 396 tok/s. That is the kernel ceiling for this set. A full chunk does not clear the norm buffer or the half tile, because the norm and the cast overwrite them. Key and value stores, the query cast, the row init, the attend write, and the embedding row are outside it.
+The sum is 5069.6 ms, 404 tok/s. That is the kernel ceiling for this set. A full chunk does not clear the norm buffer or the half tile, because the norm and the cast overwrite them. Key and value stores, the query cast, the row init, the attend write, and the embedding row are outside it.
+
+Gate and up store the scaled int8 product with `scale_i8_f16`. One 2048×17408 dispatch measured 812.2 µs. That store stays outside the sum, as the float scale did. `swiglu_f16` reads that half pair. The intermediate cast is not launched. The same-shape `swiglu_f32` measured 1760.8 µs and is not the feed-forward launch.
 
 ## MTP verify
 

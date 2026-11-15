@@ -187,6 +187,7 @@ Cancellation and prefill int8:
 - A closed client, SIGINT, or SIGTERM stops the forward before the next chunk and before the next token. A chunk that has already been submitted runs to completion.
 - Feed-forward gate, up, and down, and the Gated DeltaNet qkv, z, and out, are restored from the packed matrix into one int8 stage and multiplied as int8 × int8.
 - One channel scale replaces the group of 32. The down projection uses a 32×128 tile.
+- Gate and up store that scaled product as half. SwiGLU promotes those halves and stores half. The down projection reads that half. The residual add stays float.
 - Attention projections, `in_proj_a`, and `in_proj_b` stay half × fp4 or half × fp8 tiles of 64 by 64.
 - A language projection whose tile grid is at least 8 by 8 walks those tiles in Morton order. The fp8 down projection stays row-major.
 - Decode does not read the stage.

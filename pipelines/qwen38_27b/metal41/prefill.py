@@ -2,10 +2,12 @@
 
 Feed-forward gate, up, and down, and the Gated DeltaNet qkv, z, and out, are
 restored from the packed matrix into one int8 stage and multiplied as
-int8 × int8. The down projection uses a 32×128 tile. Attention projections,
-``in_proj_a``, and ``in_proj_b`` stay half × fp4 or half × fp8. A grid of at
-least eight tiles on both axes walks those tiles in Morton order. Decode stays
-a GEMV and does not read the stage.
+int8 × int8. Gate and up store that scaled product as half. SwiGLU reads those
+halves and writes half, and the down projection quantizes that half. The down
+projection uses a 32×128 tile and stores float for the residual add. Attention
+projections, ``in_proj_a``, and ``in_proj_b`` stay half × fp4 or half × fp8.
+A grid of at least eight tiles on both axes walks those tiles in Morton order.
+Decode stays a GEMV and does not read the stage.
 """
 
 from __future__ import annotations
@@ -418,16 +420,18 @@ def _ffn(
         return
     _cast_half(runtime, work, work.normed, count * HIDDEN, rows, HIDDEN)
     _quantize_act(runtime, work, rows, HIDDEN)
-    _matmul_i8(runtime, work, gate, work.big0, rows)
-    _matmul_i8(runtime, work, weight("mlp.up_proj.weight"), work.big1, rows)
+    wide = rows * INTERMEDIATE * 2
+    _matmul_i8(runtime, work, gate, work.big0, rows, half=work.big2, half_offset=0)
+    _matmul_i8(
+        runtime, work, weight("mlp.up_proj.weight"), work.big1, rows, half=work.big2, half_offset=wide
+    )
     runtime.session.encode(
-        "swiglu_f32",
-        [(work.big0, 0), (work.big1, 0), (work.big2, 0)],
+        "swiglu_f16",
+        [(work.big2, 0), (work.big2, wide), (work.half, 0)],
         [],
         (rows * INTERMEDIATE // 256, 1, 1),
         (256, 1, 1),
     )
-    _cast_half(runtime, work, work.big2, rows * INTERMEDIATE, rows, INTERMEDIATE)
     _quantize_act(runtime, work, rows, INTERMEDIATE)
     _matmul_i8(runtime, work, weight("mlp.down_proj.weight"), work.big0, rows)
     _add(runtime, work, count, work.big0)
@@ -446,7 +450,16 @@ def _quantize_act(runtime: Any, work: _Workspace, rows: int, inner: int) -> None
     )
 
 
-def _matmul_i8(runtime: Any, work: _Workspace, name: str, dest: Any, rows: int) -> None:
+def _matmul_i8(
+    runtime: Any,
+    work: _Workspace,
+    name: str,
+    dest: Any,
+    rows: int,
+    *,
+    half: Any | None = None,
+    half_offset: int = 0,
+) -> None:
     buf, offset, entry = runtime.locate(name)
     cols, inner = (int(value) for value in entry["stored_shape"])
     kind = str(entry.get("dtype", "fp4"))
@@ -486,9 +499,18 @@ def _matmul_i8(runtime: Any, work: _Workspace, name: str, dest: Any, rows: int) 
         (width * 4, 1, 1),
     )
     n = rows * cols
+    if half is None:
+        runtime.session.encode(
+            "scale_i8_f32",
+            [(dest, 0), (work.i8_act_scale, 0), (work.i8_stage, scale)],
+            [_u32(rows), _u32(cols)],
+            ((n + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        return
     runtime.session.encode(
-        "scale_i8_f32",
-        [(dest, 0), (work.i8_act_scale, 0), (work.i8_stage, scale)],
+        "scale_i8_f16",
+        [(dest, 0), (work.i8_act_scale, 0), (work.i8_stage, scale), (half, half_offset)],
         [_u32(rows), _u32(cols)],
         ((n + 255) // 256, 1, 1),
         (256, 1, 1),

@@ -874,6 +874,27 @@ kernel void scale_i8_f32(
     ((device float*)acc)[gid] = value;
 }
 
+// Same scale as scale_i8_f32. The product stays int32. The store is half so the
+// next quantize reads the activation the neural accelerator accepts.
+kernel void scale_i8_f16(
+    device const int* acc [[buffer(0)]],
+    device const float* row_scale [[buffer(1)]],
+    device const float* col_scale [[buffer(2)]],
+    device half* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = rows * cols;
+    if (gid >= n) {
+        return;
+    }
+    uint col = gid % cols;
+    uint row = gid / cols;
+    float value = float(acc[gid]) * row_scale[row] * col_scale[col];
+    destination[gid] = half(value);
+}
+
 kernel void gemv_fp4(
     device const half* activation [[buffer(0)]],
     device const uchar* weights [[buffer(1)]],
@@ -1409,6 +1430,16 @@ kernel void swiglu_f32(
     uint tid [[thread_position_in_grid]])
 {
     y[tid] = silu_f(gate[tid]) * up[tid];
+}
+
+// Gate and up are half. The SiLU product is computed in float and stored as half.
+kernel void swiglu_f16(
+    device const half* gate [[buffer(0)]],
+    device const half* up [[buffer(1)]],
+    device half* y [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    y[tid] = half(silu_f(float(gate[tid])) * float(up[tid]));
 }
 
 kernel void residual_rows(

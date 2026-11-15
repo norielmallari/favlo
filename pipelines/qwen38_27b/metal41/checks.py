@@ -316,7 +316,20 @@ def check_swiglu(session: Session) -> None:
         (1, 1, 1),
     )
     silu = gate / (1.0 + np.exp(-gate))
-    _close("swiglu", session.download_f32(destination, 4), (silu * up).astype(np.float32), atol=1e-5)
+    expect = (silu * up).astype(np.float32)
+    _close("swiglu", session.download_f32(destination, 4), expect, atol=1e-5)
+    half_gate = session.upload(gate.astype(np.float16))
+    half_up = session.upload(up.astype(np.float16))
+    half_dest = session.zeros(8)
+    session.dispatch(
+        "swiglu_f16",
+        [half_gate, half_up, half_dest],
+        [],
+        (4, 1, 1),
+        (1, 1, 1),
+    )
+    got = np.frombuffer(session.download(half_dest, 8), dtype=np.float16).astype(np.float32)
+    _close("swiglu half", got, expect.astype(np.float16).astype(np.float32), atol=1e-3)
 
 
 def _softplus(value: np.ndarray) -> np.ndarray:
@@ -690,6 +703,7 @@ def check_i8_prefill(session: Session) -> None:
         act = session.zeros(rows * inner)
         act_factors = session.zeros(rows * 4)
         destination = session.zeros(rows * cols * 4)
+        half_out = session.zeros(rows * cols * 2)
         width = int(session.pipes[kernel].threadExecutionWidth())
         groups = (cols // 128, rows // 32, 1) if kernel.endswith("m32") else (cols // 64, rows // 64, 1)
         session.begin()
@@ -724,6 +738,13 @@ def check_i8_prefill(session: Session) -> None:
             (width * 4, 1, 1),
         )
         session.encode(
+            "scale_i8_f16",
+            [(destination, 0), (act_factors, 0), (stage, cols * inner), (half_out, 0)],
+            [np.uint32(rows).tobytes(), np.uint32(cols).tobytes()],
+            ((rows * cols + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        session.encode(
             "scale_i8_f32",
             [(destination, 0), (act_factors, 0), (stage, cols * inner)],
             [np.uint32(rows).tobytes(), np.uint32(cols).tobytes()],
@@ -744,6 +765,14 @@ def check_i8_prefill(session: Session) -> None:
         expect = _i8_product(got_act, got_act_scale, got_codes, got_scale)
         got = session.download_f32(destination, rows * cols).reshape(rows, cols)
         _close(f"{kind} {kernel}", got, expect, rtol=1e-5, atol=1e-4)
+        got_half = np.frombuffer(session.download(half_out, rows * cols * 2), dtype=np.float16).reshape(rows, cols)
+        _close(
+            f"{kind} {kernel} half",
+            got_half.astype(np.float32),
+            expect.astype(np.float16).astype(np.float32),
+            rtol=1e-3,
+            atol=1e-2,
+        )
 
 
 def _draw_id(logits: list[float], temperature: float, top_p: float, top_k: int, uniform: float) -> int:
