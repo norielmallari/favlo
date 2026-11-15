@@ -4,7 +4,9 @@ Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHI
 
 ## Remainder
 
-On `Qwen3.5-4B-fp8`, on an M5 Pro with 48 GB, a warm 2012-token prefill after the resident int8 weight atlas recorded about 1852 tok/s. The initial call that filled that atlas recorded 1781 tok/s. A search on 2 November 2026 did not find that pair.
+- On `Qwen3.5-4B-fp8`, on an M5 Pro with 48 GB, a warm 2012-token prefill after the resident int8 weight atlas recorded about 1852 tok/s.
+- The initial call that filled that atlas recorded 1781 tok/s.
+- A search on 2 November 2026 did not find that pair.
 
 ## Predecessors
 

@@ -2,7 +2,10 @@
 
 As-built harness scores for this pipeline. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md).
 
-The harness scores IFEval, GSM8K, and HumanEval against `serve`. The `model` field on `POST /v1/chat/completions` names this pipeline. The checker reads `message.content`. A dropped connection restarts the server and sends the same request again.
+- The harness scores IFEval, GSM8K, and HumanEval against `serve`.
+- The `model` field on `POST /v1/chat/completions` names this pipeline.
+- The checker reads `message.content`.
+- A dropped connection restarts the server and sends the same request again.
 
 ## Request
 
@@ -15,7 +18,9 @@ The harness scores IFEval, GSM8K, and HumanEval against `serve`. The `model` fie
 
 ## Intelligence smoke
 
-The smoke is the first 30 rows of each set, in file order. MTP on and MTP off are separate runs. MTP on was recorded on 30 October 2026 at depth 3.
+- The smoke is the first 30 rows of each set, in file order.
+- MTP on and MTP off are separate runs.
+- MTP on was recorded on 30 October 2026 at depth 3.
 
 <!-- smoke-mtp-on-ifeval -->
 - ifeval, mtp on: n=30  prompt strict 0.833  prompt loose 0.867  instruction strict 0.889  instruction loose 0.911

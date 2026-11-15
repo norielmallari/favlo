@@ -1,6 +1,8 @@
 # Architecture
 
-As-built detail for the `qwen36_35b_a3b` package. [README.md](README.md) is the summary. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
+As-built detail for the `qwen36_35b_a3b` package. [README.md](README.md) is the summary: checkpoint, license, setup, and how to talk to it. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
+
+Kernels, the packed record layout, the registry field table, and the forward path live here. Measured rate tables stay in [performance.md](performance.md), [ceilings.md](ceilings.md), and [research/](research/).
 
 - `handle_responses` is a `LanguagePipeline`.
 - The completion, the sampler, and the stream stay in this package and read a Responses body.

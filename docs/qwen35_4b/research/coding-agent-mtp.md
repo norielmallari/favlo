@@ -4,7 +4,9 @@ Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHI
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MTP on at depth 3 passed the vision coding agent on the instruct card. Prefill recorded 1469.46 tok/s and decode recorded 23.91 tok/s. A search on 5 November 2026 did not find that table.
+- On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MTP on at depth 3 passed the vision coding agent on the instruct card.
+- Prefill recorded 1469.46 tok/s and decode recorded 23.91 tok/s.
+- A search on 5 November 2026 did not find that table.
 
 ## Predecessors
 
@@ -25,11 +27,13 @@ On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MT
 
 ## Command
 
+Historical (hyphen id as recorded):
+
 ```text
 uv run python -m harness.coding --model qwen35-4b --mtp on --vision --thinking off
 ```
 
-The banner prints the loaded plane, MTP, thinking, and vision.
+The live CLI id is `qwen35_4b`. The banner prints the loaded plane, MTP, thinking, and vision.
 
 ## Table
 
@@ -57,6 +61,8 @@ Same plane, MTP on at depth 3, and vision on. Thinking recorded 560.55 tok/s pre
 - Closest overlaps were [oMLX Qwen3.5-4B-Optimized-MTPLX on a 20-core M5 Pro](https://omlx.ai/benchmarks/performance/7bdbt1iy) at 2605 tok/s prefill and 46.8 tok/s decode at 4096 context with thinking off, [oMLX Qwen3.5-4B-oQ4e-mtp on a 16-core M5 Pro](https://omlx.ai/benchmarks/performance/syd6zrfc) at 2265 tok/s prefill and 127.9 tok/s decode at 16384 context with MTP on and thinking off, [Treeish on an M4 Max](https://huggingface.co/treeish/Qwen3.5-4B-oQ4e-MTP-MLX) at 66.4 tok/s at MTP depth 3, and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm/pull/1167) at 72.557 tok/s generation for a BF16 MTP run.
 - None of them is this `fp8_e4m3` vision table on the thinking card.
 - The instruct row above stays the 5 November measurement.
+
+Live CLI:
 
 ```text
 uv run python -m harness.coding --model qwen35_4b --mtp on --vision --thinking on

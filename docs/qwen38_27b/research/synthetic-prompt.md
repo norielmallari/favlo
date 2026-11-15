@@ -26,7 +26,7 @@ MTP is off. Thinking is off, so the request uses the instruct card and `reasonin
 ## Command
 
 ```text
-uv run python -m harness.synthetic --model qwen38-27b
+uv run python -m harness.synthetic --model qwen38_27b
 ```
 
 The banner prints the loaded plane, MTP, thinking, and the decode cap.

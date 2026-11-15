@@ -39,8 +39,8 @@ The file is replayed inside tool results, so the finished transcript has to fit 
 ## Command
 
 ```text
-uv run python -m harness.needle --model qwen38-27b --tokens 65536 --mode retrieve --depth 0 --mtp off
-uv run python -m harness.needle --model qwen38-27b --tokens 65536 --mode retrieve --depth 0.5 --mtp off
+uv run python -m harness.needle --model qwen38_27b --tokens 65536 --mode retrieve --depth 0 --mtp off
+uv run python -m harness.needle --model qwen38_27b --tokens 65536 --mode retrieve --depth 0.5 --mtp off
 ```
 
 The banner prints the loaded plane. These rows are the banners that printed `kv fp8_e4m3` with `mtp off`.

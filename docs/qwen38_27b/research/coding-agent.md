@@ -25,10 +25,10 @@ MTP is off. Thinking on uses the thinking card. Thinking off uses the instruct c
 ## Command
 
 ```text
-uv run python -m harness.coding --model qwen38-27b --thinking on
-uv run python -m harness.coding --model qwen38-27b --thinking off
-uv run python -m harness.coding --model qwen38-27b --vision --thinking on
-uv run python -m harness.coding --model qwen38-27b --vision --thinking off
+uv run python -m harness.coding --model qwen38_27b --thinking on
+uv run python -m harness.coding --model qwen38_27b --thinking off
+uv run python -m harness.coding --model qwen38_27b --vision --thinking on
+uv run python -m harness.coding --model qwen38_27b --vision --thinking off
 ```
 
 The banner prints the loaded plane, MTP, thinking, and vision.
@@ -55,10 +55,10 @@ Later finds are appended here. The sections above stay as committed.
 `--store off` is the harness default. `--store on` sends `store` true for the ledger and the contract. Vision stayed on. MTP stayed off. Prefill summed between 299.89 and 316.78 tok/s. Decode summed between 14.16 and 14.36 tok/s. A search the same day did not find that table. Queries: "299.89 OR 315.96 OR 316.78 OR 301.51 Qwen3.8-27B coding agent vision store tok/s", and "Qwen3.8-27B coding agent ledger vision horse store on M5 Pro 48GB". Closest overlaps were [an RTX PRO 6000 coding-agent decode](https://safaia.net/hanxiao/Qwen3.8-27B-abliterated-AWQ-SGLang-DFlash2-RTX-PRO-6000) at about 220 tok/s and [an NVFP4 vision build](https://huggingface.co/dbrasdasilva/Qwen3.8-27B-Text-NVFP4-MTP/raw/main/README.md) at about 77 tok/s decode with MTP off. Neither is this `fp8_e4m3` table.
 
 ```text
-uv run python -m harness.coding --model qwen38-27b --vision --thinking on --store off
-uv run python -m harness.coding --model qwen38-27b --vision --thinking off --store off
-uv run python -m harness.coding --model qwen38-27b --vision --thinking on --store on
-uv run python -m harness.coding --model qwen38-27b --vision --thinking off --store on
+uv run python -m harness.coding --model qwen38_27b --vision --thinking on --store off
+uv run python -m harness.coding --model qwen38_27b --vision --thinking off --store off
+uv run python -m harness.coding --model qwen38_27b --vision --thinking on --store on
+uv run python -m harness.coding --model qwen38_27b --vision --thinking off --store on
 ```
 
 | Thinking | Store | Result | Prefill | Decode |

@@ -2,19 +2,16 @@
 
 Measurement note for the `bge_m3` pipeline.
 
-The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md).
-
-This file records one warm run of the packed int8 record.
-
-It is a recorded run, not a kernel sum.
+- The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md).
+- This file records one warm run of the packed int8 record.
+- It is a recorded run, not a kernel sum.
 
 ## Remainder
 
-A warm call to `Runtime.embed` recorded 9.02 ms at 12 tokens, 11.39 ms at 128, 58.56 ms at 512, and 3973.08 ms at 4096.
+On an M5 Pro with 48 GB, a warm call to `Runtime.embed` recorded 9.02 ms at 12 tokens, 11.39 ms at 128, 58.56 ms at 512, and 3973.08 ms at 4096.
 
-Opening the record took 371.3 ms.
-
-A search on 25 October 2026 did not find that table.
+- Opening the record took 371.3 ms.
+- A search on 25 October 2026 did not find that table.
 
 ## Predecessors
 
@@ -28,27 +25,24 @@ A search on 25 October 2026 did not find that table.
 
 ## Rule
 
-One call is discarded, then the sample is taken.
-
-The 12-token sentence is repeated 5 times and the median is kept.
-
-The 128-token and 512-token inputs are repeated 3 times.
-
-The 4096-token input is one timed call.
-
-The longer inputs repeat the word `word` until the tokenizer count matches.
-
-The short sentence is `A stone bridge under a clear sky.`
+- One call is discarded, then the sample is taken.
+- The 12-token sentence is repeated 5 times and the median is kept.
+- The 128-token and 512-token inputs are repeated 3 times.
+- The 4096-token input is one timed call.
+- The longer inputs repeat the word `word` until the tokenizer count matches.
+- The short sentence is `A stone bridge under a clear sky.`
 
 ## Command
 
-`favlo --bge_m3 embed` prints one vector.
+```text
+uv run favlo --bge_m3 embed --text <sentence>
+uv run favlo --bge_m3 kernels
+```
 
-`favlo --bge_m3 kernels` checks a synthetic tile.
-
-Neither prints this table.
-
-No committed command regenerates the rows.
+- `embed` prints one vector.
+- `kernels` checks a synthetic tile.
+- Neither prints this table.
+- No committed command regenerates the rows.
 
 ## Table
 
@@ -71,12 +65,10 @@ Queries:
 - "FlagEmbedding bge-m3 max_passage_length 8192 cost_time A800 encode milliseconds"
 - "bge-m3 MLX Metal encode latency milliseconds 512 tokens Apple Silicon"
 
-The predecessors in this note are the overlaps those queries returned.
-
-The search did not find the 9.02 ms, 11.39 ms, 58.56 ms, and 3973.08 ms table.
+- The predecessors in this note are the overlaps those queries returned.
+- The search did not find the 9.02 ms, 11.39 ms, 58.56 ms, and 3973.08 ms table.
 
 ## Corrections
 
-Later finds are appended here.
-
-The sections above stay as committed.
+- Later finds are appended here.
+- The sections above stay as committed.

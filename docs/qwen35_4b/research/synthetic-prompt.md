@@ -4,13 +4,11 @@ Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHI
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MTP off passed a cold instruct prompt.
-
+- On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MTP off passed a cold instruct prompt.
 - A 512-token prompt prefilled at 2239.26 tok/s and decoded 61 tokens at 40.79 tok/s.
 - A 10000-token prompt prefilled at 991.90 tok/s and decoded 128 tokens at 14.28 tok/s.
 - The end-to-end rates, prefill plus decode, were 331.21 tok/s and 531.93 tok/s.
-
-A search on 4 November 2026 did not find that table.
+- A search on 4 November 2026 did not find that table.
 
 ## Predecessors
 
@@ -33,11 +31,13 @@ A search on 4 November 2026 did not find that table.
 
 ## Command
 
+Historical (hyphen id as recorded):
+
 ```text
 uv run python -m harness.synthetic --model qwen35-4b
 ```
 
-The banner prints the loaded plane, MTP, thinking, and the decode cap.
+The live CLI id is `qwen35_4b`. The banner prints the loaded plane, MTP, thinking, and the decode cap.
 
 ## Table
 
@@ -67,6 +67,8 @@ Same plane, MTP off, and the instruct card. A cold 2048-token prompt prefilled a
 - None of them is this `fp8_e4m3` table.
 - The 512 and 10000 rows above stay the 4 November measurement.
 
+Historical (hyphen id as recorded):
+
 ```text
 uv run python -m harness.synthetic --model qwen35-4b --tokens 2048 --decode 128 --thinking off --mtp off
 ```
@@ -85,6 +87,8 @@ Same pack, MTP off, and the instruct card. Temperature is 0. Each prefill is a c
 | 1024 | 1457.07 tok/s (1024 tok in 0.70 s) | 36.19 tok/s (128 tok in 3.54 s) | 271.70 tok/s (1152 tok in 4.24 s) |
 | 4096 | 1278.14 tok/s (4096 tok in 3.20 s) | 23.41 tok/s (128 tok in 5.47 s) | 487.20 tok/s (4224 tok in 8.67 s) |
 | 10000 | 874.93 tok/s (10000 tok in 11.43 s) | 13.61 tok/s (128 tok in 9.40 s) | 486.22 tok/s (10128 tok in 20.83 s) |
+
+Live CLI:
 
 ```text
 uv run python -m harness.synthetic --model qwen35_4b --thinking off --mtp off

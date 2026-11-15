@@ -1,10 +1,14 @@
 # Ceilings
 
-Kernel and bandwidth figures for the decode projections. The fp4 rows predate the E8M0 scale bit insert in `gemv_fp4_x4` and the fused fp4 projection kernels. Recompute the fp8 rows when `gemv_fp8_x4` changes.
+Kernel and bandwidth figures for the decode projections.
 
-Each GEMV time is one command buffer, then a wait. The median of five dispatches after one discarded sample. Overlapping command buffers are not added.
-
-A 2 GiB buffer copy finished in 15705 µs. That is 254.6 GB/s counting the read and the write.
+- The fp4 rows predate the E8M0 scale bit insert in `gemv_fp4_x4` and the fused fp4 projection kernels.
+- Recompute the fp8 rows when `gemv_fp8_x4` changes.
+- Each GEMV time is one command buffer, then a wait.
+- The median of five dispatches after one discarded sample.
+- Overlapping command buffers are not added.
+- A 2 GiB buffer copy finished in 15705 µs.
+- That is 254.6 GB/s counting the read and the write.
 
 ## Decode projections
 

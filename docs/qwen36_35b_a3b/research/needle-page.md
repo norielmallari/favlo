@@ -41,6 +41,8 @@ The file is replayed inside tool results, so the finished transcript has to fit 
 
 ## Command
 
+Historical harness id (hyphen). Live CLI uses `qwen36_35b_a3b`.
+
 ```text
 uv run python -m harness.needle --model qwen36-35b-a3b --tokens 65536 --depth 0.5 --mtp off --thinking off --mode page
 ```

@@ -4,7 +4,11 @@ Measurement note for the `gemma4_26b_a4b` pipeline. The serving contract is [../
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `half` keys and values and MTP off passed the vision coding agent. Thinking recorded 249.31 tok/s prefill and 31.11 tok/s decode. Instruct recorded 322.65 tok/s prefill and 31.47 tok/s decode. A search on 15 November 2026 did not find that table.
+On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `half` keys and values and MTP off passed the vision coding agent.
+
+- Thinking recorded 249.31 tok/s prefill and 31.11 tok/s decode.
+- Instruct recorded 322.65 tok/s prefill and 31.47 tok/s decode.
+- A search on 15 November 2026 did not find that table.
 
 ## Predecessors
 
@@ -19,8 +23,9 @@ On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `half` keys and values and MT
 
 ## Rule
 
-MTP is off. The still is the first chat, `detail` `auto`, `tool_choice` `none`. The ledger is the next chat on that session.
-
+- MTP is off.
+- The still is the first chat, `detail` `auto`, `tool_choice` `none`.
+- The ledger is the next chat on that session.
 - Thinking on uses the thinking card.
 - Thinking off uses the instruct card.
 - The banner prints the loaded plane.

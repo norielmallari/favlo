@@ -4,33 +4,42 @@ As-built detail for the `qwen38_27b` pipeline. [README.md](README.md) is the sum
 
 Download, pack, and the first chat are [README.md](README.md).
 
-`handle_responses` is the generation path. It reads a Responses body and writes a Response. The listener translates `POST /v1/chat/completions` into that body and writes the Response back as a chat completion. The sampler stays in this package.
-
+- `handle_responses` is the generation path.
+- It reads a Responses body and writes a Response.
+- The listener translates `POST /v1/chat/completions` into that body and writes the Response back as a chat completion.
+- The sampler stays in this package.
 - A streamed Responses call opens the event stream before prefill and writes reasoning and output deltas on the generation thread.
 - Stream idle keepalive is the listener's SSE transport (same `sse-starlette` ping comments MAF AG-UI uses), not a pipeline tick.
 - Clients reach this pipeline through `favlo serve`.
-- `GET /v1/models` lists it once a record is registered. The `model` field on `POST /v1/responses` or `POST /v1/chat/completions` loads it.
-- `download`, `quantize`, `mtp-half`, `delete`, `kernels`, `bf16`, `complete`, and `models` require `favlo --qwen38_27b`. That flag loads `qwen38_27b.metal41`.
+- `GET /v1/models` lists it once a record is registered.
+- The `model` field on `POST /v1/responses` or `POST /v1/chat/completions` loads it.
+- `download`, `quantize`, `mtp-half`, `delete`, `kernels`, `bf16`, `complete`, and `models` require `favlo --qwen38_27b`.
+- That flag loads `qwen38_27b.metal41`.
 - The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
 
-The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Those weights are under the Apache License, Version 2.0.
+- The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
+- Those weights are under the Apache License, Version 2.0.
 
-Device spans come from the process memory manager. The serve process keeps the ledger. This runtime asks it for the budget at open and again before each prefill chunk.
-
+- Device spans come from the process memory manager.
+- The serve process keeps the ledger.
+- This runtime asks it for the budget at open and again before each prefill chunk.
 - A larger answer raises the fit ceiling.
 - A later dip does not shrink the live cache or the wired layers.
 - A `--max-memory` cap is applied by that ledger, not by this package.
-- `open_runtime` takes `owner`. Every span from that opening uses it. `close` sweeps that string.
+- `open_runtime` takes `owner`.
+- Every span from that opening uses it.
+- `close` sweeps that string.
 - A command that omits `owner` mints one from this runtime's id.
 - The fit still starts at a 2048-token chunk.
 
 ## Registry
 
-The row key in `models/registry.json` is the packed folder, such as `Qwen3.8-27B-fp4`. The alias `qwen38_27b` is the public id and is not the key.
-
+- The row key in `models/registry.json` is the packed folder, such as `Qwen3.8-27B-fp4`.
+- The alias `qwen38_27b` is the public id and is not the key.
 - Write the field on that folder and save.
 - `set_model_mtp` and `set_alias` take the public id.
-- A field marked open is copied when the pipeline process starts, so close the resident model after the write. The listener stays up.
+- A field marked open is copied when the pipeline process starts, so close the resident model after the write.
+- The listener stays up.
 - A field marked request is read from the file on that request.
 
 ```python
@@ -67,7 +76,9 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - A request temperature or top-p replaces the card for that call.
 - Top-k and the presence penalty stay on the card.
 
-The file key `default` is the id harnesses and `favlo web` use when none is named. The first language registration writes `qwen38_27b:instruct`. A stored value stays until it is replaced.
+- The file key `default` is the id harnesses and `favlo web` use when none is named.
+- The first language registration writes `qwen38_27b:instruct`.
+- A stored value stays until it is replaced.
 
 `pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity.
 
@@ -79,9 +90,13 @@ The file key `default` is the id harnesses and `favlo web` use when none is name
 
 ## Kernels
 
-`kernels` compiles this package's shader library and fails if any kernel in that library does not produce a pipeline. It then dispatches the 64×64 and 64×32 fp4 `matmul2d` tiles, the 32×128 fp4 and fp8 tiles, the fp8 64×64 weight tile, an fp4 and an fp8 restore into int8, the 64×64 and 32×128 int8 tiles, the int8 scale epilogue, the fp4 GEMV, the four-row fp4 GEMV, the four-row fp8 GEMV, the fused fp8 gate and up projection, the two-activation fp4 GEMV, multiplicative RMSNorm, SwiGLU, one Gated DeltaNet step, the 10240-channel convolution, an E4M3 decode, partial RoPE at position 0, a top-k sample, image position ids, a patch cast, a four-token causal fp8 attention, the tanh GELU, and the erf GELU. The host formulas for those dispatches live in `qwen38_27b/checks.py`.
+- `kernels` compiles this package's shader library and fails if any kernel in that library does not produce a pipeline.
+- It then dispatches the 64×64 and 64×32 fp4 `matmul2d` tiles, the 32×128 fp4 and fp8 tiles, the fp8 64×64 weight tile, an fp4 and an fp8 restore into int8, the 64×64 and 32×128 int8 tiles, the int8 scale epilogue, the fp4 GEMV, the four-row fp4 GEMV, the four-row fp8 GEMV, the fused fp8 gate and up projection, the two-activation fp4 GEMV, multiplicative RMSNorm, SwiGLU, one Gated DeltaNet step, the 10240-channel convolution, an E4M3 decode, partial RoPE at position 0, a top-k sample, image position ids, a patch cast, a four-token causal fp8 attention, the tanh GELU, and the erf GELU.
+- The host formulas for those dispatches live in `qwen38_27b/checks.py`.
 
-The DeltaNet state is float32, 48 heads of `128×128`. The step decays the state by \(\alpha\), writes \(\beta(v - Sk)k^\top\), and reads with the query. \(\alpha = \exp(-\exp(A_{\log})\mathrm{softplus}(a + \mathrm{dt\_bias}))\) and \(\beta = \mathrm{sigmoid}(b)\).
+- The DeltaNet state is float32, 48 heads of `128×128`.
+- The step decays the state by \(\alpha\), writes \(\beta(v - Sk)k^\top\), and reads with the query.
+- \(\alpha = \exp(-\exp(A_{\log})\mathrm{softplus}(a + \mathrm{dt\_bias}))\) and \(\beta = \mathrm{sigmoid}(b)\).
 
 - Decode applies that step once per token.
 - Prefill uses the same recurrence across the tokens of a chunk of at most 2048.
@@ -94,7 +109,10 @@ The DeltaNet state is float32, 48 heads of `128×128`. The step decays the state
 
 ## Record
 
-`quantize` streams a Hugging Face BF16 checkout into `models/Qwen3.8-27B-fp4`. Every matrix is fp4 E2M1 with an E8M0 scale every 32 along K. That includes the embedding, the projections, the feed-forward, `lm_head`, the MTP block, and the vision tower. Rows are stored as a multiple of 64 and K as a multiple of 256.
+- `quantize` streams a Hugging Face BF16 checkout into `models/Qwen3.8-27B-fp4`.
+- Every matrix is fp4 E2M1 with an E8M0 scale every 32 along K.
+- That includes the embedding, the projections, the feed-forward, `lm_head`, the MTP block, and the vision tower.
+- Rows are stored as a multiple of 64 and K as a multiple of 256.
 
 - One-dimensional parameters stay Metal `half`: RMSNorm gains, `A_log`, `dt_bias`, and biases.
 - The depthwise convolution stays `half` with shape `[10240, 4]`.
@@ -119,7 +137,7 @@ The DeltaNet state is float32, 48 heads of `128×128`. The step decays the state
 - that registry row
 - the packed directory under `models/`
 - a checkout still under `models/` when no other row uses it
-- that record's prefix files under `~/.favlo/prefix/qwen38-27b/`
+- that record's prefix files under `~/.favlo/prefix/qwen38_27b/`
 
 A checkout outside `models/` stays. A `:instruct` or `:thinking` suffix deletes that same model.
 
@@ -127,7 +145,7 @@ A checkout outside `models/` stays. A `:instruct` or `:thinking` suffix deletes 
 
 ## Forward
 
-`serve` and `complete` apply the prompt in chunks of at most 2048 tokens, then draw one token at a time.
+- `serve` and `complete` apply the prompt in chunks of at most 2048 tokens, then draw one token at a time.
 
 - A chunk submits every 4 layers as its own command buffer while every feed-forward layer it runs is in the device buffer.
 - A layer that stays in the record is copied into one stage before its matmul. The next copy waits until that command buffer has finished.
@@ -180,7 +198,9 @@ Sampling on device:
 - A wider top-k, or a draw with no top-k, scans the logits on device.
 - The uniform is one value from the request generator. The inverse CDF walks the remaining tokens in id order.
 
-The position limit is the checkpoint's `max_position_embeddings` (262,144). The served window stops at 131,072. The byte totals for that window are [memory-usage.md](memory-usage.md).
+- The position limit is the checkpoint's `max_position_embeddings` (262,144).
+- The served window stops at 131,072.
+- The byte totals for that window are [memory-usage.md](memory-usage.md).
 
 Context length and fit:
 
@@ -229,7 +249,10 @@ Prefix, positions, and memory pressure:
 - Those bytes stay in the budget until the kernel reports them reclaimable. `close` also marks the weight file's cached pages reusable.
 
 
-The live key/value cache defaults to `half` on the 16 full-attention layers. The registry field is `kv_cache` with value `half` or `fp8_e4m3`. An omitted cache uses `half`. `f16` and `fp16` resolve to `half`.
+- The live key/value cache defaults to `half` on the 16 full-attention layers.
+- The registry field is `kv_cache` with value `half` or `fp8_e4m3`.
+- An omitted cache uses `half`.
+- `f16` and `fp16` resolve to `half`.
 
 `fp8_e4m3`:
 
@@ -266,9 +289,22 @@ Recorded rates and prefix store:
 - An exact-length file is not sampled; the next token is still stepped.
 
 
-RMSNorm on the residual stream, the final norm, and the query and key is the zero-centered form, \(x / \mathrm{rms} \cdot (1 + w)\). The Gated DeltaNet head norm multiplies by \(w\). Full attention applies that norm to the query and the key over 256 channels, then partial RoPE on the first 64 channels with \(\theta = 10^{7}\). A text position is written on every mRoPE axis, so the rotation is plain RoPE. The scale is \(1/\sqrt{256}\). `q_proj` is 256 query channels and then 256 gate channels per head. The sigmoid of the gate multiplies the attention output before `o_proj`. The feed-forward is SwiGLU with intermediate width 17408.
+- RMSNorm on the residual stream, the final norm, and the query and key is the zero-centered form, \(x / \mathrm{rms} \cdot (1 + w)\).
+- The Gated DeltaNet head norm multiplies by \(w\).
+- Full attention applies that norm to the query and the key over 256 channels, then partial RoPE on the first 64 channels with \(\theta = 10^{7}\).
+- A text position is written on every mRoPE axis, so the rotation is plain RoPE.
+- The scale is \(1/\sqrt{256}\).
+- `q_proj` is 256 query channels and then 256 gate channels per head.
+- The sigmoid of the gate multiplies the attention output before `o_proj`.
+- The feed-forward is SwiGLU with intermediate width 17408.
 
-One decode step reads the fp4 language projections and the head. With `in_proj_a` and `in_proj_b` stored at 64 rows, that image is 13.18 GiB. The embedding contributes one row. Convolution and norms are Metal `half`. At 307 GB/s that 13.18 GiB read is 21.7 tok/s before the key/value cache. That figure is the byte count divided by that bandwidth. The isolated projection sum is a measurement in [research/kernel-ceilings.md](research/kernel-ceilings.md).
+- One decode step reads the fp4 language projections and the head.
+- With `in_proj_a` and `in_proj_b` stored at 64 rows, that image is 13.18 GiB.
+- The embedding contributes one row.
+- Convolution and norms are Metal `half`.
+- At 307 GB/s that 13.18 GiB read is 21.7 tok/s before the key/value cache.
+- That figure is the byte count divided by that bandwidth.
+- The isolated projection sum is a measurement in [research/kernel-ceilings.md](research/kernel-ceilings.md).
 
 Measured forward rates on this pipeline. Each run is filed under the linked research note.
 
@@ -293,7 +329,12 @@ Measured forward rates on this pipeline. Each run is filed under the linked rese
 - With MTP on at depth 3 it measured 298.38 tok/s prefill over 2766 tokens (9.27 s) and 15.34 tok/s decode over 997 tokens (64.98 s), context 3432 over 8 requests.
 
 
-The MTP block is one full-attention layer. At each position it reads the backbone residual after the final language norm, and the embedding of the next token. Each vector is RMSNormed again. The embedding half is concatenated in front of the residual half, which is the order that matches this checkpoint; equation (21) of the DeepSeek-V3 report writes the residual half first. `mtp.fc` projects that 10,240-wide vector back to 5,120. A later draft reads the previous draft's `mtp.norm` output in place of the language residual.
+- The MTP block is one full-attention layer.
+- At each position it reads the backbone residual after the final language norm, and the embedding of the next token.
+- Each vector is RMSNormed again.
+- The embedding half is concatenated in front of the residual half, which is the order that matches this checkpoint; equation (21) of the DeepSeek-V3 report writes the residual half first.
+- `mtp.fc` projects that 10,240-wide vector back to 5,120.
+- A later draft reads the previous draft's `mtp.norm` output in place of the language residual.
 
 Decode and draft:
 
@@ -334,16 +375,32 @@ Span verify:
 Request fields:
 
 - The Responses body has no `enable_thinking` field and no `preserve_thinking` field.
-- A Chat Completions body may set `preserve_thinking` or `chat_template_kwargs.preserve_thinking`; that flag is copied onto the generation path. Omitted is off.
-- `favlo:mtp` and `favlo:mtp_depth` override the registry row. Omitted, the row applies.
+- A Chat Completions body may set `preserve_thinking` or `chat_template_kwargs.preserve_thinking`; that flag is copied onto the generation path.
+- Omitted `preserve_thinking` is off.
+- A request value wins over the registry row.
+- A string is rejected.
+- With the flag off, the prefix stops at the latest user message and that file is pinned.
+- A prompt that already ends on the user message pins the tokens before the generation suffix instead.
+- With the flag on, historical think blocks stay.
+- A user message after a user or tool message inserts an empty assistant turn so the next prompt remains a prefix.
+- A required tool call is encoded with thinking closed.
+- A later thinking turn repeats that same closed block before the call.
+- A `<tool_call>` drawn while the think block is still open is stored after the template close (`</think>\n\n` when no reasoning tokens were drawn, `\n</think>\n\n` when they were) and sampled again.
+- `favlo:prefix_budget` and `favlo:prefix_scratch` select that run's prefix partition.
+- `favlo:mtp` and `favlo:mtp_depth` override the registry row.
+- Omitted, the row applies.
 - `favlo:fill_decode` true keeps sampling through stop ids and a repeated tail until the output cap.
-- `max_output_tokens` counts the completion. A value below 16 is rejected.
+- `max_output_tokens` counts the completion.
+- A value below 16 is rejected.
 - Hitting the cap sets status `incomplete` and `incomplete_details.reason` `max_output_tokens`.
-- `store` defaults to true. The listener's response chain keeps that response. A later request can send `previous_response_id`.
+- `store` defaults to true.
+- The listener's response chain keeps that response.
+- A later request can send `previous_response_id`.
 - The chain rebuilds one transcript, including a reasoning item, and drops messages the client sends again, before the pipeline encodes.
 - The pipeline does not read `store` or `previous_response_id`.
 - `store` false drops the response and puts the trace in `encrypted_content`.
-- `truncation` `auto` drops the oldest input items until the prompt fits the served window, keeping a leading system message. Any other value rejects an input that does not fit.
+- `truncation` `auto` drops the oldest input items until the prompt fits the served window, keeping a leading system message.
+- Any other value rejects an input that does not fit.
 
 Chat template and sampling:
 
@@ -375,8 +432,10 @@ Chat template and sampling:
 Harness scores for this pipeline are in [benchmarks.md](benchmarks.md).
 
 - `complete` writes one argmax carrot completion to `carrots.json` in the record directory.
-- `tests/test_qwen38_27b_smoke.py` runs that prompt on this pipeline. The reply collects 6 carrots.
-- Instruct and thinking share the selected sampling card; thinking follows the resolved `reasoning.effort` or the row's `reasoning_effort` / `enable_thinking`.
+- `tests/test_qwen38_27b_smoke.py` runs that prompt on this pipeline.
+- The reply collects 6 carrots.
+- Instruct and thinking share the selected sampling card.
+- Thinking follows the resolved `reasoning.effort` or the row's `reasoning_effort` / `enable_thinking`.
 - Thinking runs when the checkpoint template opens a think block, at the template default and at each reasoning effort that template names.
 - `models` reads the shared registry.
 - Registration copies the thinking and instruct rows from `sampling.py` as sampling presets, and stores `enable_thinking` plus `reasoning_effort` `xhigh`.

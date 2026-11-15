@@ -4,7 +4,12 @@ Measurement note for the `gemma4_26b_a4b` pipeline. The serving contract is [../
 
 ## Remainder
 
-On an M5 Pro with 48 GB, one command buffer per kernel, then a wait, sums to 35.595 ms (28.09 tok/s) at one key, 56.658 ms (17.65 tok/s) at 1,024 keys, and 396.713 ms (2.52 tok/s) at 65,536 keys. A search on 31 October 2026 did not find that sum.
+On an M5 Pro with 48 GB, one command buffer per kernel, then a wait:
+
+- One key sums to 35.595 ms (28.09 tok/s).
+- 1,024 keys sum to 56.658 ms (17.65 tok/s).
+- 65,536 keys sum to 396.713 ms (2.52 tok/s).
+- A search on 31 October 2026 did not find that sum.
 
 ## Predecessors
 
@@ -17,11 +22,18 @@ On an M5 Pro with 48 GB, one command buffer per kernel, then a wait, sums to 35.
 
 ## Rule
 
-Each listed kernel runs in its own command buffer. The sample is the median of four device intervals after one discarded run. `gemv_fp4_routed` and `attend_span` were measured on 31 October 2026. The other dispatches stay the earlier figures in the ceilings note. The sum replaces the previous routed-expert and attention rows with those two and leaves the rest.
+- Each listed kernel runs in its own command buffer.
+- The sample is the median of four device intervals after one discarded run.
+- `gemv_fp4_routed` and `attend_span` were measured on 31 October 2026.
+- The other dispatches stay the earlier figures in the ceilings note.
+- The sum replaces the previous routed-expert and attention rows with those two and leaves the rest.
 
 ## Command
 
-`uv run favlo --gemma4_26b_a4b kernels` checks that the shader library compiles and that the listed products match. That command does not print this table. No committed command regenerates the medians. Recompute [../ceilings.md](../ceilings.md) when a listed kernel changes.
+- `uv run favlo --gemma4_26b_a4b kernels` checks that the shader library compiles and that the listed products match.
+- That command does not print this table.
+- No committed command regenerates the medians.
+- Recompute [../ceilings.md](../ceilings.md) when a listed kernel changes.
 
 ## Table
 

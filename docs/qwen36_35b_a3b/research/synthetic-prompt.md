@@ -36,6 +36,8 @@ Measurement note for the `qwen36_35b_a3b` pipeline. The serving contract is [../
 
 ## Command
 
+Historical harness id (hyphen). Live CLI uses `qwen36_35b_a3b`.
+
 ```text
 uv run python -m harness.synthetic --model qwen36-35b-a3b
 ```

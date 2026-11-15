@@ -23,6 +23,8 @@ Prefill is the summed suffix time. Decode is the summed sampled-token time. The 
 
 ## Command
 
+Historical harness id (hyphen). Live CLI uses `qwen36_35b_a3b`.
+
 ```text
 uv run python -m harness --model qwen36-35b-a3b
 uv run python -m harness.coding --model qwen36-35b-a3b

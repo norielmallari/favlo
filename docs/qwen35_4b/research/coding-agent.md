@@ -4,7 +4,10 @@ Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHI
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values, MTP off, passed the vision coding agent. Thinking recorded 1460.00 tok/s prefill and 27.68 tok/s decode. Instruct recorded 1414.22 tok/s prefill and 27.12 tok/s decode. A search on 3 November 2026 did not find that table.
+- On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values, MTP off, passed the vision coding agent.
+- Thinking recorded 1460.00 tok/s prefill and 27.68 tok/s decode.
+- Instruct recorded 1414.22 tok/s prefill and 27.12 tok/s decode.
+- A search on 3 November 2026 did not find that table.
 
 ## Predecessors
 
@@ -26,12 +29,14 @@ On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values, MTP o
 
 ## Command
 
+Historical (hyphen id as recorded):
+
 ```text
 uv run python -m harness.coding --model qwen35-4b --vision --thinking on
 uv run python -m harness.coding --model qwen35-4b --vision --thinking off
 ```
 
-The banner prints the loaded plane, MTP, thinking, and vision.
+The live CLI id is `qwen35_4b`. The banner prints the loaded plane, MTP, thinking, and vision.
 
 ## Table
 
@@ -59,6 +64,8 @@ Same plane, MTP off, and vision on. Thinking recorded 1416.98 tok/s prefill and 
 - Queries: "1416.98 OR 27.46 OR 27.24 Qwen3.5-4B coding agent vision tok/s", and "Qwen3.5-4B coding agent vision ledger prefill decode tok/s M5 Pro fp8 2026".
 - Closest overlaps were [Token Atlas](https://tokatlas.github.io/models/qwen3-5-4b/) at 2579 tok/s prefill and 98.7 tok/s decode for a 4-bit oMLX build on an M5 Pro at 1024 context, and [qwen35-thor](https://github.com/thomas-hiddenpeak/qwen35-thor/) at 26.3 tok/s BF16 decode with MTP off.
 - Neither is this `fp8_e4m3` vision table.
+
+Historical (hyphen id as recorded):
 
 ```text
 uv run python -m harness.coding --model qwen35-4b --vision --thinking on

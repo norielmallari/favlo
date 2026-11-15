@@ -37,6 +37,8 @@ On an M5 Pro with 48 GB, `Qwen3.6-35B-A3B-fp8-e20` with `fp8_e4m3` keys and valu
 
 ## Command
 
+Historical harness id (hyphen). Live CLI uses `qwen36_35b_a3b`.
+
 ```text
 uv run python -m harness.needle --model qwen36-35b-a3b --tokens 65536 --mode retrieve --depth 0
 uv run python -m harness.needle --model qwen36-35b-a3b --tokens 65536 --mode retrieve --depth 0.5

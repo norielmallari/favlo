@@ -1,27 +1,39 @@
 # BGE-M3
 
-Embeddings for [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3), MIT.
+Embeddings pipeline `bge_m3` serves [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) (MIT License) through `favlo serve` after `quantize` registers the packed record at `models/bge-m3-int8`.
 
 Chen et al., [arXiv:2402.03216](https://arxiv.org/abs/2402.03216).
 
-The packed folder is `models/bge-m3-int8`.
+- `handle_embed` is an `EmbeddingsPipeline`.
+- Clients call `POST /v1/embeddings` with `model` set to that folder.
+- Omit `model` when the registry `embeddings` key points at it.
+- `quantize`, `embed`, and `kernels` use `favlo --bge_m3`.
 
-A client calls `POST /v1/embeddings` with `model` set to that folder.
-
-It may omit `model` when the registry `embeddings` key points at it.
-
-It may run the CLI below.
-
-```bash
-favlo --bge_m3 quantize --src <checkout>
-favlo --bge_m3 embed --text <sentence>
+```text
+uv run favlo --bge_m3 --help
+uv run favlo --bge_m3 kernels
+uv run favlo --bge_m3 quantize --src <checkout>
+uv run favlo --bge_m3 embed --text <sentence>
 ```
 
-`quantize` writes the int8 record from the publisher checkout.
+## Setup
 
-`embed` prints the 1024-dimensional dense vector from an existing record.
+Official weights are [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3).
 
-As-built detail: [ARCHITECTURE.md](ARCHITECTURE.md).
+- `quantize` reads the publisher checkout and writes `models/bge-m3-int8`.
+- It is the only command that opens that checkout.
+- `embed` prints the 1024-dimensional dense vector from an existing record.
+- It does not quantize.
+- A missing record is an error.
+- `kernels` checks a synthetic int8 tile and one attention head.
+
+```text
+uv run favlo --bge_m3 quantize --src <checkout>
+uv run favlo --bge_m3 embed --text <sentence>
+uv run favlo --bge_m3 kernels
+```
+
+Packed record, forward, registry, and request order: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 - [references.md](references.md) — papers and model card
 - [research/recorded-encode.md](research/recorded-encode.md) — warm encode timings

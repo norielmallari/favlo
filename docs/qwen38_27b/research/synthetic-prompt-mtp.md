@@ -26,7 +26,7 @@ MTP is on at depth 3. Thinking is off, so the request uses the instruct card and
 ## Command
 
 ```text
-uv run python -m harness.synthetic --model qwen38-27b --mtp on
+uv run python -m harness.synthetic --model qwen38_27b --mtp on
 ```
 
 The banner prints the loaded plane, MTP, thinking, and the decode cap.

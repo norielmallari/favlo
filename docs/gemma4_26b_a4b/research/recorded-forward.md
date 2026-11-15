@@ -4,7 +4,12 @@ Measurement note for the `gemma4_26b_a4b` pipeline. The serving contract is [../
 
 ## Remainder
 
-On an M5 Pro with 48 GB, a varied prompt prefilled 1,024 tokens at 1,161.9 tok/s. The carrot smoke decoded at 46.64, 44.03, and 41.97 tok/s. The coding-agent runtime log decoded 820 tokens at 18.84 tok/s. A search on 31 October 2026 did not find that run.
+On an M5 Pro with 48 GB:
+
+- A varied prompt prefilled 1,024 tokens at 1,161.9 tok/s.
+- The carrot smoke decoded at 46.64, 44.03, and 41.97 tok/s.
+- The coding-agent runtime log decoded 820 tokens at 18.84 tok/s.
+- A search on 31 October 2026 did not find that run.
 
 ## Predecessors
 
@@ -28,7 +33,7 @@ On an M5 Pro with 48 GB, a varied prompt prefilled 1,024 tokens at 1,161.9 tok/s
 
 ```text
 uv run python -m pytest tests/test_gemma4_26b_a4b_smoke.py -s
-uv run python -m harness.coding --model gemma4-26b-a4b
+uv run python -m harness.coding --model gemma4_26b_a4b
 ```
 
 The pytest command prints the carrot rows. The coding command prints `passed` when the hidden suite passes. No committed command reprints the 1,134.1 and 1,161.9 tok/s rows or the 18.84 tok/s sum.

@@ -4,7 +4,9 @@ Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHI
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values, MTP off, and thinking off passed a 65536-token page needle at depth 0.5. Prefill summed to 863.02 tok/s and decode to 25.58 tok/s. A search on 3 November 2026 did not find that table.
+- On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values, MTP off, and thinking off passed a 65536-token page needle at depth 0.5.
+- Prefill summed to 863.02 tok/s and decode to 25.58 tok/s.
+- A search on 3 November 2026 did not find that table.
 
 ## Predecessors
 
@@ -29,11 +31,13 @@ On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values, MTP o
 
 ## Command
 
+Historical (hyphen id as recorded):
+
 ```text
 uv run python -m harness.needle --model qwen35-4b --tokens 65536 --depth 0.5 --mtp off --thinking off --mode page
 ```
 
-The banner prints the loaded plane, MTP, thinking, and mode.
+The live CLI id is `qwen35_4b`. The banner prints the loaded plane, MTP, thinking, and mode.
 
 ## Table
 
@@ -61,6 +65,8 @@ Same plane, MTP off, thinking off, 65536 tokens, depth 0.5, seed 0. The run pass
 - The closest 64k rate is [oMLX on an M5 with 32 GB](https://omlx.ai/benchmarks/performance/oxv7o7p8) at 681.9 tok/s prompt processing and 24.0 tok/s generation for a 4-bit build.
 - [Andrew Rose](https://andrewroseit.com/posts/e21j-multikey-needle-4b-context-curve/) records a multikey needle pass or fail from 128k to 512k.
 - Neither is this page-needle sum on the fp8 record with `fp8_e4m3` keys and values.
+
+Historical (hyphen id as recorded):
 
 ```text
 uv run python -m harness.needle --model qwen35-4b --tokens 65536 --depth 0.5 --mtp off --thinking off --mode page

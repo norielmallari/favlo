@@ -1,10 +1,16 @@
 # Qwen3.8-27B
 
-Summary for the `qwen38_27b` language pipeline on Metal 4.1. [ARCHITECTURE.md](ARCHITECTURE.md) covers kernels, the packed record, the forward path, and registry fields.
+Summary for the `qwen38_27b` language pipeline on Metal 4.1. Kernels, the packed record, the forward path, and registry fields are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). Those weights are under the Apache License, Version 2.0. Clients reach this pipeline through `favlo serve`. `GET /v1/models` lists registered ids, and the `model` field on `POST /v1/responses` or `POST /v1/chat/completions` loads it. Package commands (`download`, `quantize`, `mtp-half`, `delete`, `kernels`, `bf16`, `complete`, `models`) require `favlo --qwen38_27b`.
+- The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
+- Those weights are under the Apache License, Version 2.0.
+- Clients reach this pipeline through `favlo serve`.
+- `GET /v1/models` lists registered ids.
+- The `model` field on `POST /v1/responses` or `POST /v1/chat/completions` loads it.
+- Package commands (`download`, `quantize`, `mtp-half`, `delete`, `kernels`, `bf16`, `complete`, `models`) require `favlo --qwen38_27b`.
 
-A bare model id uses the thinking sampling card. The served context window stops at 131072 tokens.
+- A bare model id uses the thinking sampling card.
+- The served context window stops at 131072 tokens.
 
 After changing an open registry field, close the resident model:
 
@@ -26,9 +32,10 @@ How to download, pack, and talk to `qwen38_27b`. The kernel contract is [ARCHITE
 - A network path to `huggingface.co`
 - Free disk for the BF16 checkout and, after packing, the packed record beside it
 
-`download` asks Hugging Face for the file list and stops when the volume cannot hold the files still missing. The checkout stays on disk after `quantize`.
-
-8 GB is not enough to run a model capable of real-world agentic workflows. On 16 GB the runtime wires as many feed-forward layers as fit and reads the rest from the record.
+- `download` asks Hugging Face for the file list and stops when the volume cannot hold the files still missing.
+- The checkout stays on disk after `quantize`.
+- 8 GB is not enough to run a model capable of real-world agentic workflows.
+- On 16 GB the runtime wires as many feed-forward layers as fit and reads the rest from the record.
 
 ### Install
 
@@ -46,7 +53,11 @@ This checkout is release 0.6.0. PyPI publishes the runtime under `src/favlo`. Th
 uv run favlo --qwen38_27b download
 ```
 
-That command downloads [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) into `models/Qwen3.8-27B-bf16` with plain HTTP. A public checkout does not need a token. A short file continues on the next run. A finished download writes `fetch_complete.json`. Running `download` again prints that directory and does not fetch the files again.
+- That command downloads [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) into `models/Qwen3.8-27B-bf16` with plain HTTP.
+- A public checkout does not need a token.
+- A short file continues on the next run.
+- A finished download writes `fetch_complete.json`.
+- Running `download` again prints that directory and does not fetch the files again.
 
 Check free space without writing files:
 
@@ -66,9 +77,20 @@ The default pack stores every quantized matrix as fp4 and writes `models/Qwen3.8
 uv run favlo --qwen38_27b quantize --src models/Qwen3.8-27B-bf16
 ```
 
-That command registers the folder under the alias `qwen38_27b` in `models/registry.json`. The row stores the directory that was written, and it sets `mtp` true and `mtp_depth` 3 when the row does not already store `mtp`. `models add` does the same. The BF16 checkout stays. A finished directory has `manifest.json` with `complete: true`. Running `quantize` again on that directory returns it when the feed-forward percentage matches. An unfinished directory resumes from `quantize_progress.json`.
+- That command registers the folder under the alias `qwen38_27b` in `models/registry.json`.
+- The row stores the directory that was written.
+- It sets `mtp` true and `mtp_depth` 3 when the row does not already store `mtp`.
+- `models add` does the same.
+- The BF16 checkout stays.
+- A finished directory has `manifest.json` with `complete: true`.
+- Running `quantize` again on that directory returns it when the feed-forward percentage matches.
+- An unfinished directory resumes from `quantize_progress.json`.
 
-With no `--src`, `quantize` reads the Hugging Face cache snapshot for [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B). A missing cache is an error. `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`. `--output` names the packed directory. The alias stays `qwen38_27b`.
+- With no `--src`, `quantize` reads the Hugging Face cache snapshot for [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
+- A missing cache is an error.
+- `--src` names a local BF16 checkout, including `models/Qwen3.8-27B-bf16`.
+- `--output` names the packed directory.
+- The alias stays `qwen38_27b`.
 
 ### Quantization
 
@@ -76,9 +98,16 @@ With no `--src`, `quantize` reads the Hugging Face cache snapshot for [Qwen/Qwen
 
 - No `--ffn-fp8` writes `models/Qwen3.8-27B-fp4`. This is the default.
 - `100` stores all 64 language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8`.
-- Any other percentage stores that share of the language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8-e<P>`, where `<P>` is that percentage. `20` writes `models/Qwen3.8-27B-fp8-e20`. The count is the largest whole number that does not exceed that percentage, so `20` is 12 layers. Those layers are the highest BF16-to-fp4 relative errors. Gate, up, and down move together.
+- Any other percentage stores that share of the language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8-e<P>`, where `<P>` is that percentage.
+- `20` writes `models/Qwen3.8-27B-fp8-e20`.
+- The count is the largest whole number that does not exceed that percentage, so `20` is 12 layers.
+- Those layers are the highest BF16-to-fp4 relative errors.
+- Gate, up, and down move together.
 
-The embedding, the projections, `lm_head`, and the vision tower stay fp4. MTP matrices are Metal `half`, with rows and K padded to 64. One-dimensional parameters, including MTP norms, stay Metal `half`. `mtp-half` rewrites a finished record whose MTP matrices are still fp4 or fp8.
+- The embedding, the projections, `lm_head`, and the vision tower stay fp4.
+- MTP matrices are Metal `half`, with rows and K padded to 64.
+- One-dimensional parameters, including MTP norms, stay Metal `half`.
+- `mtp-half` rewrites a finished record whose MTP matrices are still fp4 or fp8.
 
 ```bash
 uv run favlo --qwen38_27b quantize --src models/Qwen3.8-27B-bf16 --ffn-fp8 100
@@ -93,34 +122,34 @@ Start the listener:
 uv run favlo serve
 ```
 
-The daemon listens on `http://127.0.0.1:8129`. A terminal `favlo serve` is that process. Ctrl+C stops it. Chat is `POST /v1/responses`. `POST /v1/chat/completions` translates into that request and translates the Response back. Favlo web uses the same listener.
+- The daemon listens on `http://127.0.0.1:8129`.
+- A terminal `favlo serve` is that process.
+- Ctrl+C stops it.
+- Chat is `POST /v1/responses`.
+- `POST /v1/chat/completions` translates into that request and translates the Response back.
+- Favlo web uses the same listener.
 
 From another terminal:
 
 ```bash
 curl http://127.0.0.1:8129/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen38-27b:instruct","input":"Hello"}'
+  -d '{"model":"qwen38_27b:instruct","input":"Hello"}'
 ```
 
 `GET /v1/models` lists the registered ids.
 
 - A bare `qwen38_27b` uses the thinking sampling card: temperature 1.0, top-p 0.95, top-k 20, presence penalty 0.
-- `qwen38-27b:instruct` uses temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5.
+- `qwen38_27b:instruct` uses temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5.
 - Those suffixes are sampling presets only.
 - Thinking follows the resolved `reasoning.effort` (`none`, `low`, `medium`, or `xhigh`; the other listed names map onto those) or the row's `reasoning_effort` / `enable_thinking`.
 - A request that omits effort leaves the template default, xhigh, when thinking is open.
+- The server does not check an API key.
+- A client that requires one can send any placeholder, such as `favlo`.
 
-The server does not check an API key. A client that requires one can send any placeholder, such as `favlo`.
-
-A user message can include a still image. The served window stops at 131072 tokens.
-
-- Omitted `preserve_thinking` is off. A request value wins over the registry row. A string is rejected.
-- With the flag off, the prefix stops at the latest user message and that file is pinned. A prompt that already ends on the user message pins the tokens before the generation suffix instead.
-- With the flag on, historical think blocks stay. A user message after a user or tool message inserts an empty assistant turn so the next prompt remains a prefix.
-- A required tool call is encoded with thinking closed. A later thinking turn repeats that same closed block before the call.
-- A `<tool_call>` drawn while the think block is still open is stored after the template close (`</think>\n\n` when no reasoning tokens were drawn, `\n</think>\n\n` when they were) and sampled again.
-- `favlo:prefix_budget` and `favlo:prefix_scratch` select that run's prefix partition.
+- A user message can include a still image.
+- The served window stops at 131072 tokens.
+- `preserve_thinking`, tool-call markup, and prefix partition fields are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Delete a model
 
@@ -136,13 +165,16 @@ The command removes:
 - the registry row
 - the packed directory under `models/`
 - the BF16 checkout when that checkout is still under `models/` and no other row uses it
-- that record's prefix files under `~/.favlo/prefix/qwen38-27b/`
+- that record's prefix files under `~/.favlo/prefix/qwen38_27b/`
 
 A checkout outside `models/` is left in place. Another model's directory and row stay.
 
 ### If download stops
 
-Run `download` again. Files already written stay on disk, and the next run continues from them. A line that names a GiB count is free space. A failed download prints `the next download continues from the files already written`.
+- Run `download` again.
+- Files already written stay on disk, and the next run continues from them.
+- A line that names a GiB count is free space.
+- A failed download prints `the next download continues from the files already written`.
 
 ## Related docs
 

@@ -4,7 +4,9 @@ Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHI
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MTP off passed the text coding agent. Thinking on, vision off, recorded 738.46 tok/s prefill and 28.26 tok/s decode. A search on 15 November 2026 did not find that pair.
+- On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MTP off passed the text coding agent.
+- Thinking on, vision off, recorded 738.46 tok/s prefill and 28.26 tok/s decode.
+- A search on 15 November 2026 did not find that pair.
 
 ## Predecessors
 
@@ -23,11 +25,13 @@ On an M5 Pro with 48 GB, `Qwen3.5-4B-fp8` with `fp8_e4m3` keys and values and MT
 
 ## Command
 
+Historical (hyphen id as recorded):
+
 ```text
 uv run python -m harness.coding --model qwen35-4b --thinking on --mtp off
 ```
 
-The banner prints the loaded plane, MTP, thinking, and vision.
+The live CLI id is `qwen35_4b`. The banner prints the loaded plane, MTP, thinking, and vision.
 
 ## Table
 

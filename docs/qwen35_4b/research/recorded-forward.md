@@ -4,7 +4,8 @@ Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHI
 
 ## Remainder
 
-On an M5 Pro with 48 GB, on `Qwen3.5-4B-fp8` with the default `f16` cache, the coding agent recorded 1673.36 tok/s prefill over 25569 tokens and 40.77 tok/s decode over 2172 tokens. A search on 2 November 2026 did not find that run.
+- On an M5 Pro with 48 GB, on `Qwen3.5-4B-fp8` with the default `f16` cache, the coding agent recorded 1673.36 tok/s prefill over 25569 tokens and 40.77 tok/s decode over 2172 tokens.
+- A search on 2 November 2026 did not find that run.
 
 ## Predecessors
 
@@ -24,10 +25,16 @@ On an M5 Pro with 48 GB, on `Qwen3.5-4B-fp8` with the default `f16` cache, the c
 
 ```text
 uv run python -m pytest tests/test_qwen35_4b_smoke.py -s
+```
+
+Historical (hyphen id as recorded):
+
+```text
 uv run python -m harness.coding --model qwen35-4b --thinking on
 ```
 
 - The pytest command prints the carrot rows.
+- The live CLI id is `qwen35_4b`.
 - The coding command prints `passed` when `ledger.py` `collect` returns 6, 0, and -6.
 - No committed command reprints the 1673.36 and 40.77 tok/s rows.
 

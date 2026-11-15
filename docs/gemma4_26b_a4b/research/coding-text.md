@@ -4,7 +4,10 @@ Measurement note for the `gemma4_26b_a4b` pipeline. The serving contract is [../
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `fp8_e4m3` keys and values and MTP off passed the text coding agent. Thinking on, vision off, recorded 836.90 tok/s prefill and 25.94 tok/s decode. A search on 3 November 2026 did not find that pair.
+On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `fp8_e4m3` keys and values and MTP off passed the text coding agent.
+
+- Thinking on, vision off, recorded 836.90 tok/s prefill and 25.94 tok/s decode.
+- A search on 3 November 2026 did not find that pair.
 
 ## Predecessors
 
@@ -18,12 +21,17 @@ On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `fp8_e4m3` keys and values an
 
 ## Rule
 
-MTP is off. Thinking on uses the thinking card. The banner prints the loaded plane. This row is the run whose banner printed `kv fp8_e4m3`, `mtp off`, `thinking on`, and `vision off`. A banner that prints `half` or `vision on` is a different row. Request 2 loaded the prefix from disk.
+- MTP is off.
+- Thinking on uses the thinking card.
+- The banner prints the loaded plane.
+- This row is the run whose banner printed `kv fp8_e4m3`, `mtp off`, `thinking on`, and `vision off`.
+- A banner that prints `half` or `vision on` is a different row.
+- Request 2 loaded the prefix from disk.
 
 ## Command
 
 ```text
-uv run python -m harness.coding --model gemma4-26b-a4b --thinking on
+uv run python -m harness.coding --model gemma4_26b_a4b --thinking on
 ```
 
 The banner prints the loaded plane, MTP, thinking, and vision.

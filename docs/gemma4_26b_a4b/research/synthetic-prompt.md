@@ -24,8 +24,11 @@ A search on 4 November 2026 did not find that table.
 
 ## Rule
 
-MTP is off. The banner also prints depth 3; that depth is unused while MTP is off. Thinking is off. This pipeline maps `reasoning.effort` `none` onto the instruct card (`minimal`). The banner prints the loaded plane.
-
+- MTP is off.
+- The banner also prints depth 3; that depth is unused while MTP is off.
+- Thinking is off.
+- This pipeline maps `reasoning.effort` `none` onto the instruct card (`minimal`).
+- The banner prints the loaded plane.
 - Each measured prompt is one user message and encodes to that length under the chat template, including the template tokens.
 - A 64-token warmup runs first.
 - The measured prompts start with different labels, so each prefill is a cache miss.
@@ -38,7 +41,7 @@ MTP is off. The banner also prints depth 3; that depth is unused while MTP is of
 ## Command
 
 ```text
-uv run python -m harness.synthetic --model gemma4-26b-a4b
+uv run python -m harness.synthetic --model gemma4_26b_a4b
 ```
 
 The banner prints the loaded plane, MTP, thinking, and the decode cap.

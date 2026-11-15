@@ -4,7 +4,11 @@ Measurement note for the `gemma4_26b_a4b` pipeline. The serving contract is [../
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `fp8_e4m3` keys and values and MTP off passed the vision coding agent. Thinking recorded 274.02 tok/s prefill and 8.49 tok/s decode. Instruct recorded 276.61 tok/s prefill and 9.11 tok/s decode. A search on 3 November 2026 did not find that table.
+On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `fp8_e4m3` keys and values and MTP off passed the vision coding agent.
+
+- Thinking recorded 274.02 tok/s prefill and 8.49 tok/s decode.
+- Instruct recorded 276.61 tok/s prefill and 9.11 tok/s decode.
+- A search on 3 November 2026 did not find that table.
 
 ## Predecessors
 
@@ -19,8 +23,9 @@ On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `fp8_e4m3` keys and values an
 
 ## Rule
 
-MTP is off. The still is the first chat, `detail` `auto`, `tool_choice` `none`. The ledger is the next chat on that session.
-
+- MTP is off.
+- The still is the first chat, `detail` `auto`, `tool_choice` `none`.
+- The ledger is the next chat on that session.
 - Thinking on uses the thinking card.
 - Thinking off uses the instruct card.
 - The banner prints the loaded plane.
@@ -31,8 +36,8 @@ MTP is off. The still is the first chat, `detail` `auto`, `tool_choice` `none`. 
 ## Command
 
 ```text
-uv run python -m harness.coding --model gemma4-26b-a4b --vision --thinking on
-uv run python -m harness.coding --model gemma4-26b-a4b --vision --thinking off
+uv run python -m harness.coding --model gemma4_26b_a4b --vision --thinking on
+uv run python -m harness.coding --model gemma4_26b_a4b --vision --thinking off
 ```
 
 The banner prints the loaded plane, MTP, thinking, and vision.

@@ -9,7 +9,8 @@ Summary for the `qwen36_35b_a3b` language pipeline. Kernels, the packed record, 
 - The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B).
 - Those weights are under the Apache License, Version 2.0.
 - Registration sets `default_variant` to `thinking` and `mtp_depth` to 3 unless the request overrides them.
-- The served context window is 131072 tokens; the default packed record is `Qwen3.6-35B-A3B-fp8-e20`.
+- The served context window is 131072 tokens.
+- The default packed record is `Qwen3.6-35B-A3B-fp8-e20`.
 
 After changing an open-time registry field, unload the resident model:
 
@@ -87,12 +88,12 @@ From another terminal:
 ```bash
 curl http://127.0.0.1:8129/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen36-35b-a3b:instruct","input":"Hello"}'
+  -d '{"model":"qwen36_35b_a3b:instruct","input":"Hello"}'
 ```
 
 - `GET /v1/models` lists the registered ids.
 - A bare `qwen36_35b_a3b` uses the thinking card (temperature 1.0, top-p 0.95, top-k 20, presence penalty 1.5, `reasoning_effort` `high`).
-- `qwen36-35b-a3b:instruct` uses temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5, and `reasoning_effort` `none`.
+- `qwen36_35b_a3b:instruct` uses temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5, and `reasoning_effort` `none`.
 - A request `reasoning.effort` wins when set (`none` or `high`; the other listed names map onto those).
 - When the request omits effort, the selected variant's `reasoning_effort` is used.
 - The server does not check an API key.
@@ -133,7 +134,7 @@ uv run favlo --qwen36_35b_a3b setup --repo example-org/example-model --expert-fp
 `setup` does not pack MTP. `mtp-fp8` adds it to a finished record from a local checkout. Every MTP routed expert and the dense MTP matrices are stored as fp8. Language experts stay as packed. The checkout is left in place. A record that already has those weights can keep them.
 
 ```bash
-uv run favlo --qwen36_35b_a3b mtp-fp8 --src /path/to/checkout --record models/Qwen3.6-35B-A3B-fp8-e20
+uv run favlo --qwen36_35b_a3b mtp-fp8 --src models/example-model --record models/Qwen3.6-35B-A3B-fp8-e20
 ```
 
 ### Another checkpoint
@@ -167,7 +168,7 @@ That registers `example-model` and stores `models/example-model` on the row. The
 
 ```bash
 uv run favlo --qwen36_35b_a3b delete example-model-fp8-e20
-uv run favlo --qwen36_35b_a3b delete qwen36-35b-a3b
+uv run favlo --qwen36_35b_a3b delete qwen36_35b_a3b
 ```
 
 - `delete` takes the folder name or the alias.
@@ -179,6 +180,7 @@ uv run favlo --qwen36_35b_a3b delete qwen36-35b-a3b
 
 ## Further reading
 
+- [ARCHITECTURE.md](ARCHITECTURE.md) — kernels, packed record, forward, registry
 - [ceilings.md](ceilings.md) — kernel and bandwidth ceilings
 - [performance.md](performance.md) — recorded prefill and decode rates
 - [benchmarks.md](benchmarks.md) — harness scores

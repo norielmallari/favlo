@@ -4,7 +4,10 @@ Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHI
 
 ## Remainder
 
-On an M5 Pro with 48 GB, one command buffer per kernel, then a wait, the decode gemv and listed elementwise sum is 53018.9 µs, 18.86 tok/s, at context 2048. The bandwidth ceiling of that token is 67.22 tok/s. The last full-chunk prefill composition under half×fp8 dense tiles is 241125.0 µs, 1061.69 tok/s, for a 256-token chunk. A search on 2 November 2026 did not find that decode sum.
+- On an M5 Pro with 48 GB, one command buffer per kernel, then a wait, the decode gemv and listed elementwise sum is 53018.9 µs, 18.86 tok/s, at context 2048.
+- The bandwidth ceiling of that token is 67.22 tok/s.
+- The last full-chunk prefill composition under half×fp8 dense tiles is 241125.0 µs, 1061.69 tok/s, for a 256-token chunk.
+- A search on 2 November 2026 did not find that decode sum.
 
 ## Predecessors
 

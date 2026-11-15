@@ -1,34 +1,28 @@
 # Gemma 4 26B-A4B
 
-Summary for the `gemma4_26b_a4b` pipeline. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). As-built detail is in [ARCHITECTURE.md](ARCHITECTURE.md).
+Summary for the `gemma4_26b_a4b` language pipeline. Kernels, the packed record, the forward path, chat template, and registry fields are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-`handle_responses` is a `LanguagePipeline`.
+- `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
+- After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
+- `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`, which loads `gemma4_26b_a4b.metal41`.
 
-- The completion, sampler, and stream read a Responses body.
-- The listener maps Chat Completions in and out.
-- Clients use `favlo serve`.
-- `GET /v1/models` runs after registration.
-- `model` on `POST /v1/responses` selects the pipeline.
-- `plan`, `quantize`, `kernels`, and `complete` need `favlo --gemma4_26b_a4b`.
-- That flag loads `gemma4_26b_a4b.metal41`.
+- The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it).
+- Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license).
+- A bare `gemma4_26b_a4b` uses the thinking card unless the request names instruct.
+- Registration sets `kv_cache` to `half`.
+- The served window stops at 131072 tokens.
+- The default packed record is `gemma-4-26B-A4B-it-fp8-e20`.
+- `quantize` does not download.
 
-The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it), under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license).
-
-A bare `gemma4_26b_a4b` id uses the thinking card unless the request names instruct.
-
-After a registry field change on the packed folder, close the resident model:
+After changing an open-time registry field, unload the resident model:
 
 ```text
 uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 ```
 
-[ARCHITECTURE.md](ARCHITECTURE.md) holds kernels, the packed record, forward order, and registry fields.
-
 ## Setup
 
 How to pack and talk to `gemma4_26b_a4b`. The kernel contract is [ARCHITECTURE.md](ARCHITECTURE.md). The listener is [../serve.md](../serve.md). Pointing a client at the server is [../guides/clients.md](../guides/clients.md).
-
-The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it). Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license).
 
 ### What you need
 
@@ -42,13 +36,15 @@ The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/go
 
 `plan` prints the packed sizes:
 
-- Resident 2.824 GiB
-- Metal half vectors 0.066 GiB
-- Expert images 13.833 GiB
+- `resident` 2.824 GiB
+- `half` 0.066 GiB
+- `experts` 13.833 GiB
 
-Registration sets `kv_cache` to `half`. The checkout stays after `quantize`.
+The checkout stays after `quantize`.
 
-16 GB and 24 GB run in degraded mode. The runtime keeps as many expert layers as fit and reads the rest from the record. 8 GB is not enough to run a model capable of real-world agentic workflows.
+- 16 GB and 24 GB run in degraded mode.
+- The runtime keeps as many expert layers as fit and reads the rest from the record.
+- 8 GB is not enough to run a model capable of real-world agentic workflows.
 
 ### Install
 
@@ -58,10 +54,7 @@ From a checkout of this repository:
 uv sync --extra dev
 ```
 
-This checkout is release 0.6.0. PyPI publishes the runtime under `src/favlo`.
-
-- The pipelines stay in this checkout.
-- Later commands use `uv run favlo` from that checkout.
+This checkout is release 0.6.0. PyPI publishes the runtime under `src/favlo`. The pipelines stay in this checkout, so later commands use `uv run favlo` from that checkout.
 
 ### Pack
 
@@ -107,13 +100,17 @@ From another terminal:
 ```bash
 curl http://127.0.0.1:8129/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gemma4-26b-a4b:instruct","input":"Hello"}'
+  -d '{"model":"gemma4_26b_a4b:instruct","input":"Hello"}'
 ```
 
-`GET /v1/models` lists the public ids `gemma4_26b_a4b`, `gemma4-26b-a4b:thinking`, and `gemma4-26b-a4b:instruct`. The packed folder name is not a request id. A bare `gemma4_26b_a4b` uses the thinking card.
-
-Both cards are temperature 0.95, top-p 0.95, top-k 64, and presence penalty 0. The thinking card stores `reasoning_effort` `high`. The instruct card stores `minimal`. A request that omits effort uses that card's effort. A request that sets `reasoning.effort` still keeps the selected card's sampler numbers.
-
+- `GET /v1/models` lists `gemma4_26b_a4b`, `gemma4_26b_a4b:thinking`, and `gemma4_26b_a4b:instruct`.
+- The packed folder name is not a request id.
+- A bare `gemma4_26b_a4b` uses the thinking card.
+- Both cards are temperature 0.95, top-p 0.95, top-k 64, and presence penalty 0.
+- The thinking card stores `reasoning_effort` `high`.
+- The instruct card stores `minimal`.
+- A request that omits effort uses that card's effort.
+- A request that sets `reasoning.effort` still keeps the selected card's sampler numbers.
 - A request `preserve_thinking` value is ignored.
 - A tool-call thought stays on the next user turn.
 - A plain assistant thought drops.
@@ -131,9 +128,12 @@ uv run favlo --gemma4_26b_a4b complete
 
 ### If quantize stops
 
-Run the same command again. Files already written stay on disk, and the next run continues from them. A missing checkout is the `missing checkpoint` line. A tensor the Gemma 4 map does not name stops the pack.
+- Run the same command again.
+- Files already written stay on disk, and the next run continues from them.
+- A missing checkout is the `missing checkpoint` line.
+- A tensor the Gemma 4 map does not name stops the pack.
 
-## Related
+## Further reading
 
 - [ceilings.md](ceilings.md) — bandwidth and kernel ceilings
 - [benchmarks.md](benchmarks.md) — harness scores

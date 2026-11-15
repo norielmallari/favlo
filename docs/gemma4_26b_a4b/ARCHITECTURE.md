@@ -1,19 +1,19 @@
-# Gemma 4 26B-A4B
+# Architecture
 
-This file is the as-built detail for the `gemma4_26b_a4b` pipeline. [README.md](README.md) is the summary. Pack and the first chat are [README.md](README.md). The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
+As-built detail for the `gemma4_26b_a4b` package. [README.md](README.md) is the summary. The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). This directory wins for this pipeline's records and kernels. Another pipeline does not edit it.
 
-`handle_responses` is a `LanguagePipeline`.
-
+- `handle_responses` is a `LanguagePipeline`.
 - The completion, the sampler, and the stream stay in this package and read a Responses body.
 - The listener translates a Chat Completions body into that request and translates the Response back.
 - Clients reach this pipeline through `favlo serve`.
-- `GET /v1/models` lists it once a record is registered.
-- The `model` field on `POST /v1/responses` loads it.
+- `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/responses` loads it.
 - `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`.
 - That flag loads `gemma4_26b_a4b.metal41`.
 
-The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it). Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license). `quantize` does not download. With no `--src` it reads `models/gemma-4-26B-A4B-it`.
-
+- The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it).
+- Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license).
+- `quantize` does not download.
+- With no `--src` it reads `models/gemma-4-26B-A4B-it`.
 - Device spans come from `device_buffer`.
 - `open_runtime` takes `owner` and every span from that opening uses it.
 - `close` sweeps that string.
@@ -30,7 +30,8 @@ The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/go
 - The opening refuses when one layer file does not fit.
 - A request logs prompt tokens, a cache hit or miss, and the prefill and decode counts while those phases run.
 - Each count posts onto `favlo.host_progress`; that host thread builds the fact for the console queue, and the CLI thread paints it.
-- The prefill count stays short of the prompt until that command buffer has finished. The host publishes the count after the wait.
+- The prefill count stays short of the prompt until that command buffer has finished.
+- The host publishes the count after the wait.
 - The embedding and the dense projections are fp8.
 - Decode reads those in `embed_fp8` and `gemv_fp8`, and the routed experts in `gemv_fp4_at` and `gemv_fp8_at`.
 - Prefill restores each dense projection into an int8 stage for the chunk tile.
@@ -38,8 +39,9 @@ The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/go
 
 ## Registry
 
-The row key in `models/registry.json` is the packed folder, `gemma-4-26B-A4B-it-fp8-e20`. The alias `gemma4_26b_a4b` is the public id and is not the key. The packed folder is not a request id while the alias is set.
-
+- The row key in `models/registry.json` is the packed folder, `gemma-4-26B-A4B-it-fp8-e20`.
+- The alias `gemma4_26b_a4b` is the public id and is not the key.
+- The packed folder is not a request id while the alias is set.
 - Write the field on that folder and save.
 - `set_alias` takes the folder.
 - A field marked open is copied when the pipeline process starts, so close the resident model after the write.
@@ -70,11 +72,15 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 | `max_prompt_tokens` | listing | A positive integer. The usage prompt cap. Registration leaves the key off. The next completion reads the file. The served window stays 131072. |
 | `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
 
-`variants` accepts only `thinking` and `instruct`. A third name is listed and does not select its own card. A request `temperature` or `top_p` replaces the card for that call. `top_k` and the presence penalty stay on the card. Changing the effort does not swap the card.
-
-The file key `default` is the id harnesses and `favlo web` use when none is named. The first language registration writes `gemma4_26b_a4b:instruct`. A stored value stays until it is replaced.
-
-`pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity.
+- `variants` accepts only `thinking` and `instruct`.
+- A third name is listed and does not select its own card.
+- A request `temperature` or `top_p` replaces the card for that call.
+- `top_k` and the presence penalty stay on the card.
+- Changing the effort does not swap the card.
+- The file key `default` is the id harnesses and `favlo web` use when none is named.
+- The first language registration writes `gemma4_26b_a4b:instruct`.
+- A stored value stays until it is replaced.
+- `pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity.
 
 - `runtime` is `metal41`, `cuda`, or `portable`.
 - `serve` opens `directory` and imports `{pipeline}.{runtime}`.
@@ -87,8 +93,7 @@ The file key `default` is the id harnesses and `favlo web` use when none is name
 
 ## Kernels
 
-`kernels` compiles this package's shader library and dispatches one fp8 `matmul2d`, one fp4 `matmul2d`, one Metal half `matmul2d`, and one int8 prefill tile.
-
+- `kernels` compiles this package's shader library and dispatches one fp8 `matmul2d`, one fp4 `matmul2d`, one Metal half `matmul2d`, and one int8 prefill tile.
 - The fp8 and fp4 left operand is Metal half, the destination is float32, and a quantized right-hand tensor is dequantized inside the op.
 - The int8 path restores a packed fp8 matrix into a per-row int8 stage, quantizes a float or half activation, multiplies with `prefill_i8_n64`, and scales the int32 product back to float.
 - The fp8 and fp4 checks compare that product with the packed restore.
@@ -98,8 +103,8 @@ The file key `default` is the id harnesses and `favlo web` use when none is name
 
 ## Record
 
-`plan` prints packed sizes from the checkpoint shapes. `quantize` streams a local bfloat16 checkout into `models/gemma-4-26B-A4B-it-fp8-e20`.
-
+- `plan` prints packed sizes from the checkpoint shapes.
+- `quantize` streams a local bfloat16 checkout into `models/gemma-4-26B-A4B-it-fp8-e20`.
 - Resident matrices, including the token embedding, are fp8 E4M3 with one E8M0 scale per 32 values.
 - Routed experts are quantized from that bfloat16 checkout.
 - Each expert is scored by the fp4 relative RMS of its gate-up and of its down projection, and the score is the larger of the two.
@@ -117,8 +122,7 @@ The file key `default` is the id harnesses and `favlo web` use when none is name
 - The 128 experts of a layer are packed together, and a resident matrix of 8192 or more rows is packed in row spans of 8192.
 - Each worker uses one BLAS thread.
 
-`plan` reports resident matrices of 3,032,502,528 bytes, scratch of 0 bytes, Metal half vectors of 70,474,908 bytes, and expert images of 14,853,341,184 bytes.
-
+- `plan` reports resident matrices of 3,032,502,528 bytes, scratch of 0 bytes, Metal half vectors of 70,474,908 bytes, and expert images of 14,853,341,184 bytes.
 - Routed experts stay in `experts/<layer>.bin`.
 - A layer file is 128 expert images in expert-index order.
 - An image is that expert's gate-up data, its E8M0 scales, the down data, and its scales.

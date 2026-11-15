@@ -2,11 +2,15 @@
 
 Kernel and bandwidth ceilings are in [ceilings.md](ceilings.md). The pipeline contract is [ARCHITECTURE.md](ARCHITECTURE.md).
 
-The file-agent series and the coding-agent series stay separate. Prefill is the summed suffix time. Decode is the summed sampled-token time.
+- The file-agent series and the coding-agent series stay separate.
+- Prefill is the summed suffix time.
+- Decode is the summed sampled-token time.
 
 ## Recorded file-reading run
 
-The rates below are from a finished file-reading run on the earlier fp4 record. The prompt reached 73810 tokens over five requests. The request set temperature 0 and left thinking on.
+- The rates below are from a finished file-reading run on the earlier fp4 record.
+- The prompt reached 73810 tokens over five requests.
+- The request set temperature 0 and left thinking on.
 
 | Request | Prompt tokens | Cache | Prefill | Decode |
 |---|---:|---|---|---|
@@ -24,7 +28,9 @@ The rates below are from a finished file-reading run on the earlier fp4 record. 
 
 ## File agent
 
-Instruct card. `enable_thinking` is false. Omitted sampling fields come from that card. The command is:
+- Instruct card. `enable_thinking` is false.
+- Omitted sampling fields come from that card.
+- Historical harness id (hyphen). Live CLI uses `qwen36_35b_a3b`.
 
 ```text
 uv run python -m harness --model qwen36-35b-a3b
@@ -66,7 +72,9 @@ One resident load of the earlier fp4 record then applied four chunks in order. T
 
 ## Coding agent
 
-Thinking card. `enable_thinking` is true. Omitted sampling fields come from that card. The command is:
+- Thinking card. `enable_thinking` is true.
+- Omitted sampling fields come from that card.
+- Historical harness id (hyphen). Live CLI uses `qwen36_35b_a3b`.
 
 ```text
 uv run python -m harness.coding --model qwen36-35b-a3b
@@ -189,7 +197,9 @@ On 1 November 2026 the same smoke ran on that machine and record. The greedy car
 
 ## File agent, 16GiB
 
-Same instruct card as the file agent above, on the earlier fp4 record. The command passes a memory cap, so the atlas holds fewer than every expert image:
+- Same instruct card as the file agent above, on the earlier fp4 record.
+- The command passes a memory cap, so the atlas holds fewer than every expert image.
+- Historical harness id (hyphen). Live CLI uses `qwen36_35b_a3b`.
 
 ```text
 uv run python -m harness --model qwen36-35b-a3b --max-memory 16GiB
@@ -208,7 +218,9 @@ The summary is prefill 493.77 tok/s (88004 tok in 178.23 s) and decode 29.72 tok
 
 ## Coding agent, 16GiB
 
-Same thinking card as the coding agent above, on the earlier fp4 record. The hidden suite passed. The command is:
+- Same thinking card as the coding agent above, on the earlier fp4 record.
+- The hidden suite passed.
+- Historical harness id (hyphen). Live CLI uses `qwen36_35b_a3b`.
 
 ```text
 uv run python -m harness.coding --model qwen36-35b-a3b --max-memory 16GiB
@@ -230,6 +242,8 @@ The summary is prefill 134.29 tok/s (419 tok in 3.12 s) and decode 34.19 tok/s (
 - Each prompt was one user message, a cache miss, and the instruct card.
 - Decode was capped at 128 tokens.
 - The end-to-end column adds the prefill tokens to the decode tokens and adds those two clocks.
+
+Historical harness id (hyphen). Live CLI uses `qwen36_35b_a3b`.
 
 ```text
 uv run python -m harness.synthetic --model qwen36-35b-a3b

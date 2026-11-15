@@ -91,7 +91,7 @@ Dense hybrid text backbone: 24 Gated DeltaNet layers and 8 full-attention layers
 - `half` remains accepted (Metal `half`, two bytes per element, no scale plane).
 - Both live planes are token-major `[position, kv_head, channel]` (with an E8M0 scale plane for `fp8_e4m3`).
 
-- The SSD prefix store under `~/.favlo/prefix/qwen35-4b/` writes that same layout for positions `0 .. count-1` as regions `k.0`…`k.7` and `v.0`…`v.7`, plus `history` (convolution taps), `state` (Gated DeltaNet), and `rope` (the M-RoPE position delta).
+- The SSD prefix store under `~/.favlo/prefix/qwen35_4b/` writes that same layout for positions `0 .. count-1` as regions `k.0`…`k.7` and `v.0`…`v.7`, plus `history` (convolution taps), `state` (Gated DeltaNet), and `rope` (the M-RoPE position delta).
 - An exact-length file is not sampled; the next token is still stepped.
 - With `preserve_thinking` off, prefill stops at the latest user message and stores that prefix before the generation suffix.
 - That user-turn file is pinned.

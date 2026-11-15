@@ -9,7 +9,8 @@
 
 ## Remainder
 
-One command buffer per kernel, then a wait, summed without overlap, is 97.25 tok/s for one decode token at context 2048 and 815.71 tok/s for a 65536-token prefill. A search on 21 October 2026 did not find that sum.
+- One command buffer per kernel, then a wait, summed without overlap, is 97.25 tok/s for one decode token at context 2048 and 815.71 tok/s for a 65536-token prefill.
+- A search on 21 October 2026 did not find that sum.
 
 ## Predecessors
 

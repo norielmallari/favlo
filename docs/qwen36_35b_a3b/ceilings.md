@@ -11,9 +11,12 @@
 - Of the 10,240 routed experts, 2,048 are fp8 and 8,192 are fp4.
 - A decode token reads eight images per layer, counted at that pool mix: 64 fp8 and 256 fp4 of the 320 images.
 
-Each time is one command buffer, then a wait. Overlapping command buffers are not added. The times are the median of four samples after one discarded sample.
-
-A 2 GiB streaming read finished in 7093.5 µs, 302.74 GB/s. The bandwidth ceiling divides bytes by 302.74 GB/s. The value-mix timing uses token stride 262144, the position limit.
+- Each time is one command buffer, then a wait.
+- Overlapping command buffers are not added.
+- The times are the median of four samples after one discarded sample.
+- A 2 GiB streaming read finished in 7093.5 µs, 302.74 GB/s.
+- The bandwidth ceiling divides bytes by 302.74 GB/s.
+- The value-mix timing uses token stride 262144, the position limit.
 
 ## Decode
 

@@ -4,7 +4,10 @@ Measurement note for the `gemma4_26b_a4b` pipeline. The serving contract is [../
 
 ## Remainder
 
-On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `fp8_e4m3` keys and values, MTP off, and thinking off passed a 65536-token page needle at depth 0.5. Prefill summed to 54.25 tok/s and decode to 1.30 tok/s. A search on 3 November 2026 did not find that table.
+On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `fp8_e4m3` keys and values, MTP off, and thinking off passed a 65536-token page needle at depth 0.5.
+
+- Prefill summed to 54.25 tok/s and decode to 1.30 tok/s.
+- A search on 3 November 2026 did not find that table.
 
 ## Predecessors
 
@@ -17,14 +20,23 @@ On an M5 Pro with 48 GB, `gemma-4-26B-A4B-it` with `fp8_e4m3` keys and values, M
 
 ## Rule
 
-`--mode page` is the default. Thinking is off. MTP is off. Seed is 0. Depth is 0.5. The loaded plane is the registry `kv_cache` after aliases. An omitted registry cache uses `fp8_e4m3`. This table is the row whose banner printed `kv fp8_e4m3`, `mtp off`, `thinking off`, and `mode page`. A banner that prints `half`, `mtp on`, thinking on, or another depth is a different row.
-
-The file is replayed inside tool results, so the finished transcript has to fit the served window. This run closed at 45000 prompt tokens over five requests. Four reads reached the needle line.
+- `--mode page` is the default.
+- Thinking is off.
+- MTP is off.
+- Seed is 0.
+- Depth is 0.5.
+- The loaded plane is the registry `kv_cache` after aliases.
+- An omitted registry cache uses `fp8_e4m3`.
+- This table is the row whose banner printed `kv fp8_e4m3`, `mtp off`, `thinking off`, and `mode page`.
+- A banner that prints `half`, `mtp on`, thinking on, or another depth is a different row.
+- The file is replayed inside tool results, so the finished transcript has to fit the served window.
+- This run closed at 45000 prompt tokens over five requests.
+- Four reads reached the needle line.
 
 ## Command
 
 ```text
-uv run python -m harness.needle --model gemma4-26b-a4b --tokens 65536 --depth 0.5 --mtp off --thinking off --mode page
+uv run python -m harness.needle --model gemma4_26b_a4b --tokens 65536 --depth 0.5 --mtp off --thinking off --mode page
 ```
 
 The banner prints the loaded plane, MTP, thinking, and mode.

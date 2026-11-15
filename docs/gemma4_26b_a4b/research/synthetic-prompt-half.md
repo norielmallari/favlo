@@ -24,8 +24,11 @@ A search on 15 November 2026 did not find that table.
 
 ## Rule
 
-MTP is off. The banner also prints depth 3; that depth is unused while MTP is off. Thinking is off. This pipeline maps `reasoning.effort` `none` onto the instruct card (`minimal`). The banner prints the loaded plane.
-
+- MTP is off.
+- The banner also prints depth 3; that depth is unused while MTP is off.
+- Thinking is off.
+- This pipeline maps `reasoning.effort` `none` onto the instruct card (`minimal`).
+- The banner prints the loaded plane.
 - Each measured prompt is one user message and encodes to that length under the chat template, including the template tokens.
 - A 64-token warmup runs first.
 - The measured prompts start with different labels, so each prefill is a cache miss.

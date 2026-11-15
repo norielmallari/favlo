@@ -25,8 +25,8 @@ MTP is off. Thinking on uses the thinking card. Thinking off uses the instruct c
 ## Command
 
 ```text
-uv run python -m harness.coding --model qwen38-27b --vision --thinking on
-uv run python -m harness.coding --model qwen38-27b --vision --thinking off
+uv run python -m harness.coding --model qwen38_27b --vision --thinking on
+uv run python -m harness.coding --model qwen38_27b --vision --thinking off
 ```
 
 The banner prints the loaded plane, MTP, thinking, and vision.
