@@ -1,7 +1,7 @@
 """Read shared package sources until the prompt reaches a token target.
 
-A Microsoft Agent Framework agent calls ``read_file``, then analyzes the file
-it got back. The corpus is ``src/favlo`` only, so the ladder does not depend on
+A Microsoft Agent Framework agent calls ``read_file``, then replies in two or
+three sentences. The corpus is ``src/favlo`` only, so the ladder does not depend on
 any pipeline package. The model id is the pipeline name under test.
 ``--thinking off`` sets ``reasoning.effort`` to ``none`` and opens the
 ``:instruct`` card. ``--thinking on`` sets ``reasoning.effort`` to ``medium``
@@ -43,9 +43,10 @@ SHARED_PACKAGE = Path("src") / "favlo"
 INSTRUCTIONS = (
     "You are a repository agent. Call read_file with the path the user names. "
     "Use the files already returned before that call. "
-    "After the file comes back, say what it does and how it relates to those "
-    "files, then reply with that analysis."
+    "After the file comes back, reply in two or three sentences about what it does."
 )
+# Room for a short think plus that reply. The prefix check does not read the text.
+REPLY_TOKENS = 256
 SKIP_PARTS = frozenset(
     {
         ".git",
@@ -494,7 +495,7 @@ def _read_tool(root: Path, allowed: set[str], loaded: list[str], task: dict[str,
         """Return one shared package source file."""
         text = read_repository_file(root, path, allowed, task.get("path"))
         loaded.append(path)
-        return text + "\n\nThe file is above. Reply with the analysis of this file."
+        return text + "\n\nThe file is above. Reply in two or three sentences."
 
     return read_file
 
@@ -621,6 +622,7 @@ def _open_agent(
     options: dict[str, object] = {
         "tool_choice": {"mode": "required", "required_function_name": "read_file"},
         "reasoning": {"effort": "medium" if thinking else "none"},
+        "max_tokens": REPLY_TOKENS,
     }
     extra: dict[str, object] = {"preserve_thinking": bool(preserve_thinking)}
     if mtp is not None:
