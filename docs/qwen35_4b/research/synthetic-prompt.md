@@ -74,3 +74,26 @@ uv run python -m harness.synthetic --model qwen35-4b --tokens 2048 --decode 128 
 | Prompt tokens | Prefill | Decode | End to end |
 |---:|---|---|---|
 | 2048 | 1471.55 tok/s (2048 tok in 1.39 s) | 26.63 tok/s (128 tok in 4.81 s) | 350.97 tok/s (2176 tok in 6.20 s) |
+
+### 15 November 2026 — protocol lengths
+
+Same pack, MTP off, and the instruct card. Temperature is 0. Each prefill is a cache miss. Decode is 128 tokens at every length. The packed folder is `Qwen3.5-4B-fp8`. Language matrices are fp8. Keys and values are `fp8_e4m3`. The banner printed depth 3; that depth is unused while MTP is off.
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 1322.13 tok/s (512 tok in 0.39 s) | 40.37 tok/s (128 tok in 3.17 s) | 179.78 tok/s (640 tok in 3.56 s) |
+| 1024 | 1457.07 tok/s (1024 tok in 0.70 s) | 36.19 tok/s (128 tok in 3.54 s) | 271.70 tok/s (1152 tok in 4.24 s) |
+| 4096 | 1278.14 tok/s (4096 tok in 3.20 s) | 23.41 tok/s (128 tok in 5.47 s) | 487.20 tok/s (4224 tok in 8.67 s) |
+| 10000 | 874.93 tok/s (10000 tok in 11.43 s) | 13.61 tok/s (128 tok in 9.40 s) | 486.22 tok/s (10128 tok in 20.83 s) |
+
+```text
+uv run python -m harness.synthetic --model qwen35_4b --thinking off --mtp off
+```
+
+15 November 2026. Queries: "1322.13 OR 1457.07 OR 1278.14 OR 874.93 Qwen3.5-4B prefill tok/s", and "Qwen3.5-4B M5 Pro pp512 tg128 OR pp1024 OR pp4096 fp8 OR 8bit prefill tok/s 2026". The search did not find 1322.13, 1457.07, 1278.14, or 874.93.
+
+- [oMLX Qwen3.5-4B-8bit on a 20-core M5 Pro with 48 GB](https://omlx.ai/benchmarks/performance/zocwcytw) reports 2105 tok/s prefill and 57.2 tok/s decode at 1024 tokens. The same session at 4096 tokens is [x0t6bie9](https://omlx.ai/benchmarks/performance/x0t6bie9), 2643 tok/s prefill and 55.4 tok/s decode.
+- [oMLX Qwen3.5-4B-MLX-8bit on a 20-core M5 Pro with 48 GB](https://omlx.ai/benchmarks/performance/xozhrdwg) reports 2481 tok/s prefill and 54.3 tok/s decode at 1024 tokens, and 2630 tok/s prefill and 51.5 tok/s decode at 4096 tokens.
+- [Token Atlas](https://tokatlas.github.io/models/qwen3-5-4b/) lists an oMLX 4-bit row on an M5 Pro at 2579 tok/s prefill and 98.7 tok/s decode at 1024 tokens, and 2919 tok/s prefill and 84.0 tok/s decode at 16384 tokens. That page has no 10000-token row.
+- [mac-llm-bench on base M5](https://github.com/enescingoz/mac-llm-bench/blob/main/results/m5/base/speed/README.md) reports 1074.2 tok/s at pp512 and 48.7 tok/s at tg128 for Qwen3.5-4B-4bit under MLX. That machine is not an M5 Pro.
+- None of them is this `fp8_e4m3` table. The 512, 2048, and 10000 rows above stay the earlier measurements.

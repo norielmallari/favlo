@@ -60,4 +60,4 @@ A bare `qwen35_4b` id uses the thinking variant unless the request names `:instr
 - [research/coding-agent.md](research/coding-agent.md) — vision coding agent
 - [research/coding-agent-mtp.md](research/coding-agent-mtp.md) — coding agent with MTP
 - [research/coding-text.md](research/coding-text.md) — text coding agent
-- [research/synthetic-prompt.md](research/synthetic-prompt.md) — synthetic-prompt run
+- [research/synthetic-prompt.md](research/synthetic-prompt.md) — cold 512, 1024, 4096, and 10000-token prompts on fp8 weights and `fp8_e4m3` keys and values

@@ -1,6 +1,18 @@
 # Research
 
-Catalog of measured claims. One row is one note. The note holds the table, the predecessors, and the command. This file does not restate them.
+Active models is the comparison table for a protocol-complete synthetic run. The catalog is one row per note. The note holds the table, the predecessors, and the command. The catalog does not restate them. Active models prints the four rate pairs. The note keeps the clocks, the command, and the search.
+
+## Active models
+
+Instruct, temperature 0, decode filled to 128, on an M5 Pro with 48 GB. Rates are tok/s, prefill then decode. A row is a protocol-complete `harness.synthetic` run: lengths 512, 1024, 4096, and 10000, a cold prefill, and the instruct card. 512 is the llama.cpp and MLX length. 1024 and 4096 are the oMLX lengths. 10000 is the hosted-API prompt length.
+
+The model cell is `<id>, MTP off`, or `<id>, MTP on, depth <n>`. Weights is the loaded mix. KV is the resolved key/value plane. A new protocol run replaces the row with the same pipeline, weights, KV, and MTP label. A new weight mix or key/value plane replaces the previous Active row for that pipeline and MTP label, and the previous mix's note goes back to the catalog. MTP on does not replace MTP off. A thinking-on run stays in the catalog.
+
+| Model | Weights | KV | 512 | 1024 | 4096 | 10000 | Measured | Note |
+|---|---|---|---|---|---|---|---|---|
+| `qwen35_4b, MTP off` | fp8 | `fp8_e4m3` | 1322.13 / 40.37 | 1457.07 / 36.19 | 1278.14 / 23.41 | 874.93 / 13.61 | 2026-11-15 | [docs/qwen35_4b/research/synthetic-prompt.md](docs/qwen35_4b/research/synthetic-prompt.md) |
+
+## Catalog
 
 `measured` means the serving note is unchanged. `shipped` means that note describes the behavior. `narrowed` means a correction was appended to the note. A row stays.
 
@@ -58,4 +70,3 @@ Catalog of measured claims. One row is one note. The note holds the table, the p
 | `coding-agent` | `qwen35_4b` | narrowed | 2026-11-05 |  | 2026-11-05 | On an M5 Pro with 48 GB, `fp8_e4m3` MTP off passed the vision coding agent at 1416.98 / 27.46 tok/s (thinking) and 1414.22 / 27.24 tok/s (instruct). | [docs/qwen35_4b/research/coding-agent.md](docs/qwen35_4b/research/coding-agent.md) |
 | `coding-agent-mtp` | `qwen35_4b` | narrowed | 2026-11-15 |  | 2026-11-15 | On an M5 Pro with 48 GB, `fp8_e4m3` MTP on at depth 3 passed the vision coding agent on the thinking card at 560.55 / 18.04 tok/s; the instruct card stays 1469.46 / 23.91 tok/s. | [docs/qwen35_4b/research/coding-agent-mtp.md](docs/qwen35_4b/research/coding-agent-mtp.md) |
 | `coding-text` | `qwen35_4b` | measured | 2026-11-15 |  | 2026-11-15 | On an M5 Pro with 48 GB, `fp8_e4m3` MTP off passed the text coding agent, thinking on and vision off, at 738.46 tok/s prefill and 28.26 tok/s decode. | [docs/qwen35_4b/research/coding-text.md](docs/qwen35_4b/research/coding-text.md) |
-| `synthetic-prompt` | `qwen35_4b` | narrowed | 2026-11-15 |  | 2026-11-15 | On an M5 Pro with 48 GB, `fp8_e4m3` MTP off instruct prefilled a cold 2048-token prompt at 1471.55 tok/s and decoded 128 tokens at 26.63 tok/s; the 512 and 10000 rows stay 2239.26 / 40.79 and 991.90 / 14.28. | [docs/qwen35_4b/research/synthetic-prompt.md](docs/qwen35_4b/research/synthetic-prompt.md) |

@@ -50,7 +50,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen35_4b/research/coding-agent.md](qwen35_4b/research/coding-agent.md) | Qwen3.5-4B vision coding agent on fp8 keys and values |
 | [qwen35_4b/research/coding-agent-mtp.md](qwen35_4b/research/coding-agent-mtp.md) | Qwen3.5-4B vision coding agent with MTP on |
 | [qwen35_4b/research/coding-text.md](qwen35_4b/research/coding-text.md) | Qwen3.5-4B text coding agent on fp8 keys and values |
-| [qwen35_4b/research/synthetic-prompt.md](qwen35_4b/research/synthetic-prompt.md) | Qwen3.5-4B cold 512-token and 10000-token prompts |
+| [qwen35_4b/research/synthetic-prompt.md](qwen35_4b/research/synthetic-prompt.md) | Qwen3.5-4B cold 512, 1024, 4096, and 10000-token prompts |
 | [gemma4_26b_a4b/ceilings.md](gemma4_26b_a4b/ceilings.md) | Gemma 4 26B-A4B kernel and bandwidth ceilings |
 | [gemma4_26b_a4b/references.md](gemma4_26b_a4b/references.md) | Papers and specifications for the Gemma 4 pipeline |
 | [gemma4_26b_a4b/research/kernel-ceilings.md](gemma4_26b_a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B packed kernel ceiling |
