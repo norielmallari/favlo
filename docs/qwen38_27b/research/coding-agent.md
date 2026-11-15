@@ -1,6 +1,6 @@
 # Coding agent
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). This file records coding-agent runs on `fp8_e4m3` with MTP off. It is a recorded run, not a format bound. Earlier mixed-record agent sums are [mixed-agent-forward.md](mixed-agent-forward.md).
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records coding-agent runs on `fp8_e4m3` with MTP off. It is a recorded run, not a format bound. Earlier mixed-record agent sums are [mixed-agent-forward.md](mixed-agent-forward.md).
 
 ## Remainder
 
@@ -14,7 +14,13 @@ On an M5 Pro with 48 GB, `Qwen3.8-27B-fp8-e20` with `fp8_e4m3` keys and values a
 
 ## Rule
 
-MTP is off. Thinking on uses the thinking card. Thinking off uses the instruct card. `--vision` sends the horse still as the first chat with `tool_choice` `none`, then the ledger on that session. The banner prints the loaded plane. This table is the runs whose banners printed `kv fp8_e4m3` and `mtp off`. A banner that prints `half` or `mtp on` is a different row. Request 2 of each vision run loaded the prefix from disk.
+MTP is off. Thinking on uses the thinking card. Thinking off uses the instruct card.
+
+- `--vision` sends the horse still as the first chat with `tool_choice` `none`, then the ledger on that session.
+- The banner prints the loaded plane.
+- This table is the runs whose banners printed `kv fp8_e4m3` and `mtp off`.
+- A banner that prints `half` or `mtp on` is a different row.
+- Request 2 of each vision run loaded the prefix from disk.
 
 ## Command
 

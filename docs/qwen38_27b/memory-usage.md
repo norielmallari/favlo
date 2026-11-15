@@ -1,6 +1,14 @@
 # Memory usage
 
-Device bytes for `qwen38_27b` at the served window of 131,072 tokens. A GB is 10^9 bytes. The table is the opening with MTP on: the spans `startup_bytes` claims for the installed `Qwen3.8-27B-fp8-e20` record, with the MTP head resident, all 64 language feed-forward layers wired, and the default `fp8_e4m3` key/value cache. The vision tower stays in the record file until a message contains an image. An opening with MTP off does not copy the MTP block or the MTP plane.
+Device bytes for `qwen38_27b` at the served window of 131,072 tokens. A GB is 10^9 bytes.
+
+The table is the opening with MTP on. It lists the spans `startup_bytes` claims for the installed `Qwen3.8-27B-fp8-e20` record.
+
+- The MTP head is resident.
+- All 64 language feed-forward layers are wired.
+- The default `fp8_e4m3` key/value cache is installed.
+
+The vision tower stays in the record file until a message contains an image. An opening with MTP off does not copy the MTP block or the MTP plane.
 
 The weight image is 16.750 GB, including the half MTP block. The key/value cache is 17 planes, one for each language full-attention layer and one for the MTP layer, 35,904 bytes per token, 4.706 GB. Attention scratch for the quantized attend is 0.288 GB. The prefill workspace, the DeltaNet state, the convolution history, and the MTP verify snap stay for the life of the opening.
 

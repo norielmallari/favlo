@@ -2,11 +2,22 @@
 
 Kernel and bandwidth figures for the decode projections. The fp4 rows predate the E8M0 scale bit insert in `gemv_fp4_x4` and the fused fp4 projection kernels. Recompute the fp8 rows when `gemv_fp8_x4` changes.
 
-Each GEMV time is one command buffer, then a wait. The median of five dispatches after one discarded sample. Overlapping command buffers are not added. A 2 GiB buffer copy finished in 15705 µs, which is 254.6 GB/s counting the read and the write.
+Each GEMV time is one command buffer, then a wait. The median of five dispatches after one discarded sample. Overlapping command buffers are not added.
+
+A 2 GiB buffer copy finished in 15705 µs. That is 254.6 GB/s counting the read and the write.
 
 ## Decode projections
 
-One token. fp4 weights, one activation. Counts are the language stack: 48 Gated DeltaNet layers, 16 full-attention layers, a feed-forward on all 64 layers, and one head. `in_proj_a` and `in_proj_b` are the stored 64-row matrices. These times are `gemv_fp4_x4` alone. The forward issues the fused `gdn_in_proj`, `attn_qkv`, and `ffn_gate_up` kernels instead, in one command buffer with the rest of the step.
+One token. fp4 weights, one activation.
+
+Counts are the language stack:
+
+- 48 Gated DeltaNet layers
+- 16 full-attention layers
+- a feed-forward on all 64 layers
+- one head
+
+`in_proj_a` and `in_proj_b` are the stored 64-row matrices. These times are `gemv_fp4_x4` alone. The forward issues the fused `gdn_in_proj`, `attn_qkv`, and `ffn_gate_up` kernels instead, in one command buffer with the rest of the step.
 
 | Kernel | Shape | Count | µs | ms |
 |---|---|---:|---:|---:|

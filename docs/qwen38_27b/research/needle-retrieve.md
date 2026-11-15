@@ -1,6 +1,6 @@
 # Retrieve needle
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). This file records retrieve-mode needle runs. It is a recorded run, not a format bound. Page mode is [needle-page.md](needle-page.md).
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records retrieve-mode needle runs. It is a recorded run, not a format bound. Page mode is [needle-page.md](needle-page.md).
 
 ## Remainder
 
@@ -15,9 +15,26 @@ On an M5 Pro with 48 GB, `Qwen3.8-27B-fp8-e20` with `fp8_e4m3` keys and values a
 
 ## Rule
 
-`--mode retrieve` follows `next_offset` until a read has none. A pass needs the number, a read of its line, a last read with no `next_offset`, and a last window whose first line is after the needle line. Depth 1 has no later line, so it was not run. Thinking is off. MTP is off. Seed is 0. The loaded plane is the registry `kv_cache` after aliases. This table is the run whose banner printed `kv fp8_e4m3` and `mtp off`. A banner that prints `half`, `mtp on`, or thinking on is a different row.
+`--mode retrieve` follows `next_offset` until a read has none.
 
-The file is replayed inside tool results, so the finished transcript has to fit the 131072-token served window. The depth-0 transcript closed at 97309 prompt tokens over twelve requests. The depth-0.5 transcript closed at 46034 prompt tokens over five requests after the agent replied with the number before paging to the end.
+A pass needs:
+
+- the number
+- a read of its line
+- a last read with no `next_offset`
+- a last window whose first line is after the needle line
+
+Depth 1 has no later line, so it was not run.
+
+- Thinking is off. MTP is off. Seed is 0.
+- The loaded plane is the registry `kv_cache` after aliases.
+- This table is the run whose banner printed `kv fp8_e4m3` and `mtp off`.
+- A banner that prints `half`, `mtp on`, or thinking on is a different row.
+
+The file is replayed inside tool results, so the finished transcript has to fit the 131072-token served window.
+
+- The depth-0 transcript closed at 97309 prompt tokens over twelve requests.
+- The depth-0.5 transcript closed at 46034 prompt tokens over five requests after the agent replied with the number before paging to the end.
 
 ## Command
 

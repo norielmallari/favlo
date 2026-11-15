@@ -1218,6 +1218,9 @@ class Qwen38Runtime:
         frequency: float = 0.0,
         logit_bias: dict[int, float] | None = None,
         think_end: int | None = None,
+        think_empty_close: list[int] | None = None,
+        think_text_close: list[int] | None = None,
+        tool_open: int | None = None,
         rng: np.random.Generator | None = None,
         mtp: bool = False,
         mtp_depth: int | None = None,
@@ -1231,6 +1234,9 @@ class Qwen38Runtime:
         self._logit_bias = dict(logit_bias or {})
         self._think_end = None if think_end is None else int(think_end)
         self._think_closed = False
+        self._think_empty_close = [int(token) for token in (think_empty_close or [])]
+        self._think_text_close = [int(token) for token in (think_text_close or [])]
+        self._tool_open = None if tool_open is None else int(tool_open)
         self._rng = rng or np.random.default_rng()
         self._pending_counts = []
         self._output_ids = []
@@ -1241,6 +1247,14 @@ class Qwen38Runtime:
         if not prompt:
             return []
         prompt = [int(token) for token in prompt]
+        if getattr(self.prefix, "store", None) is not None:
+            from favlo.prefix import aim_session
+
+            aim_session(
+                self.prefix,
+                budget=getattr(self, "_prefix_budget", None),
+                scratch=getattr(self, "_prefix_scratch", None),
+            )
         if prompt[-1] < 0:
             message = f"prompt length {len(prompt)} is past {self.max_pos}"
             raise RuntimeError(message)
@@ -1279,23 +1293,36 @@ class Qwen38Runtime:
             self._prefill_noted = 0
             started = time.perf_counter()
             from qwen38_27b.metal41.chat import generation_cut
+            from qwen38_27b.metal41.prefill import prefill_ids
 
             root = getattr(self, "root", None)
-            cut = generation_cut(root, prompt) if root is not None else None
-            if cut is not None and hit < cut:
-                # The next encode drops this suffix when historical thinking is
-                # omitted. The file that stops here is the one that follow-up hits.
-                from qwen38_27b.metal41.prefill import prefill_ids
-
+            cuts: list[int] = []
+            stable = getattr(self, "_stable_cut", None)
+            self._stable_cut = None
+            if isinstance(stable, int) and 0 < stable < len(prompt):
+                cuts.append(stable)
+            gen = generation_cut(root, prompt) if root is not None else None
+            if gen is not None and gen not in cuts:
+                cuts.append(gen)
+            # The user-turn cut is the file a later user message still shares.
+            # A prompt that already ends on that user message uses the
+            # generation suffix instead. Pin it so a later full-prompt save
+            # cannot evict it.
+            held = stable if isinstance(stable, int) and stable in cuts else gen
+            for cut in cuts:
+                if hit >= cut:
+                    if cut == held:
+                        self._keep_boundary(prompt[:cut])
+                    continue
                 prefill_ids(self, prompt[hit:cut], hit, follow=prompt[cut])
                 self.filled = cut
                 self.prefix.note(prompt[:cut])
-                self._store_prefix()
+                self._store_prefix(note=False)
+                if cut == held:
+                    self._keep_boundary(prompt[:cut])
                 hit = cut
                 suffix = prompt[hit:]
             if len(suffix) > 1:
-                from qwen38_27b.metal41.prefill import prefill_ids
-
                 prefill_ids(self, suffix[:-1], hit, follow=suffix[-1])
             nxt = self.step(suffix[-1], len(prompt) - 1, logits=True, rope=self._rope_at(len(prompt) - 1))
             assert nxt is not None
@@ -1350,6 +1377,10 @@ class Qwen38Runtime:
                     forced_token = True
                 else:
                     finished_forced = False
+                    seq = self._redirect_open_think(chosen, out)
+                    if seq is not None:
+                        pending[:0] = seq[1:]
+                        chosen = seq[0]
                 if chosen in stop or repeated_tail(out):
                     break
                 out.append(chosen)
@@ -1698,6 +1729,22 @@ class Qwen38Runtime:
         self._think_closed = True
         self._logit_bias[self._think_end] = -1e9
 
+    def _redirect_open_think(self, sampled: int, emitted: list[int]) -> list[int] | None:
+        """Store the template close when a tool call arrives before ``</think>``."""
+        if self._tool_open is None or not self._think_empty_close:
+            return None
+        from qwen38_27b.metal41.chat import redirect_open_think
+
+        return redirect_open_think(
+            int(sampled),
+            emitted,
+            closed=self._think_closed,
+            end=self._think_end,
+            tool_open=self._tool_open,
+            empty_close=self._think_empty_close,
+            text_close=self._think_text_close,
+        )
+
     def _encode_bias(self) -> None:
         """Add the short bias list. Presence and frequency are already on device."""
         merged: dict[int, float] = {}
@@ -1773,13 +1820,23 @@ class Qwen38Runtime:
                 return int(chosen)
         return first
 
-    def _store_prefix(self) -> None:
+    def _keep_boundary(self, tokens: list[int]) -> None:
+        """Pin the stored file for these tokens so eviction leaves it in place."""
+        from favlo.prefix import object_name
+
+        store = self.prefix.store
+        name = object_name(store.model, store.digest, store.tag, tokens)
+        path = store.directory / f"{name}.bin"
+        if path.is_file():
+            store.pin(path)
+
+    def _store_prefix(self, *, note: bool = True) -> None:
         try:
             path = self.prefix.flush()
         except OSError as exc:
             self._note("prefix_store_failed", error=exc)
             return
-        if path is not None:
+        if path is not None and note:
             self._note("prefix_store", tokens=len(self.prefix.tokens))
 
     def _status(self, line: str) -> None:

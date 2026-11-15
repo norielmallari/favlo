@@ -25,6 +25,8 @@ from qwen38_27b.metal41.chat import (
     generation_cut,
     keeps_token_ids,
     load_tokenizer,
+    redirect_open_think,
+    think_closes,
 )
 from qwen38_27b.metal41.commands import installed_record
 from qwen38_27b.metal41.convert import record_name
@@ -595,6 +597,12 @@ def test_preserve_thinking_defaults_off_and_either_field_overrides() -> None:
         is False
     )
     assert preserve_thinking({"preserve_thinking": None, "chat_template_kwargs": {"preserve_thinking": False}}) is False
+    assert preserve_thinking({}, None) is False
+    assert preserve_thinking({}, True) is True
+    assert preserve_thinking({}, False) is False
+    assert preserve_thinking({"chat_template_kwargs": {"preserve_thinking": False}}, True) is False
+    assert preserve_thinking({"preserve_thinking": True}, False) is True
+    assert preserve_thinking({"preserve_thinking": False}, True) is False
     with pytest.raises(RuntimeError):
         preserve_thinking({"preserve_thinking": "false"})
 
@@ -706,24 +714,6 @@ def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
     user = [{"role": "user", "content": "Read notes.txt"}]
     first = encode_chat(root, user, None, True)
     assert decode_text(root, first).endswith("<think>\n")
-    continuation = (
-        "</think>\n\n<tool_call>\n<function=read_file>\n"
-        "<parameter=path>\nnotes.txt\n</parameter>\n</function>\n</tool_call>"
-    )
-    applied = encode_text(root, decode_text(root, first) + continuation)
-    assert applied[: len(first)] == first
-    follow = user + [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"function": {"name": "read_file", "arguments": {"path": "notes.txt"}}}
-            ],
-        },
-        {"role": "tool", "content": "ok"},
-    ]
-    second = encode_chat(root, follow, None, True)
-    assert second[: len(applied)] == applied
     prose = encode_text(root, decode_text(root, first) + "</think>\n\nThe notes are short.")
     follow_prose = user + [
         {"role": "assistant", "content": "The notes are short.", "reasoning_content": ""}
@@ -748,6 +738,99 @@ def test_empty_think_turn_stays_a_prefix_of_the_next_prompt() -> None:
     follow_off = user + [{"role": "assistant", "content": "done"}]
     second_off = encode_chat(root, follow_off, None, False)
     assert second_off[: len(applied_off)] == applied_off
+    closed = encode_chat(root, user, None, False)
+    assert decode_text(root, closed).endswith("<think>\n\n</think>\n\n")
+    call = (
+        "<tool_call>\n<function=read_file>\n"
+        "<parameter=path>\nnotes.txt\n</parameter>\n</function>\n</tool_call>"
+    )
+    applied_call = encode_text(root, decode_text(root, closed) + call)
+    follow_call = user + [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"path": "notes.txt"}}}
+            ],
+        },
+        {"role": "tool", "content": "ok"},
+    ]
+    second_call = encode_chat(root, follow_call, None, True, "medium")
+    assert second_call[: len(applied_call)] == applied_call
+
+
+def test_an_open_think_tool_call_is_stored_as_the_template_close() -> None:
+    root = installed_record()
+    if root is None or not (root / "chat_template.jinja").is_file():
+        pytest.skip("quantized record is not installed")
+    empty, text, opener = think_closes(root)
+    assert decode_text(root, empty) == "</think>\n\n"
+    assert decode_text(root, text) == "\n</think>\n\n"
+    assert redirect_open_think(
+        opener, [], closed=False, end=empty[0], tool_open=opener,
+        empty_close=empty, text_close=text,
+    ) == empty
+    assert redirect_open_think(
+        opener, [11, 22], closed=False, end=empty[0], tool_open=opener,
+        empty_close=empty, text_close=text,
+    ) == text
+    assert redirect_open_think(
+        opener, [text[0]], closed=False, end=empty[0], tool_open=opener,
+        empty_close=empty, text_close=text,
+    ) == text[1:]
+    assert redirect_open_think(
+        empty[0], [], closed=False, end=empty[0], tool_open=opener,
+        empty_close=empty, text_close=text,
+    ) == empty
+    assert redirect_open_think(
+        opener, [], closed=True, end=empty[0], tool_open=opener,
+        empty_close=empty, text_close=text,
+    ) is None
+    assert redirect_open_think(
+        11, [], closed=False, end=empty[0], tool_open=opener,
+        empty_close=empty, text_close=text,
+    ) is None
+    user = [{"role": "user", "content": "Read notes.txt"}]
+    first = encode_chat(root, user, None, False)
+    call = (
+        "<tool_call>\n<function=read_file>\n"
+        "<parameter=path>\nnotes.txt\n</parameter>\n</function>\n</tool_call>"
+    )
+    stored = encode_text(root, decode_text(root, first) + call)
+    follow = user + [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"path": "notes.txt"}}}
+            ],
+        },
+        {"role": "tool", "content": "ok"},
+    ]
+    second = encode_chat(root, follow, None, True, "medium")
+    assert second[: len(stored)] == stored
+
+
+def test_a_forced_tool_opener_keeps_the_empty_close() -> None:
+    root = installed_record()
+    if root is None or not (root / "chat_template.jinja").is_file():
+        pytest.skip("quantized record is not installed")
+    user = [{"role": "user", "content": "Read notes.txt"}]
+    first = encode_chat(root, user, None, False)
+    opener = encode_text(root, "<tool_call>\n<function=read_file>\n")
+    stored = [*first, *opener]
+    follow = user + [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"path": "notes.txt"}}}
+            ],
+        },
+        {"role": "tool", "content": "ok"},
+    ]
+    second = encode_chat(root, follow, None, True, "medium")
+    assert second[: len(stored)] == stored
 
 
 def test_a_dropped_think_shares_the_prompt_before_the_generation_suffix() -> None:
@@ -774,6 +857,105 @@ def test_a_dropped_think_shares_the_prompt_before_the_generation_suffix() -> Non
     kept_prompt = encode_chat(root, first, None, True, preserve_thinking=False)
     kept = encode_chat(root, follow_up, None, True, preserve_thinking=True)
     assert kept[: len(kept_prompt)] == kept_prompt
+
+
+def test_a_later_turn_shares_the_user_turn_not_the_open_think() -> None:
+    root = installed_record()
+    if root is None or not (root / "chat_template.jinja").is_file():
+        pytest.skip("quantized record is not installed")
+    from qwen38_27b.metal41.chat import encode_chat, generation_cut, user_turn_cut
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    call = (
+        "<tool_call>\n<function=read_file>\n<parameter=path>\n"
+        "a.py\n</parameter>\n</function>\n</tool_call>"
+    )
+    user = {"role": "user", "content": "Read a.py"}
+    assistant = {
+        "role": "assistant",
+        "reasoning_content": "I should read the file first.",
+        "content": call,
+    }
+    tool = {"role": "tool", "tool_call_id": "call_0", "content": "print(1)\n"}
+    mid = [user, assistant, tool]
+    prompt = encode_chat(root, mid, tools, True, preserve_thinking=False)
+    cut = user_turn_cut(root, mid, tools, True)
+    suffix = generation_cut(root, prompt)
+    assert cut is not None and suffix is not None and cut < suffix
+    assert prompt[:cut] == encode_chat(root, [user], tools, True, preserve_thinking=False)[:cut]
+    follow = [
+        *mid,
+        {"role": "assistant", "reasoning_content": "The file prints one.", "content": "It prints 1."},
+        {"role": "user", "content": "Now change it."},
+    ]
+    nxt = encode_chat(root, follow, tools, True, preserve_thinking=False)
+    assert nxt[:cut] == prompt[:cut]
+    assert nxt[:suffix] != prompt[:suffix]
+
+
+def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
+    root = installed_record()
+    if root is None or not (root / "chat_template.jinja").is_file():
+        pytest.skip("quantized record is not installed")
+    from qwen38_27b.metal41.chat import encode_chat
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    asked = [
+        {"role": "user", "content": "Call read_file with path a.py."},
+        {
+            "role": "assistant",
+            "content": (
+                "<tool_call>\n<function=read_file>\n<parameter=path>\n"
+                "a.py\n</parameter>\n</function>\n</tool_call>"
+            ),
+        },
+        {"role": "tool", "content": "print(1)\n"},
+        {"role": "user", "content": "Call read_file with path b.metal."},
+    ]
+    previous = encode_chat(root, asked, tools, False, None, preserve_thinking=True)
+    follow = encode_chat(
+        root,
+        [*asked, {"role": "user", "content": "Call read_file with path c.py."}],
+        tools,
+        False,
+        None,
+        preserve_thinking=True,
+    )
+    assert follow[: len(previous)] == previous
+
+
+def test_an_image_pad_before_the_cut_shifts_the_expanded_index() -> None:
+    from qwen38_27b.metal41.chat import _expanded_cut
+    from qwen38_27b.metal41.vision import IMAGE_PAD
+
+    text = [1, IMAGE_PAD, 2, 3]
+    assert _expanded_cut(text, 3, [4]) == 6
+    assert _expanded_cut(text, 1, [4]) == 1
+    assert _expanded_cut(text, None, [4]) is None
 
 
 def test_prefill_progress_counts_finished_tokens() -> None:

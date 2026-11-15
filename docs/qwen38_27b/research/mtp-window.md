@@ -1,6 +1,6 @@
 # MTP window
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). The per-dispatch rows are in [../ceilings.md](../ceilings.md). This file records one full-accept verify window. It is a measurement of this shader library.
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The per-dispatch rows are in [../ceilings.md](../ceilings.md). This file records one full-accept verify window. It is a measurement of this shader library.
 
 ## Remainder
 
@@ -15,7 +15,13 @@ On an M5 Pro with 48 GB, a full-accept MTP window sums to 146.7 ms, 20.45 tok/s.
 
 ## Rule
 
-The window feeds three tokens and emits three output tokens in a full accept. Each listed time is one command buffer, then a wait, the median of five dispatches after one discarded sample. Overlapping command buffers are not added. Mixers, norms, and the attention window are outside the kernel sum. The streaming copy in [../ceilings.md](../ceilings.md) is 254.6 GB/s. The language projections are 14,544,732,160 bytes, the MTP projections are 437,944,320 bytes, and `lm_head` is 675,430,400 bytes. The window reads the language image twice, the MTP image three times, and the head six times.
+The window feeds three tokens and emits three output tokens in a full accept.
+
+- Each listed time is one command buffer, then a wait, the median of five dispatches after one discarded sample. Overlapping command buffers are not added.
+- Mixers, norms, and the attention window are outside the kernel sum.
+- The streaming copy in [../ceilings.md](../ceilings.md) is 254.6 GB/s.
+- The language projections are 14,544,732,160 bytes. The MTP projections are 437,944,320 bytes. `lm_head` is 675,430,400 bytes.
+- The window reads the language image twice, the MTP image three times, and the head six times.
 
 ## Command
 

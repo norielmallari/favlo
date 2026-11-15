@@ -1,6 +1,6 @@
 # Synthetic prompt
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). This file records one synthetic-prompt run with MTP off. It is a recorded run, not a format bound. The MTP-on table is [synthetic-prompt-mtp.md](synthetic-prompt-mtp.md).
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records one synthetic-prompt run with MTP off. It is a recorded run, not a format bound. The MTP-on table is [synthetic-prompt-mtp.md](synthetic-prompt-mtp.md).
 
 ## Remainder
 
@@ -14,7 +14,14 @@ On an M5 Pro with 48 GB, `Qwen3.8-27B-fp8-e20` with `fp8_e4m3` keys and values a
 
 ## Rule
 
-MTP is off. Thinking is off, so the request uses the instruct card and `reasoning.effort` `none`. The banner prints the loaded plane. Each measured prompt is one user message and encodes to that length under the chat template, including the template tokens. A 64-token warmup runs first. The measured prompts start with different labels, so each prefill is a cache miss. Decode is capped at 128 tokens. A stop before that cap is the kept length. The end-to-end rate adds the prefill tokens to the decode tokens and adds those two clocks. A banner that prints `half`, `mtp on`, or `thinking on` is a different row.
+MTP is off. Thinking is off, so the request uses the instruct card and `reasoning.effort` `none`. The banner prints the loaded plane.
+
+- Each measured prompt is one user message and encodes to that length under the chat template, including the template tokens.
+- A 64-token warmup runs first.
+- The measured prompts start with different labels, so each prefill is a cache miss.
+- Decode is capped at 128 tokens. A stop before that cap is the kept length.
+- The end-to-end rate adds the prefill tokens to the decode tokens and adds those two clocks.
+- A banner that prints `half`, `mtp on`, or `thinking on` is a different row.
 
 ## Command
 

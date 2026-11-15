@@ -1,6 +1,6 @@
 # Kernel ceilings
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). The per-dispatch rows are in [../ceilings.md](../ceilings.md). This file records the isolated projection sum and the warm fused step. It is a measurement of this shader library.
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The per-dispatch rows are in [../ceilings.md](../ceilings.md). This file records the isolated projection sum and the warm fused step. It is a measurement of this shader library.
 
 ## Remainder
 
@@ -15,7 +15,10 @@ The isolated `gemv_fp4_x4` sum is 325.9 ms, 3.07 tok/s. A warm language step, pr
 
 ## Rule
 
-Each GEMV time is one command buffer, then a wait, the median of five dispatches after one discarded sample. Counts are the language stack. The forward issues the fused projection kernels instead of `gemv_fp4_x4` alone. Convolution, norms, and the embedding row are outside the isolated sum.
+Each GEMV time is one command buffer, then a wait, the median of five dispatches after one discarded sample. Counts are the language stack.
+
+- The forward issues the fused projection kernels instead of `gemv_fp4_x4` alone.
+- Convolution, norms, and the embedding row are outside the isolated sum.
 
 ## Command
 

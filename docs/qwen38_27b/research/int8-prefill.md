@@ -1,6 +1,6 @@
 # Int8 prefill
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). The run is in that note. The isolated kernel sum is [kernel-ceilings.md](kernel-ceilings.md).
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The run is in [../ARCHITECTURE.md](../ARCHITECTURE.md). The isolated kernel sum is [kernel-ceilings.md](kernel-ceilings.md).
 
 ## Remainder
 
@@ -15,11 +15,16 @@ On `Qwen3.8-27B-fp8-e20`, on an M5 Pro with 20 shader cores and 48 GB, a warm ru
 
 ## Rule
 
-Prefill is the summed prompt time. Decode is the summed sampled-token time. Temperature 0 is an argmax. The 2048-token prefill repeated one token id and was a cache miss. The counted prefill is the second such run. The first printed 505.26 tok/s (2048 tok in 4.05 s). The decode prompt was the carrot question, 51 tokens. The live length was 4096. The MTP head stayed resident, and all 64 language feed-forward layers stayed wired.
+Prefill is the summed prompt time. Decode is the summed sampled-token time. Temperature 0 is an argmax.
+
+- The 2048-token prefill repeated one token id and was a cache miss. The counted prefill is the second such run. The first printed 505.26 tok/s (2048 tok in 4.05 s).
+- The decode prompt was the carrot question, 51 tokens.
+- The live length was 4096.
+- The MTP head stayed resident, and all 64 language feed-forward layers stayed wired.
 
 ## Command
 
-The lines are the ones printed in [../README.md](../README.md). No committed command reprints the row.
+The lines are the ones printed in [../ARCHITECTURE.md](../ARCHITECTURE.md). No committed command reprints the row.
 
 ## Table
 

@@ -67,26 +67,48 @@ _EMPTY_THINK = """{%- if reasoning_content %}
                 {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}
             {%- elif enable_thinking is defined and enable_thinking is false %}
                 {{- '<|im_start|>' + message.role + '\\n<think>\\n\\n</think>\\n\\n' + content }}
+            {%- elif message.tool_calls %}
+                {{- '<|im_start|>' + message.role + '\\n<think>\\n\\n</think>\\n\\n' + content }}
             {%- else %}
                 {{- '<|im_start|>' + message.role + '\\n<think>\\n</think>\\n\\n' + content }}
             {%- endif %}"""
 
 
-def preserve_thinking(body: dict[str, Any]) -> bool:
+def preserve_thinking(body: dict[str, Any], registry: bool | None = None) -> bool:
     """Whether historical reasoning stays in the prompt.
 
-    Omitted is off. A top-level ``preserve_thinking`` wins over
-    ``chat_template_kwargs``. False keeps a think block only on assistant
-    turns after the latest user message. True keeps historical traces.
+    A top-level ``preserve_thinking`` wins over ``chat_template_kwargs``.
+    Either wins over this pipeline's registry row. Omitted is off: only the
+    think block for the latest user message stays. True keeps historical
+    traces so a later prompt can extend the stored prefix.
     """
     flag = _preserve_flag(body.get("preserve_thinking")) if "preserve_thinking" in body else None
     if flag is None:
         kwargs = body.get("chat_template_kwargs")
         if isinstance(kwargs, dict) and "preserve_thinking" in kwargs:
             flag = _preserve_flag(kwargs.get("preserve_thinking"))
-    if flag is None:
+    if flag is not None:
+        return flag
+    if registry is None:
         return False
-    return flag
+    return bool(registry)
+
+
+def _bridge_omitted_assistant(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put an empty assistant turn where the previous prompt already closed thinking.
+
+    Used when historical thinking is kept. That empty turn renders the closed
+    think, so a follow-up that omitted it stays a prefix of the stored tokens.
+    """
+    bridged: list[dict[str, Any]] = []
+    previous: str | None = None
+    for message in messages:
+        role = message.get("role") if isinstance(message, dict) else None
+        if role == "user" and previous in {"user", "tool"}:
+            bridged.append({"role": "assistant", "content": ""})
+        bridged.append(message)
+        previous = role if isinstance(role, str) else None
+    return bridged
 
 
 def _preserve_flag(value: Any) -> bool | None:
@@ -117,10 +139,13 @@ def encode_chat(
         message = "chat template has no empty think block to align"
         raise ValueError(message)
     template = template.replace(_CHECKOUT_EMPTY_THINK, _EMPTY_THINK, 1)
+    prepared = normalize_messages(messages)
+    if preserve_thinking:
+        prepared = _bridge_omitted_assistant(prepared)
     env = Environment()
     env.globals["raise_exception"] = _raise
     rendered_args = {
-        "messages": normalize_messages(messages),
+        "messages": prepared,
         "tools": tools or None,
         "add_generation_prompt": True,
         "enable_thinking": enable_thinking,
@@ -138,6 +163,47 @@ def encode_text(root: Path, text: str) -> list[int]:
 
 
 _GENERATION_SUFFIX: dict[Path, tuple[list[int], list[int]]] = {}
+
+
+def think_closes(root: Path) -> tuple[list[int], list[int], int]:
+    """Close sequences for an open think, and the ``<tool_call>`` token.
+
+    Empty reasoning replays ``</think>\\n\\n``. Reasoning text replays
+    ``\\n</think>\\n\\n``. A tool call drawn before that close is stored as
+    the matching sequence, then sampled again.
+    """
+    opener = encode_text(root, "<tool_call>")
+    if len(opener) != 1:
+        raise RuntimeError("the tool call open is not one token")
+    return encode_text(root, "</think>\n\n"), encode_text(root, "\n</think>\n\n"), opener[0]
+
+
+def redirect_open_think(
+    sampled: int,
+    emitted: list[int],
+    *,
+    closed: bool,
+    end: int | None,
+    tool_open: int | None,
+    empty_close: list[int],
+    text_close: list[int],
+) -> list[int] | None:
+    """Tokens to store instead of ``sampled`` so the next prompt stays a prefix.
+
+    None keeps ``sampled``. A bare ``</think>`` or a ``<tool_call>`` while the
+    block is open becomes the template close. The tool token is not kept; the
+    next draw happens after the close.
+    """
+    if closed or end is None or tool_open is None:
+        return None
+    if sampled != tool_open and sampled != end:
+        return None
+    close = list(empty_close if not emitted else text_close)
+    if emitted and close and emitted[-1] == close[0] and len(close) > 1:
+        close = close[1:]
+    if not close:
+        return None
+    return close
 
 
 def generation_cut(root: Path, prompt: list[int]) -> int | None:
@@ -159,6 +225,59 @@ def generation_cut(root: Path, prompt: list[int]) -> int | None:
         if count and len(prompt) > count and prompt[-count:] == suffix:
             return len(prompt) - count
     return None
+
+
+def user_turn_cut(
+    root: Path,
+    messages: list[dict[str, Any]],
+    tools: Any,
+    thinking: bool,
+    effort: str | None = None,
+) -> int | None:
+    """Tokens through the latest user message, before the generation suffix.
+
+    Historical thinking is omitted on the next user message, including the
+    traces this turn kept after that message. The file that stops here is the
+    one that message still shares. A prompt that already ends on the user
+    message uses ``generation_cut``.
+    """
+    last = None
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            last = index
+    if last is None or last + 1 == len(messages):
+        return None
+    head = encode_chat(
+        root,
+        messages[: last + 1],
+        tools,
+        thinking,
+        effort,
+        preserve_thinking=False,
+    )
+    return generation_cut(root, head)
+
+
+def _expanded_cut(text_prompt: list[int], cut: int | None, counts: list[int]) -> int | None:
+    """Map a text-token cut through the image pads expanded after the fit."""
+    if cut is None:
+        return None
+    if not counts:
+        return cut
+    from qwen38_27b.metal41.vision import IMAGE_PAD
+
+    extra = 0
+    seen = 0
+    for position, token in enumerate(text_prompt):
+        if position >= cut:
+            break
+        if token != IMAGE_PAD:
+            continue
+        if seen >= len(counts):
+            break
+        extra += int(counts[seen]) - 1
+        seen += 1
+    return cut + extra
 
 
 def decode_text(root: Path, ids: list[int]) -> str:
@@ -400,15 +519,24 @@ def _respond(
     tools = function_tools(prepared.get("tools"))
     effort = template_effort(selection, requested) if thinking else None
     try:
-        keep_thinking = preserve_thinking(prepared)
+        row = getattr(selection, "preserve_thinking", None)
+        keep_thinking = preserve_thinking(prepared, row if isinstance(row, bool) else None)
     except RuntimeError as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
     try:
-        prompt = _render(runtime, messages, tools, thinking, effort, keep_thinking)
+        prompt = _text_prompt(runtime, messages, tools, thinking, effort, keep_thinking)
         prompt = _fit_prompt(
             runtime, prepared, messages, tools, thinking, effort, keep_thinking, prompt
         )
+        text_cut = (
+            None
+            if keep_thinking
+            else user_turn_cut(runtime.root, messages, tools, thinking, effort)
+        )
+        text_prompt = prompt
+        prompt, counts = _attach_vision(runtime, messages, prompt)
+        runtime._stable_cut = _expanded_cut(text_prompt, text_cut, counts)
     except RequestError as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
@@ -419,7 +547,17 @@ def _respond(
         for token in tool_call_forbid(runtime.root):
             bias[token] = -1e9
     think_end = THINK_END if thinking else None
+    empty_close: list[int] = []
+    text_close: list[int] = []
+    tool_open: int | None = None
+    if thinking:
+        empty_close, text_close, tool_open = think_closes(runtime.root)
+        # A required tool call is forced, so the sampler never sees the opener.
+        # The template still writes the empty close before that call.
+        if forced:
+            forced = [*empty_close, *forced]
     stream = bool(prepared.get("stream", False))
+    _prefix_run(runtime, prepared)
     mtp_body = _mtp_body(prepared)
     mtp = _mtp_flag(mtp_body, selection)
     mtp_depth = _mtp_depth(mtp_body, selection)
@@ -440,6 +578,9 @@ def _respond(
             frequency=frequency,
             logit_bias=bias,
             think_end=think_end,
+            think_empty_close=empty_close,
+            think_text_close=text_close,
+            tool_open=tool_open,
             emit_tools=emit_tools,
             mtp=mtp,
             mtp_depth=mtp_depth,
@@ -461,6 +602,9 @@ def _respond(
         frequency=frequency,
         logit_bias=bias,
         think_end=think_end,
+        think_empty_close=empty_close,
+        think_text_close=text_close,
+        tool_open=tool_open,
         mtp=mtp,
         mtp_depth=mtp_depth,
     )
@@ -488,7 +632,7 @@ def _output_limit(prepared: dict[str, Any]) -> int | None:
     return _limit({})
 
 
-def _render(
+def _text_prompt(
     runtime: Any,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
@@ -496,7 +640,27 @@ def _render(
     effort: str | None,
     keep_thinking: bool,
 ) -> list[int]:
-    from qwen38_27b.metal41.vision import collect_images, expand_image_tokens, log_prepared, merged_grid, prepare_image
+    return encode_chat(
+        runtime.root,
+        messages,
+        tools,
+        thinking,
+        effort,
+        preserve_thinking=keep_thinking,
+    )
+
+
+def _attach_vision(
+    runtime: Any, messages: list[dict[str, Any]], prompt: list[int]
+) -> tuple[list[int], list[int]]:
+    """Expand image pads after the text cut is known. Counts are merged tokens."""
+    from qwen38_27b.metal41.vision import (
+        collect_images,
+        expand_image_tokens,
+        log_prepared,
+        merged_grid,
+        prepare_image,
+    )
 
     noted = getattr(runtime, "_status", None)
 
@@ -505,25 +669,31 @@ def _render(
             noted(text)
 
     images = collect_images(messages, note=_vision_note)
-    prompt = encode_chat(
-        runtime.root,
-        messages,
-        tools,
-        thinking,
-        effort,
-        preserve_thinking=keep_thinking,
-    )
     pixels = [prepare_image(blob, min_pixels=low, max_pixels=high) for blob, low, high in images]
     log_prepared(runtime, pixels)
     runtime._vision_images = images
     runtime._vision_prepared = pixels
     if not pixels:
-        return prompt
+        return prompt, []
     counts = []
     for _patches, grid in pixels:
         height, width = merged_grid(grid)
         counts.append(height * width)
-    return expand_image_tokens(prompt, counts)
+    return expand_image_tokens(prompt, counts), counts
+
+
+def _prefix_run(runtime: Any, prepared: dict[str, Any]) -> None:
+    """Copy a scratch prefix budget onto the runtime for this request.
+
+    Absent fields clear a previous scratch run so the next chat uses the home
+    partition again.
+    """
+    budget = prepared.get("favlo:prefix_budget")
+    scratch = prepared.get("favlo:prefix_scratch")
+    runtime._prefix_budget = (
+        budget if isinstance(budget, int) and not isinstance(budget, bool) and budget > 0 else None
+    )
+    runtime._prefix_scratch = scratch if isinstance(scratch, str) and scratch else None
 
 
 def _mtp_body(prepared: dict[str, Any]) -> dict[str, Any]:
@@ -558,7 +728,7 @@ def _fit_prompt(
         if drop >= len(kept):
             break
         del kept[drop]
-        prompt = _render(runtime, kept, tools, thinking, effort, keep_thinking)
+        prompt = _text_prompt(runtime, kept, tools, thinking, effort, keep_thinking)
     if len(prompt) > ceiling:
         raise RequestError("input does not fit")
     messages[:] = kept
@@ -720,6 +890,9 @@ def _stream(
     frequency: float = 0.0,
     logit_bias: dict[int, float] | None = None,
     think_end: int | None = None,
+    think_empty_close: list[int] | None = None,
+    think_text_close: list[int] | None = None,
+    tool_open: int | None = None,
     rng: np.random.Generator | None = None,
     mtp: bool = False,
     mtp_depth: int | None = None,
@@ -845,6 +1018,9 @@ def _stream(
             frequency=frequency,
             logit_bias=logit_bias,
             think_end=think_end,
+            think_empty_close=think_empty_close,
+            think_text_close=think_text_close,
+            tool_open=tool_open,
             mtp=mtp,
             mtp_depth=mtp_depth,
             on_prefill=on_prefill,

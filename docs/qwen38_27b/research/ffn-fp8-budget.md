@@ -1,6 +1,6 @@
 # Feed-forward fp8 budget
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). This file records a format bound and the budget rule that spends fp8 on the worst feed-forward layers. It does not record the per-matrix errors of the [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) checkout.
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records a format bound and the budget rule that spends fp8 on the worst feed-forward layers. It does not record the per-matrix errors of the [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) checkout.
 
 ## Remainder
 
@@ -17,7 +17,11 @@ The round-up E8M0 scale in `qwen38_27b/formats.py` keeps each block peak inside 
 
 The sort key, once the checkout is scored, is the relative error of one feed-forward matrix: the root-mean-square of the BF16 row against the restored fp4 row, divided by the root-mean-square of the BF16 row. Language layers only. The MTP feed-forward stays fp4, because serial decode does not run it.
 
-The budget example is the largest whole count of language layers that stays within 10% of 64, which is 6. Gate and up share `ffn_gate_up`, so a selected layer moves all three matrices. One fp4 feed-forward image is 47,349,760 bytes. Three images are 142,049,280 bytes. fp8 stores one byte per weight instead of a nibble, and the scale plane is unchanged, so a layer grows by 133,693,440 bytes. Six layers add 802,160,640 bytes to the record and to every decode read.
+The budget example is the largest whole count of language layers that stays within 10% of 64, which is 6. Gate and up share `ffn_gate_up`, so a selected layer moves all three matrices.
+
+- One fp4 feed-forward image is 47,349,760 bytes. Three images are 142,049,280 bytes.
+- fp8 stores one byte per weight instead of a nibble. The scale plane is unchanged, so a layer grows by 133,693,440 bytes.
+- Six layers add 802,160,640 bytes to the record and to every decode read.
 
 The format bound below is what that promotion buys on a block. It is not a substitute for the per-matrix sort. A flat list of relative errors does not earn the wider code.
 

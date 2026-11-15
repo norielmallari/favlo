@@ -1,6 +1,6 @@
 # Mixed-record agent forward
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). This file records one run. The uniform fp4 sums are [recorded-forward.md](recorded-forward.md).
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records one run. The uniform fp4 sums are [recorded-forward.md](recorded-forward.md).
 
 ## Remainder
 
@@ -15,7 +15,11 @@ On `Qwen3.8-27B-fp8-e20`, on an M5 Pro with 20 shader cores and 48 GB, the file 
 
 ## Rule
 
-Prefill is the summed prompt time. Decode is the summed sampled-token time. The file agent sets `enable_thinking` false. The coding agent sets `enable_thinking` true. Omitted sampling fields come from that card. The growth lines are not inside the prefill seconds: each counted prefill starts after the context line.
+Prefill is the summed prompt time. Decode is the summed sampled-token time.
+
+- The file agent sets `enable_thinking` false. The coding agent sets `enable_thinking` true.
+- Omitted sampling fields come from that card.
+- The growth lines are not inside the prefill seconds. Each counted prefill starts after the context line.
 
 ## Command
 

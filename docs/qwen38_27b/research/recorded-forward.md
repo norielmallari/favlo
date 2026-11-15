@@ -1,6 +1,6 @@
 # Recorded forward
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). The runs are in that note. The isolated projection sum is [kernel-ceilings.md](kernel-ceilings.md).
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The runs are in [../ARCHITECTURE.md](../ARCHITECTURE.md). The isolated projection sum is [kernel-ceilings.md](kernel-ceilings.md).
 
 ## Remainder
 
@@ -15,11 +15,14 @@ A warm run with the full cache allocated recorded 353.54 tok/s on a 2048-token p
 
 ## Rule
 
-Prefill is the summed prompt time. Decode is the summed sampled-token time. Temperature 0 is an argmax. The MTP-resident run keeps the MTP plane and still draws the serial argmax.
+Prefill is the summed prompt time. Decode is the summed sampled-token time.
+
+- Temperature 0 is an argmax.
+- The MTP-resident run keeps the MTP plane and still draws the serial argmax.
 
 ## Command
 
-The runs are the ones printed in [../README.md](../README.md). No committed command reprints the rows below.
+The runs are the ones printed in [../ARCHITECTURE.md](../ARCHITECTURE.md). No committed command reprints the rows below.
 
 ## Table
 

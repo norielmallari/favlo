@@ -1,6 +1,6 @@
 # Page needle
 
-Measurement note for the `qwen38_27b` pipeline. The serving contract is [../README.md](../README.md). This file records page-mode needle runs. It is a recorded run, not a format bound. Page mode is a long-transcript rate. It is not a retrieval claim.
+Measurement note for the `qwen38_27b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records page-mode needle runs. It is a recorded run, not a format bound. Page mode is a long-transcript rate. It is not a retrieval claim.
 
 ## Remainder
 
@@ -15,9 +15,17 @@ On an M5 Pro with 48 GB, `Qwen3.8-27B-fp8-e20` with MTP on at depth 3 passed pag
 
 ## Rule
 
-`--mode page` is the default. Thinking is off. MTP is on at depth 3. Seed is 0. Depth is 0.5. The loaded plane is the registry `kv_cache` after aliases. An omitted registry cache uses `fp8_e4m3`. This table is the rows whose banners printed `mtp on` with the named plane. A banner that prints `mtp off`, thinking on, or another depth is a different row.
+`--mode page` is the default.
 
-The file is replayed inside tool results, so the finished transcript has to fit the 131072-token served window. The 65536-token runs closed near 46000 prompt tokens over five requests. The 131072-token run closed at 92053 prompt tokens over nine requests.
+- Thinking is off. MTP is on at depth 3. Seed is 0. Depth is 0.5.
+- The loaded plane is the registry `kv_cache` after aliases. An omitted registry cache uses `fp8_e4m3`.
+- This table is the rows whose banners printed `mtp on` with the named plane.
+- A banner that prints `mtp off`, thinking on, or another depth is a different row.
+
+The file is replayed inside tool results, so the finished transcript has to fit the 131072-token served window.
+
+- The 65536-token runs closed near 46000 prompt tokens over five requests.
+- The 131072-token run closed at 92053 prompt tokens over nine requests.
 
 ## Command
 
