@@ -11,15 +11,15 @@ One model is one pipeline. Read [ARCHITECTURE.md](../../../ARCHITECTURE.md) firs
 
 Add these, and nothing of another pipeline:
 
-| Piece | Open-core path | Cloud custom path |
+| Piece | Open-core path | Extra plugin root |
 |---|---|---|
-| Package | `pipelines/<pipeline>/<runtime>/` | `custom-pipelines/<pipeline>/<runtime>/` in the hosted checkout |
-| Note | `docs/<pipeline>/` | that checkout's `docs/<pipeline>/` |
-| Tests | `tests/` files that import only `<pipeline>.<runtime>` | `custom-pipelines/tests/` files that import only that package |
+| Package | `pipelines/<pipeline>/<runtime>/` | `custom-pipelines/<pipeline>/<runtime>/` under a directory listed in `pipeline_roots` or `FAVLO_PIPELINE_ROOTS` |
+| Note | `docs/<pipeline>/` | that plugin tree's `docs/<pipeline>/` |
+| Tests | `tests/` files that import only `<pipeline>.<runtime>` | that plugin tree's tests that import only that package |
 
 `<pipeline>` is the flag stem, the model directory, and a Python identifier, such as `example-model`. `<runtime>` is `metal41`, `cuda`, or `portable`. The import is `<pipeline>.<runtime>`. Discovery walks plugin roots for `<pipeline>/<runtime>/__init__.py`. Do not edit `src/favlo/cli.py`.
 
-An open-core pipeline lives in the Favlo checkout. A cloud custom pipeline lives under the hosted checkout's `custom-pipelines/` and is loaded only when that directory is a plugin root (`pipeline_roots` or `FAVLO_PIPELINE_ROOTS`). It uses the same base class, CLI, and MCP contract. It does not add a row to the open runtime table.
+An open-core pipeline lives in this Favlo checkout. A pipeline outside this tree lives under an extra plugin root and loads only when that directory is listed (`pipeline_roots` or `FAVLO_PIPELINE_ROOTS`). It uses the same base class, CLI, and MCP contract. It does not add a row to the open runtime table. This skill does not name another checkout.
 
 The runtime package exports a typed `pipeline` instance. `favlo --<pipeline>` calls `pipeline.main`. `open_runtime` is that instance's method. `main` on the package may delegate to it.
 
@@ -62,9 +62,11 @@ Add `<runtime>/sampling.py` with no imports from the package. Registration loads
 
 ## Docs
 
-`docs/<pipeline>/` is the as-built note: what this pipeline runs, how to invoke it, and where its papers are. An open-core pipeline adds one row to the table in [ARCHITECTURE.md](../../../ARCHITECTURE.md) and one row in [docs/README.md](../../../docs/README.md). A cloud custom pipeline updates the hosted CLI catalog and the hosted harness note in the same change.
+`docs/<pipeline>/` is the as-built note: what this pipeline runs, how to invoke it, and where its papers are. An open-core pipeline adds one row to the table in [ARCHITECTURE.md](../../../ARCHITECTURE.md) and one row in [docs/README.md](../../../docs/README.md). A pipeline on an extra plugin root updates that tree's CLI catalog and harness note in the same change. It does not add a row to this checkout's Supported Models table.
 
-Citations for this model go in `docs/<pipeline>/`. Process citations stay in [REFERENCES.md](../../../REFERENCES.md). Do not add this model's kernels, cache, or sampling numbers to another pipeline's note, and do not add them to `ARCHITECTURE.md`.
+The README under `docs/<pipeline>/` is a summary. `ARCHITECTURE.md` in that folder holds kernels, the packed record, the forward, and registry fields. Do not add a `SETUP.md`.
+
+Citations for this model go in `docs/<pipeline>/`. Process citations stay in [REFERENCES.md](../../../REFERENCES.md). Do not add this model's kernels, cache, or sampling numbers to another pipeline's note, and do not add them to the root `ARCHITECTURE.md`.
 
 No personal data: no names, home directories, hostnames, or volume paths. A claim by the author is in the third person.
 
@@ -81,7 +83,7 @@ Run this package's checks. Stop if one fails. Do not start `favlo serve` yoursel
 1. `uv run pytest` on the tests that import only this package.
 2. `uv run favlo --<pipeline> kernels` when this pipeline has that command. It compiles the shader library and runs that package's dispatch checks.
 3. A language model then follows [smoke-testing](../smoke-testing/SKILL.md): pipeline smoke, then the file agent, then the coding agent.
-4. A media model runs its recorded smoke, then the picture harness for that kind. The harness calls the published tool. Exit 0 is the pass.
+4. A media model runs its recorded smoke through `favlo media` against a listener already up, then the picture harness for that kind. The harness calls the published tool. Exit 0 is the pass.
 
 Record a printed measurement in this pipeline's note. Do not invent one, and do not write it into another pipeline's note.
 
@@ -92,5 +94,5 @@ Record a printed measurement in this pipeline's note. Do not invent one, and do 
 - A media pipeline's `mcp_tools` lists every tool the listener should publish.
 - The pipeline smoke and the picture harness, or the language smokes, passed on this model.
 - An open-core pipeline has one runtime-table row, one `docs/README.md` row, and `pipelines/<pipeline>/AGENTS.md`.
-- A cloud custom pipeline is in the hosted CLI catalog and harness note.
+- A pipeline on an extra plugin root is in that tree's CLI catalog and harness note, and is not listed in this checkout's Supported Models table.
 - `git diff` does not touch another pipeline.
