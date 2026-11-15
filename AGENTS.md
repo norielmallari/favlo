@@ -26,7 +26,7 @@ Cursor loads this file for every chat. A nested `AGENTS.md` applies when the wor
 
 The official list is the Supported Models table and the checkpoint license table in the root README. This file does not name a package.
 
-Skills in [`.cursor/skills`](.cursor/skills) hold the procedures. Load the skill whose description matches the task. A GPU smoke is smoke-testing. The listener is favlo-server. A language or embeddings shell check is seam-checks. Media preemption is media-preemption. A web happy path is web-happy-path. A measured claim is research-claims. A new package is bootstrap-new-model. A language-pipeline setup is language-setup. A prefix store is prefix-caching. Language-model rate work is optimization-loop. Image generation time is optimization-image.
+Skills in [`.cursor/skills`](.cursor/skills) hold the procedures. Load the skill whose description matches the task. A GPU smoke is smoke-testing. The listener is favlo-server. A language or embeddings shell check is seam-checks. Media preemption is media-preemption. A web happy path is web-happy-path. A measured claim is research-claims. A new package is bootstrap-new-model. A language-pipeline setup is language-setup. A prefix store is prefix-caching. Language-model rate work is optimization-loop. An image prompt or a generated still is prompting-z-image-turbo. Image generation time is optimization-image.
 
 ## Changes
 

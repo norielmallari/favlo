@@ -27,7 +27,7 @@ Turbo inference defaults from the model card: **`guidance_scale=0`**, **`num_inf
 
 **User:** `a red cube on a white table`
 
-**Enhanced (illustrative):** A single solid red cube with matte paint sits centered on a rectangular white table with a smooth laminate surface. The table stands in an empty studio room with a seamless off-white floor and wall. Soft daylight from a large window on the left casts a gentle shadow to the right of the cube. Eye-level three-quarter view, shallow depth of field, sharp focus on the cube, plain background, no text, no watermark.
+**Enhanced (illustrative):** A single solid red cube with matte paint sits centered on a rectangular white table with a smooth laminate surface. The table stands in an empty studio room with a seamless off-white floor and wall. Soft daylight from a large window on the left casts a gentle shadow to the right of the cube. Eye-level three-quarter view, shallow depth of field, sharp focus on the cube, plain background.
 
 Smoke and harness tests in this repo use the short cube prompt at fixed seeds; production prompts are usually longer.
 

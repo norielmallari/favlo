@@ -1,11 +1,11 @@
 ---
 name: prompting-z-image-turbo
-description: Expand and structure Z-Image-Turbo image prompts using Tongyi-MAI prompt-enhancing rules and Turbo-specific constraints. Use when writing or improving generate_image prompts, Z-Image-Turbo captions, in-image text, or photorealistic scene descriptions in Favlo. Do not use for image generation-time optimization, music prompting, or language-model prefill.
+description: Use before every image generation. Read this whenever an agent generates an image, writes or revises an image prompt, or calls favlo media or generate_image with Z-Image-Turbo. The prompt names only what is in the frame. Do not write a negative prompt or a "no …" clause. Do not use for image generation-time optimization, music prompting, or language-model prefill.
 ---
 
 # Z-Image-Turbo prompting
 
-Turbo is a few-step distilled model with **no classifier-free guidance**. It does **not** use a negative prompt. Put every inclusion and exclusion in the **positive** `prompt`. Official guidance: [PROMPTING GUIDE](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/8), [pe.py](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/main/pe.py).
+Turbo is a few-step distilled model. Guidance is 0, and a negative prompt is ignored. The prompt names only what is visible. A clause such as `no text`, `no watermark`, `without …`, or `not cluttered` is not an exclusion, and it does not belong in the prompt. Official guidance: [PROMPTING GUIDE](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/8), [pe.py](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/main/pe.py).
 
 Generation-time work is [optimization-image](../optimization-image/SKILL.md). Serving and MCP are [favlo-server](../favlo-server/SKILL.md).
 
@@ -14,7 +14,7 @@ Generation-time work is [optimization-image](../optimization-image/SKILL.md). Se
 | Topic | Behavior |
 |---|---|
 | Steps | Eight Euler steps; not tunable on the request |
-| Negative prompt | Not served; ignored if a client sends one |
+| Negative prompt | Ignored. Omit `negative_prompt`. |
 | Caption limit | **1536** tokens after the chat template; longer prompts are **rejected**, not truncated |
 | Default size | `auto` is **1024×1024**; edges are multiples of 16, max **2560**, aspect between 1:3 and 3:1 |
 | Text rendering | English and Chinese; quote exact strings with `"..."` |
@@ -25,10 +25,10 @@ Fix **seed** while editing the prompt; change seed only when exploring variety. 
 
 1. Capture must-haves: subject, count, action, colors, IP names, any text that must appear verbatim.
 2. If the user gave a one-liner, run **prompt enhancing** (below) or apply the same rules by hand.
-3. Append **constraint clauses** at the end (`no watermark`, `plain background`, `correct human anatomy`, and similar).
-4. Call `generate_image` with the expanded prompt only.
+3. Close with visible facts (`plain background`, `correct human anatomy`). Leave out every `no …`, `without …`, and `not …` clause.
+4. Call `generate_image` or `favlo media` with that prompt only. Omit `negative_prompt`.
 
-Do not rely on SDXL or Flux habits: quality tags (`8K`, `masterpiece`), heavy negative lists, or extra inference steps do not apply to Turbo.
+Leave out SDXL and Flux habits: quality tags (`8K`, `masterpiece`), exclusion lists, and extra inference steps.
 
 ## Prompt enhancing template
 
@@ -45,7 +45,7 @@ Next, decide whether the prompt needs "generative reasoning." When the user's re
 
 Then, once the core image is fixed (whether it came straight from the user or from your reasoning), inject professional-grade aesthetics and realism: clear composition, lighting and atmosphere, material texture, a color scheme, and layered depth in space.
 
-Finally, handle every textual element with precision—this step is critical. You must transcribe verbatim every string that should appear in the final image, and you must wrap that text in English double quotes ("...") so it reads as an explicit generation instruction. If the image is a poster, menu, UI, or similar design, describe all copy on it and specify typography and layout. If signs, road markers, screens, or other objects in the scene carry text, state the exact wording and describe position, size, and material. If your own reasoning adds elements with text (charts, solution steps, etc.), all of that text follows the same quoting and description rules. If the image needs no rendered text, spend all remaining effort on pure visual detail.
+Finally, handle every textual element with precision—this step is critical. You must transcribe verbatim every string that should appear in the final image, and you must wrap that text in English double quotes ("...") so it reads as an explicit generation instruction. If the image is a poster, menu, UI, or similar design, describe all copy on it and specify typography and layout. If signs, road markers, screens, or other objects in the scene carry text, state the exact wording and describe position, size, and material. If your own reasoning adds elements with text (charts, solution steps, etc.), all of that text follows the same quoting and description rules. If the picture contains only the scene, spend all remaining effort on pure visual detail.
 
 Your final description must be objective and concrete. Do not use metaphor, emotional rhetoric, or meta tags and draw commands such as "8K" or "masterpiece."
 
@@ -53,6 +53,8 @@ Output only the revised prompt—nothing else.
 
 User input prompt: {prompt}
 ```
+
+The prompt this template returns names the scene. It leaves out `no …`, `without …`, and `not …`.
 
 ## Manual structure
 
@@ -63,18 +65,20 @@ When not calling an LLM, stack **concrete** clauses in this order:
 3. Composition — framing, focus, depth  
 4. Light and materials — direction, texture  
 5. Optional capture style — lens, film, illustration type as visual facts, not tag soup  
-6. Constraints — positive phrasing of exclusions at the **end**
+6. Visible facts — what the frame contains. An exclusion line stays out.
 
 Prefer **long, specific** prose over keyword lists. Rough target: about **80–250 words** unless the user needs more detail; stay under Favlo's **1536** token cap.
 
-## Constraints without a negative field
+## What the prompt may say
 
-| Goal | Append to the positive prompt |
+Write the thing that is in the frame. Omit `negative_prompt`. Omit `no …`, `without …`, `not …`, and `avoid …`.
+
+| Goal | Write |
 |---|---|
-| Clean backdrop | `plain background, simple backdrop, not cluttered` |
-| No overlays | `no text, no watermark, no logo, no branding` |
-| Anatomy | `correct human anatomy, natural hands and fingers, no extra limbs` |
-| Sharpness | `sharp focus, no motion blur, no heavy grain` |
+| Clean backdrop | `plain background, empty studio` |
+| Unmarked picture | Leave lettering, logos, and watermarks out of the description |
+| Anatomy | `correct human anatomy, natural hands and fingers, two arms, two legs` |
+| Sharpness | `sharp focus, still subject` |
 
 ## Base Z-Image (not Turbo)
 
