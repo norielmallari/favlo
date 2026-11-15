@@ -47,15 +47,26 @@ def test_a_prefix_hit_is_not_a_measured_prefill() -> None:
     assert measured_problems(request, 512) == ["prefill reused a prefix"]
 
 
-def _request(*, prefix_hit: int | None = None, missed: bool = True) -> RequestRate:
+def test_a_short_decode_is_not_the_cap() -> None:
+    request = _request(decode_tokens=113)
+    assert measured_problems(request, 512, 128) == ["decode counted 113 expected 128"]
+    assert measured_problems(request, 512) == []
+
+
+def _request(
+    *,
+    prefix_hit: int | None = None,
+    missed: bool = True,
+    decode_tokens: int = 128,
+) -> RequestRate:
     return RequestRate(
         prompt_tokens=512,
         prefix_hit=prefix_hit,
         missed=missed,
         prefill="prefill 100.00 tok/s (512 tok in 5.12s)",
         prefill_gpu="",
-        decode="decode 50.00 tok/s (128 tok in 2.56s)",
-        decode_tokens=128,
+        decode=f"decode 50.00 tok/s ({decode_tokens} tok in 2.56s)",
+        decode_tokens=decode_tokens,
         atlas="",
         steady=(),
     )

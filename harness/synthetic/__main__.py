@@ -8,13 +8,14 @@ cache miss. The printed end-to-end rate is the server's prefill time plus
 its decode time.
 
     uv run python -m harness.synthetic --model qwen36-35b-a3b
-    uv run python -m harness.synthetic --model qwen36-35b-a3b --tokens 512 --tokens 10000
+    uv run python -m harness.synthetic --model qwen36-35b-a3b --tokens 512 --tokens 1024 --tokens 4096 --tokens 10000
 """
 
 from __future__ import annotations
 
 import argparse
 import time
+import uuid
 
 from harness.benchmarks.serve import Server
 from harness.file_session import RequestRate, format_request, parse_requests, printed_requests
@@ -22,7 +23,7 @@ from harness.synthetic.loop import run_complete
 from harness.synthetic.prompt import chat_encode, user_text
 from harness.synthetic.rate import end_to_end, measured_problems
 
-_DEFAULT_TOKENS = (512, 10000)
+_DEFAULT_TOKENS = (512, 1024, 4096, 10000)
 _WARMUP_TOKENS = 64
 _WARMUP_DECODE = 16
 
@@ -35,9 +36,9 @@ def argument_parser() -> argparse.ArgumentParser:
         type=int,
         action="append",
         default=None,
-        help="prompt length; repeat for more than one. Default is 512 and 10000",
+        help="prompt length; repeat for more than one. Default is 512, 1024, 4096, and 10000",
     )
-    parser.add_argument("--decode", type=int, default=128, help="maximum sampled tokens")
+    parser.add_argument("--decode", type=int, default=128, help="sampled tokens")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--mtp", choices=("on", "off"), default="off")
     parser.add_argument("--mtp-depth", type=int, default=3)
@@ -76,12 +77,13 @@ def main(argv: list[str] | None = None) -> int:
     selection = resolve(args.model, root=root)
     thinking = args.thinking == "on"
     encode = chat_encode(selection, thinking=thinking)
+    nonce = uuid.uuid4().hex[:8]
     prompts = [
         (
             length,
             user_text(
                 tokens=length,
-                label=f"Passage {length}.",
+                label=f"Passage {length} {nonce}.",
                 encode=encode,
                 seed=args.seed,
             ),
@@ -92,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.warmup:
         warmup = user_text(
             tokens=args.warmup,
-            label="Warmup passage.",
+            label=f"Warmup {nonce}.",
             encode=encode,
             seed=args.seed,
         )
@@ -101,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         server.start()
         print(
             f"kv {selection.kv_cache} mtp {args.mtp} depth {args.mtp_depth} "
-            f"thinking {args.thinking} decode {args.decode}",
+            f"thinking {args.thinking} decode {args.decode} nonce {nonce}",
             flush=True,
         )
         mark = _log_size()
@@ -135,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             print(format_request(index, request), flush=True)
             print(end_to_end(request), flush=True)
-            problems.extend(measured_problems(request, length))
+            problems.extend(measured_problems(request, length, args.decode))
     finally:
         server.stop()
     if problems:

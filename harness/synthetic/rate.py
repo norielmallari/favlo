@@ -19,8 +19,12 @@ def cold_prefill(request: RequestRate) -> bool:
     return request.prefix_hit == 0
 
 
-def measured_problems(request: RequestRate, tokens: int) -> list[str]:
-    """Problems when the server did not prefill exactly ``tokens`` from a miss."""
+def measured_problems(request: RequestRate, tokens: int, decode: int | None = None) -> list[str]:
+    """Problems when the server did not prefill exactly ``tokens`` from a miss.
+
+    ``decode`` is the sampled-token count the run asked for. An omitted count
+    does not check it.
+    """
     problems: list[str] = []
     if request.prompt_tokens != tokens:
         problems.append(f"prompt {request.prompt_tokens} expected {tokens}")
@@ -31,6 +35,8 @@ def measured_problems(request: RequestRate, tokens: int) -> list[str]:
     prefill = summed_rate([request.prefill]) if request.prefill else None
     if prefill is not None and prefill[0] != tokens:
         problems.append(f"prefill counted {prefill[0]} expected {tokens}")
+    if decode is not None and request.decode_tokens != decode:
+        problems.append(f"decode counted {request.decode_tokens} expected {decode}")
     return problems
 
 

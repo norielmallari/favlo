@@ -13,16 +13,19 @@ from harness.benchmarks.serve import Server, card_model_id
 def agent_options(*, thinking: bool, mtp: bool, mtp_depth: int, decode: int) -> dict[str, object]:
     """Fields the framework client sends.
 
-    Sampling stays on the card. ``max_tokens`` is the decode cap. ``store``
-    is false so the next length is a new prompt, not a continuation.
+    Temperature is 0, so the draw is an argmax. ``max_tokens`` is the decode
+    count, and ``favlo:fill_decode`` asks the pipeline to sample until that
+    count. ``store`` is false so the next length is a new prompt.
     """
     return {
         "store": False,
+        "temperature": 0,
         "max_tokens": int(decode),
         "reasoning": {"effort": "medium" if thinking else "none"},
         "extra_body": {
             "favlo:mtp": bool(mtp),
             "favlo:mtp_depth": int(mtp_depth),
+            "favlo:fill_decode": True,
         },
     }
 
