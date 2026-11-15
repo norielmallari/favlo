@@ -281,6 +281,8 @@ def expand_image_tokens(
 def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int]) -> list[int]:
     """Expand each image to its merged grid and install mRoPE. The tower waits for the prefix hit."""
     _reject_video(messages)
+    runtime._image_lengths = []
+    runtime._image_token = None
     blobs = _image_blobs(messages)
     if not blobs:
         runtime._vision_rows = None
@@ -289,6 +291,8 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
         runtime._rope_length = 0
         runtime._rope_delta = 0
         runtime._vision_plan = None
+        runtime._image_lengths = []
+        runtime._image_token = None
         return ids
     lengths: list[int] = []
     grids: list[tuple[int, int]] = []
@@ -298,6 +302,8 @@ def prepare_prompt(runtime: Any, messages: list[dict[str, Any]], ids: list[int])
         )
         lengths.append(merged_h * merged_w)
         grids.append((merged_h, merged_w))
+    runtime._image_token = IMAGE_TOKEN
+    runtime._image_lengths = lengths
     expanded, spans = expand_image_tokens(ids, lengths, IMAGE_TOKEN)
     if spans and lengths and spans[-1] + lengths[-1] == len(expanded):
         message = "the last prompt token is an image pad"

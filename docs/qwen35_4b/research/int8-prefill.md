@@ -1,6 +1,6 @@
 # Int8 prefill
 
-Measurement note for the `qwen35_4b` pipeline. The serving contract is [../README.md](../README.md). The run is in that note. The isolated kernel sum is [kernel-ceilings.md](kernel-ceilings.md).
+Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The run is in [../ARCHITECTURE.md](../ARCHITECTURE.md). The isolated kernel sum is [kernel-ceilings.md](kernel-ceilings.md).
 
 ## Remainder
 
@@ -19,7 +19,7 @@ Prefill is the summed prompt time on a cache miss. The 2012-token prompt repeate
 
 ## Command
 
-The lines are the ones printed in [../README.md](../README.md). No committed command reprints the row.
+The lines are the ones printed in [../ARCHITECTURE.md](../ARCHITECTURE.md). No committed command reprints the row.
 
 ## Table
 

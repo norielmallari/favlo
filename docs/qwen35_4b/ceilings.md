@@ -4,7 +4,7 @@ Kernel and bandwidth ceilings for the kernels this pipeline runs. Reuse these fi
 
 Each time is one command buffer, then a wait. Overlapping command buffers are not added. The times are the median of four samples after two warmups. Measured on 2 November 2026 on the default `half` cache.
 
-The divisor for bandwidth is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302.74 GB/s, recorded in [../qwen36-35b-a3b/ceilings.md](../qwen36-35b-a3b/ceilings.md). An earlier write-based figure of 234.92 GB/s remains only in the prefill byte note below until that section is recomputed.
+The divisor for bandwidth is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302.74 GB/s, recorded in [../qwen36_35b_a3b/ceilings.md](../qwen36_35b_a3b/ceilings.md). An earlier write-based figure of 234.92 GB/s remains only in the prefill byte note below until that section is recomputed.
 
 ## Prefill
 

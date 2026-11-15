@@ -191,12 +191,92 @@ def test_a_dropped_think_shares_the_prompt_before_the_generation_suffix() -> Non
     assert kept[: len(kept_prompt)] == kept_prompt
 
 
-def test_preserve_thinking_defaults_off() -> None:
+def test_a_later_turn_shares_the_user_turn_not_the_open_think() -> None:
+    root = Path("models") / "Qwen3.5-4B-fp8"
+    if not (root / "chat_template.jinja").is_file() or not (root / "tokenizer.json").is_file():
+        pytest.skip("chat template is not installed")
+    from qwen35_4b.metal41.chat import encode_chat, generation_cut, user_turn_cut
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    call = (
+        "<tool_call>\n<function=read_file>\n<parameter=path>\n"
+        "a.py\n</parameter>\n</function>\n</tool_call>"
+    )
+    user = {"role": "user", "content": "Read a.py"}
+    assistant = {
+        "role": "assistant",
+        "reasoning_content": "I should read the file first.",
+        "content": call,
+    }
+    tool = {"role": "tool", "tool_call_id": "call_0", "content": "print(1)\n"}
+    mid = [user, assistant, tool]
+    prompt = encode_chat(root, mid, tools, True, preserve_thinking=False)
+    cut = user_turn_cut(root, mid, tools, True)
+    suffix = generation_cut(root, prompt)
+    assert cut is not None and suffix is not None and cut < suffix
+    assert prompt[:cut] == encode_chat(root, [user], tools, True, preserve_thinking=False)[:cut]
+    follow = [
+        *mid,
+        {"role": "assistant", "reasoning_content": "The file prints one.", "content": "It prints 1."},
+        {"role": "user", "content": "Now change it."},
+    ]
+    nxt = encode_chat(root, follow, tools, True, preserve_thinking=False)
+    assert nxt[:cut] == prompt[:cut]
+    assert nxt[:suffix] != prompt[:suffix]
+
+
+def test_preserve_thinking_defaults_off_and_the_request_wins() -> None:
     from qwen35_4b.metal41.chat import preserve_thinking
 
-    assert preserve_thinking({}, {}) is False
-    assert preserve_thinking({"preserve_thinking": True}, {}) is True
-    assert preserve_thinking({}, {"preserve_thinking": True}) is True
+    assert preserve_thinking({}) is False
+    assert preserve_thinking({}, None) is False
+    assert preserve_thinking({}, True) is True
+    assert preserve_thinking({}, False) is False
+    assert preserve_thinking({"chat_template_kwargs": {"preserve_thinking": False}}, True) is False
+    assert preserve_thinking({"chat_template_kwargs": {"preserve_thinking": True}}) is True
+    assert preserve_thinking({"chat_template_kwargs": {}}) is False
+    assert preserve_thinking({"preserve_thinking": True}, False) is True
+    assert preserve_thinking({"preserve_thinking": False}, True) is False
+    assert (
+        preserve_thinking(
+            {
+                "preserve_thinking": True,
+                "chat_template_kwargs": {"preserve_thinking": False},
+            }
+        )
+        is True
+    )
+    try:
+        preserve_thinking({"preserve_thinking": "true"})
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("preserve_thinking must be true or false")
+
+
+def test_an_image_pad_before_the_cut_shifts_the_stored_index() -> None:
+    from qwen35_4b.metal41.chat import _expanded_cut
+
+    class _Runtime:
+        _image_lengths = [4]
+        _image_token = 7
+
+    text = [1, 7, 2, 3]
+    assert _expanded_cut(_Runtime(), text, 3) == 6
+    assert _expanded_cut(_Runtime(), text, 1) == 1
+    assert _expanded_cut(_Runtime(), [1, 2, 3], 2) == 2
 
 
 def test_historical_reasoning_is_dropped() -> None:

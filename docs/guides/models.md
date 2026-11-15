@@ -6,7 +6,7 @@ A packed record is registered in `models/registry.json`. `favlo serve` lists tho
 
 ## Qwen3.5-4B
 
-The official checkpoint is `Qwen/Qwen3.5-4B`. The steps are [qwen35_4b/SETUP.md](../qwen35_4b/SETUP.md).
+The official checkpoint is `Qwen/Qwen3.5-4B`. The steps are [qwen35_4b/README.md](../qwen35_4b/README.md).
 
 On a terminal, `favlo serve` with an empty registry downloads that checkpoint, packs `models/Qwen3.5-4B-fp8`, registers the alias `qwen35_4b`, and removes the BF16 checkout. The next `serve` continues from the files already written.
 

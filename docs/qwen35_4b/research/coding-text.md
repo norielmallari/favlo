@@ -1,6 +1,6 @@
 # Coding agent, text
 
-Measurement note for the `qwen35_4b` pipeline. The serving contract is [../README.md](../README.md). This file records one text coding-agent run on `fp8_e4m3` with MTP off. It is a recorded run, not a format bound. The vision runs are in [coding-agent.md](coding-agent.md). The half-cache coding run is in [recorded-forward.md](recorded-forward.md).
+Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records one text coding-agent run on `fp8_e4m3` with MTP off. It is a recorded run, not a format bound. The vision runs are in [coding-agent.md](coding-agent.md). The half-cache coding run is in [recorded-forward.md](recorded-forward.md).
 
 ## Remainder
 

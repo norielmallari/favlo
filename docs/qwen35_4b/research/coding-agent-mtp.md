@@ -1,6 +1,6 @@
 # Coding agent (MTP on)
 
-Measurement note for the `qwen35_4b` pipeline. The serving contract is [../README.md](../README.md). This file records one vision coding-agent run with MTP on. It is a recorded run, not a format bound. The MTP-off table is [coding-agent.md](coding-agent.md).
+Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). This file records one vision coding-agent run with MTP on. It is a recorded run, not a format bound. The MTP-off table is [coding-agent.md](coding-agent.md).
 
 ## Remainder
 

@@ -1,6 +1,6 @@
 # Recorded forward
 
-Measurement note for the `qwen35_4b` pipeline. The serving contract is [../README.md](../README.md). The isolated dispatch sum is [kernel-ceilings.md](kernel-ceilings.md). This file records the carrot smoke and the coding agent printed on 2 November 2026 after int8 prefill, the resident int8 atlas, and mid-width `gemv_fp8_x4` decode.
+Measurement note for the `qwen35_4b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The isolated dispatch sum is [kernel-ceilings.md](kernel-ceilings.md). This file records the carrot smoke and the coding agent printed on 2 November 2026 after int8 prefill, the resident int8 atlas, and mid-width `gemv_fp8_x4` decode.
 
 ## Remainder
 

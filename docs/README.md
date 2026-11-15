@@ -45,7 +45,6 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [gemma4-26b-a4b/SETUP.md](gemma4_26b_a4b/SETUP.md) | Gemma 4 26B-A4B pack and first chat |
 | [qwen35-4b/README.md](qwen35_4b/README.md) | Qwen3.5-4B language pipeline |
 | [qwen35-4b/references.md](qwen35_4b/references.md) | Papers and specifications for the Qwen3.5-4B pipeline |
-| [qwen35-4b/SETUP.md](qwen35_4b/SETUP.md) | Qwen3.5-4B download and pack |
 | [qwen35-4b/ceilings.md](qwen35_4b/ceilings.md) | Qwen3.5-4B kernel ceilings |
 | [qwen35-4b/research/int8-prefill.md](qwen35_4b/research/int8-prefill.md) | Qwen3.5-4B int8 prefill recorded rates |
 | [qwen35-4b/research/kernel-ceilings.md](qwen35_4b/research/kernel-ceilings.md) | Qwen3.5-4B isolated dispatch sum |
