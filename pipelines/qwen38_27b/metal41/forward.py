@@ -1224,6 +1224,7 @@ class Qwen38Runtime:
         rng: np.random.Generator | None = None,
         mtp: bool = False,
         mtp_depth: int | None = None,
+        fill: bool = False,
     ) -> list[int]:
         self._hit_limit = False
         self._temperature = float(temperature)
@@ -1381,7 +1382,7 @@ class Qwen38Runtime:
                     if seq is not None:
                         pending[:0] = seq[1:]
                         chosen = seq[0]
-                if chosen in stop or repeated_tail(out):
+                if not fill and (chosen in stop or repeated_tail(out)):
                     break
                 out.append(chosen)
                 self._accept(chosen)
@@ -1410,7 +1411,7 @@ class Qwen38Runtime:
                     if pos + 1 >= self.max_pos:
                         self._hit_limit = True
                         break
-                if repeated_tail(out):
+                if not fill and repeated_tail(out):
                     step_new(chosen, pos, logits=False)
                     break
                 speculated = False
@@ -1422,7 +1423,7 @@ class Qwen38Runtime:
                     need = pos + span
                     if room > 0 and self.ensure(need) and self.drafts:
                         drafts = propose(self, chosen, pos - 1, span)
-                        feeds, expected = draft_window(chosen, drafts, stop, room)
+                        feeds, expected = draft_window(chosen, drafts, set() if fill else stop, room)
                         if expected:
                             produced = list(out)
                             rows = self._samples_rows()
@@ -1455,7 +1456,7 @@ class Qwen38Runtime:
                             emit = expected[: accepted - 1] if accepted == len(expected) else expected[:accepted]
                             halted = False
                             for token in emit:
-                                if token in stop or repeated_tail(out):
+                                if not fill and (token in stop or repeated_tail(out)):
                                     chosen = int(token)
                                     halted = True
                                     break

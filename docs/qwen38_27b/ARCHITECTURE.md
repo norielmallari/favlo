@@ -287,6 +287,7 @@ Measured forward rates on this pipeline. Each run is filed under the linked rese
 - The same agent on `half` keys and values, MTP off, with the horse still, is a measurement in [research/coding-agent-half.md](research/coding-agent-half.md).
 - The cold synthetic instruct prompts at 512 and 10000 tokens are a measurement in [research/synthetic-prompt.md](research/synthetic-prompt.md).
 - The same lengths with MTP on at depth 3 are a measurement in [research/synthetic-prompt-mtp.md](research/synthetic-prompt-mtp.md).
+- The synthetic prompt on `half` keys and values, at 512, 1024, 4096, and 10000 tokens, is a measurement in [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md).
 - On 30 October 2026 the coding agent with MTP on at depth 3 measured 308.17 tok/s prefill over 2752 tokens (8.93 s) and 15.39 tok/s decode over 823 tokens (53.46 s), context 3265 over 8 requests.
 - On 1 November 2026 the same command with MTP off measured 302.30 tok/s prefill over 2763 tokens (9.14 s) and 14.36 tok/s decode over 942 tokens (65.60 s), context 3359 over 8 requests.
 - With MTP on at depth 3 it measured 298.38 tok/s prefill over 2766 tokens (9.27 s) and 15.34 tok/s decode over 997 tokens (64.98 s), context 3432 over 8 requests.
@@ -335,6 +336,7 @@ Request fields:
 - The Responses body has no `enable_thinking` field and no `preserve_thinking` field.
 - A Chat Completions body may set `preserve_thinking` or `chat_template_kwargs.preserve_thinking`; that flag is copied onto the generation path. Omitted is off.
 - `favlo:mtp` and `favlo:mtp_depth` override the registry row. Omitted, the row applies.
+- `favlo:fill_decode` true keeps sampling through stop ids and a repeated tail until the output cap.
 - `max_output_tokens` counts the completion. A value below 16 is rejected.
 - Hitting the cap sets status `incomplete` and `incomplete_details.reason` `max_output_tokens`.
 - `store` defaults to true. The listener's response chain keeps that response. A later request can send `previous_response_id`.

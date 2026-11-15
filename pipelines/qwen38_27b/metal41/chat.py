@@ -556,6 +556,7 @@ def _respond(
         # The template still writes the empty close before that call.
         if forced:
             forced = [*empty_close, *forced]
+    fill = bool(prepared.get("favlo:fill_decode"))
     stream = bool(prepared.get("stream", False))
     _prefix_run(runtime, prepared)
     mtp_body = _mtp_body(prepared)
@@ -584,6 +585,7 @@ def _respond(
             emit_tools=emit_tools,
             mtp=mtp,
             mtp_depth=mtp_depth,
+            fill=fill,
             prepared=prepared,
             state=state,
             search=search,
@@ -607,6 +609,7 @@ def _respond(
         tool_open=tool_open,
         mtp=mtp,
         mtp_depth=mtp_depth,
+        fill=fill,
     )
     text = decode_text(runtime.root, tokens)
     payload = _response_payload(
@@ -896,6 +899,7 @@ def _stream(
     rng: np.random.Generator | None = None,
     mtp: bool = False,
     mtp_depth: int | None = None,
+    fill: bool = False,
     prepared: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     search: dict[str, Any] | None = None,
@@ -1023,6 +1027,7 @@ def _stream(
             tool_open=tool_open,
             mtp=mtp,
             mtp_depth=mtp_depth,
+            fill=fill,
             on_prefill=on_prefill,
         )
     finally:

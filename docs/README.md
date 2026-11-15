@@ -29,6 +29,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38_27b/research/coding-agent-half.md](qwen38_27b/research/coding-agent-half.md) | Qwen3.8-27B coding agent on half keys and values |
 | [qwen38_27b/research/synthetic-prompt.md](qwen38_27b/research/synthetic-prompt.md) | Qwen3.8-27B cold 512-token and 10000-token prompts |
 | [qwen38_27b/research/synthetic-prompt-mtp.md](qwen38_27b/research/synthetic-prompt-mtp.md) | Qwen3.8-27B cold synthetic prompts with MTP on |
+| [qwen38_27b/research/synthetic-prompt-half.md](qwen38_27b/research/synthetic-prompt-half.md) | Qwen3.8-27B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e20 pack with half keys and values |
 | [qwen36_35b_a3b/README.md](qwen36_35b_a3b/README.md) | Qwen3.6-35B-A3B summary |
 | [qwen36_35b_a3b/research/fp16-peak-restore.md](qwen36_35b_a3b/research/fp16-peak-restore.md) | Qwen3.6-35B-A3B float16 peak-restore bound |
 | [qwen36_35b_a3b/research/kernel-ceilings.md](qwen36_35b_a3b/research/kernel-ceilings.md) | Qwen3.6-35B-A3B isolated dispatch sum |
