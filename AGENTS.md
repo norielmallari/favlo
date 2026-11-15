@@ -64,7 +64,7 @@ A package reads `memory.budget()` when it opens and shrinks the one knob it owns
 
 Harness clients, flags, and the docs update live in [harness/AGENTS.md](harness/AGENTS.md). A coding-agent check takes `--model <id>`. Pass `--vision` when that package embeds an image. When `sampling.py` lists both `thinking` and `instruct`, run it twice, thinking first. `--thinking on` uses the thinking card. `--thinking off` uses the instruct card. One variant runs once. `--store off` is the default. `--store on` sends `store` true. Exit 0 on each run is the pass. The still is `tests/assets/favlo-horse.png`. The commands are the smoke-testing skill.
 
-A needle run, a coding-agent run, or a synthetic-prompt run that prints a prefill sum and a decode sum is a measured rate. The synthetic prompt also prints an end-to-end rate, the sum of those two clocks. Load research-claims in that same turn and file the row when [RESEARCH.md](RESEARCH.md) does not already hold that plane, MTP setting, length, depth, mode, and card. Asking to run the harness is enough.
+A needle run or a coding-agent run that prints a prefill sum and a decode sum files a Historical row in [RESEARCH.md](RESEARCH.md). A synthetic-prompt run also prints an end-to-end rate, the sum of those two clocks. A protocol-complete synthetic run writes the Active models row for that weight mix, key/value plane, and MTP label. Any other synthetic run files a Historical row. Load research-claims in that same turn. Asking to run the harness is enough.
 
 ## Agents
 
@@ -88,7 +88,7 @@ Do not invent routing hits, calibration energies, or hidden-state errors. A meas
 
 A package change updates that package's `docs/<model>/` files in the same change. The README there is a summary: what the package is, how to run it, the checkpoint and license, and links. Kernel layout, record bytes, forward order, and registry field tables go in `ARCHITECTURE.md` in that same folder. A caller-visible default changes the README. A dispatch or layout change changes `ARCHITECTURE.md`. A process change (listener, registry, console, or the write set) updates [ARCHITECTURE.md](ARCHITECTURE.md). An AI-assisted feature change updates [docs/ai-assistance](docs/ai-assistance/README.md) in the same change. Add a page under that folder when the feature needs its own note, and list the page from that folder's README. Do not edit another package's note to describe this one.
 
-`docs/` is as-built only, plus a measured research remainder at `docs/<model>/research/<slug>.md`. That file does not change the serving note until the behavior ships. Do not commit plan or option-comparison notes under `docs/`. Load research-claims before documenting a research claim. A needle or coding-agent run that printed a prefill sum and a decode sum is that claim.
+`docs/` is as-built only, plus a measured research remainder at `docs/<model>/research/<slug>.md`. That file does not change the serving note until the behavior ships. Do not commit plan or option-comparison notes under `docs/`. Load research-claims before documenting a research claim. A needle or coding-agent run that printed a prefill sum and a decode sum files a Historical row. A protocol-complete synthetic run writes the Active models row.
 
 ## Commits
 

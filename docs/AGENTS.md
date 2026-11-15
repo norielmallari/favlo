@@ -22,4 +22,4 @@ A pipeline README under `docs/<pipeline>/` is always a summary. It names the che
 
 Do not write "first", "novel", or "no prior work". Write "not found in these sources on this date."
 
-The filing procedure is the research-claims skill. Load it when a run prints a prefill and a decode rate, or when the task is a measured claim. The catalog is `RESEARCH.md`. The software citation stays in `CITATION.cff`.
+The filing procedure is the research-claims skill. Load it when a run prints a prefill and a decode rate, or when the task is a measured claim. The index is `RESEARCH.md`. Active models holds the protocol-complete synthetic rates. Historical holds the other language claims, the shared kernel notes, and the embeddings encode claim. Media holds image, video, music, and voice claims. A needle run and a coding-agent run file Historical. Only a protocol-complete synthetic run writes Active models. The software citation stays in `CITATION.cff`.

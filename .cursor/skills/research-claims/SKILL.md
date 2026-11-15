@@ -1,6 +1,6 @@
 ---
 name: research-claims
-description: Search public literature and write a Favlo research claim for one pipeline. Use when a needle run, a coding-agent run, or a synthetic-prompt run prints a prefill and decode rate, and when the user asks to document research claims, check an implementation against published work, or add a row to RESEARCH.md. File the printed rate when that plane, MTP setting, length, and card are not already a row.
+description: Search public literature and write a Favlo research claim for one pipeline. Use when a needle run, a coding-agent run, or a synthetic-prompt run prints a prefill and decode rate, and when the user asks to document research claims, check an implementation against published work, or add a row to RESEARCH.md. A protocol-complete synthetic run writes the Active models row. A needle run, a coding-agent run, and any other synthetic run file a Historical row when that plane, MTP setting, length, and card are not already there.
 ---
 
 # Research claims
@@ -9,11 +9,13 @@ Read [docs/AGENTS.md](../../../docs/AGENTS.md) and [RESEARCH.md](../../../RESEAR
 
 Work on `main`. Do not create a branch unless the user asks. Land the note, the catalog row, and the README link in one change. Commit only when the user asks.
 
-One pipeline. Do not edit another pipeline's package, shaders, tests, or docs. [RESEARCH.md](../../../RESEARCH.md) is the shared index and receives one new row.
+One pipeline. Do not edit another pipeline's package, shaders, tests, or docs. [RESEARCH.md](../../../RESEARCH.md) is the shared index. Active models receives the replacement for this protocol run, or Historical or Media receives one new row.
 
 ## After a printed rate
 
-A needle run, a coding-agent run, or `python -m harness.synthetic` that exits 0 and prints a prefill sum and a decode sum is a candidate. The synthetic prompt's end-to-end line is those two clocks added. File it on its own row for that plane, MTP setting, thinking card, and prompt length. Read [RESEARCH.md](../../../RESEARCH.md). When that pipeline, plane, MTP setting, mode, length, depth, thinking card, and vision flag are already a row, stop. Otherwise search and file in the same turn. Asking only to run the harness is enough. Page mode is a long-transcript rate and is filed. Retrieve mode is the retrieval table.
+A needle run, a coding-agent run, or `python -m harness.synthetic` that exits 0 and prints a prefill sum and a decode sum is a candidate. The synthetic prompt's end-to-end line is those two clocks added. Read [RESEARCH.md](../../../RESEARCH.md). Search and file in the same turn. Asking only to run the harness is enough.
+
+A protocol-complete synthetic run writes the Active models row from the rates just printed. The key is the pipeline, the weight mix, the key/value plane, and the MTP label. The same key replaces that row. A Historical row for an older run does not block the replacement. Page mode is a long-transcript rate and files a Historical row. Retrieve mode is the retrieval table and files a Historical row. A needle run and a coding-agent run file Historical. When that Historical row already holds the pipeline, plane, MTP setting, mode, length, depth, thinking card, and vision flag, stop.
 
 ## Search
 
@@ -44,7 +46,7 @@ The pipeline README links the measurement in one sentence. Add a row to `docs/RE
 - `shipped` once that note describes it. If it already does, add the link and use `shipped`.
 - `narrowed` after a correction is appended. The row stays.
 
-Catalog columns: slug, pipeline, status, search date, shipped date, benchmark date, the one-sentence remainder, the note path. The shipped date is the date the serving note described the behavior, empty while status is `measured`. The benchmark date is the date of that pipeline's latest harness scores, empty when that pipeline has none. The index does not repeat the table, the predecessors, or the command.
+Historical and Media columns: slug, pipeline, status, search date, shipped date, benchmark date, the one-sentence remainder, the note path. The shipped date is the date the serving note described the behavior, empty while status is `measured`. The benchmark date is the date of that pipeline's latest harness scores, empty when that pipeline has none. Those sections do not repeat the table, the predecessors, or the command. Active models repeats the four prefill and decode rates. It does not repeat the clocks, the predecessors, or the command.
 
 The package license and readme are the rerun instructions. Do not add another license file. The pipeline id, the model, and the papers come from the note under edit. Do not reuse another pipeline's claim as this one.
 
@@ -54,7 +56,7 @@ The package license and readme are the rerun instructions. Do not add another li
 - A recorded count that the serving note already follows is `shipped`. The remainder is that count. A shader check on a synthetic tile does not regenerate it.
 - A sort key with no table stays a plan. No catalog row.
 - A cited equation, a checkpoint operand order, a tile or stride constraint, and an unmeasured gap stay in the serving note. No research file.
-- A measured dispatch sum or recorded rate for this implementation is a research file. The remainder is that table.
+- A measured dispatch sum or recorded rate for this implementation is a research file. The remainder is that table. A protocol-complete synthetic rate also writes the Active models row from the rates just printed.
 
 ## Key/value plane
 
@@ -66,7 +68,7 @@ A recorded rate, a dispatch sum, or a needle row names the key/value plane that 
 
 `--mode retrieve` tells the agent to follow `next_offset` until a read has none, and only then to reply. A pass requires the number, a read of its line, a last read with no `next_offset`, and a last window that starts after that line. Depth 1 has no later line, so a depth-1 retrieve run does not fill the retrieval table.
 
-The claim table is one row per plane, MTP setting, thinking card, length, depth, and mode: pass or fail, the prefill sum, and the decode sum. The command carries `--mode`, `--tokens`, `--depth`, `--mtp`, `--thinking`, and the model id. The harness prints the loaded plane, MTP, and thinking. One row at one depth and one seed is a measured run. A grid of lengths and depths is the table set next to a published needle score. The search names that score. The "not found" sentence names this grid.
+The claim table is one row per plane, MTP setting, thinking card, length, depth, and mode: pass or fail, the prefill sum, and the decode sum. The command carries `--mode`, `--tokens`, `--depth`, `--mtp`, `--thinking`, and the model id. The harness prints the loaded plane, MTP, and thinking. One row at one depth and one seed is a measured run. A grid of lengths and depths is the table set next to a published needle score. The search names that score. The "not found" sentence names this grid. The catalog row is Historical. It does not write Active models.
 
 The finished transcript has to fit the served window. The file is replayed inside tool results, so a file as long as the window does not fit. `input does not fit` is a failed row, not a pass.
 
@@ -74,10 +76,16 @@ The finished transcript has to fit the served window. The file is replayed insid
 
 `python -m harness.coding` is the production-readiness run. Exit 0 means `ledger.py` `collect` returns 6, 0, and -6, a later request loaded the prefix from disk, and the chat contract held. Which tools the model called is not the result. The run is a recorded rate. It is not a retrieval claim.
 
-The claim table is one row per plane, MTP setting, thinking card, and vision flag: pass or fail, the prefill sum, and the decode sum. The command carries `--mtp`, `--thinking`, `--vision` when the pipeline embeds an image, and the model id. The harness prints the loaded plane, MTP, thinking, and vision. A pipeline whose sampling lists both `thinking` and `instruct` has two rows, thinking first. A row that omits the plane, or that was measured on another plane, does not fill this table. The "not found" sentence names this table.
+The claim table is one row per plane, MTP setting, thinking card, and vision flag: pass or fail, the prefill sum, and the decode sum. The command carries `--mtp`, `--thinking`, `--vision` when the pipeline embeds an image, and the model id. The harness prints the loaded plane, MTP, thinking, and vision. A pipeline whose sampling lists both `thinking` and `instruct` has two rows, thinking first. A row that omits the plane, or that was measured on another plane, does not fill this table. The "not found" sentence names this table. The catalog row is Historical. A coding-agent MTP rate does not write Active models.
 
 ## Synthetic prompt
 
 `python -m harness.synthetic` sends one user message of an exact prompt length and stops. The default lengths are 512, 1024, 4096, and 10000. Temperature is 0. `--decode` is the sampled-token count, 128 when omitted, and the body sets `favlo:fill_decode` so the count is filled. Exit 0 means each measured prompt length matched the server, the prefill was a cache miss, and the decode count matched. The run is a recorded rate. It is not a coding-agent row and not a needle row.
 
-The claim table is one row per plane, MTP setting, thinking card, and prompt length: the prefill sum, the decode sum, and the end-to-end sum. The end-to-end sum is prefill tokens plus decode tokens over those two clocks. The command carries `--tokens`, `--decode`, `--mtp`, `--thinking`, and the model id. The harness prints the loaded plane, MTP, and thinking. A 512-token row is the llama.cpp and MLX comparison. A 1024-token row and a 4096-token row are the oMLX comparison. A 10000-token row is the hosted-API comparison. The "not found" sentence names this table.
+The note's table is one row per plane, MTP setting, thinking card, and prompt length: the prefill sum, the decode sum, and the end-to-end sum. The end-to-end sum is prefill tokens plus decode tokens over those two clocks. The command carries `--tokens`, `--decode`, `--mtp`, `--thinking`, and the model id. The harness prints the loaded plane, MTP, thinking, and the weight mix. A 512-token row is the llama.cpp and MLX comparison. A 1024-token row and a 4096-token row are the oMLX comparison. A 10000-token row is the hosted-API comparison. The "not found" sentence names this table. End-to-end stays in the note.
+
+Active models is one row for all four lengths. Write it only from a run printed in this turn. An older table in a note stays Historical until that run exists. The run is protocol-complete when exit 0, temperature is 0, every prefill is a cache miss, decode is 128 at every length, the lengths are 512, 1024, 4096, and 10000, and the card is instruct. Thinking on stays Historical.
+
+The model cell is `<id>, MTP off`, or `<id>, MTP on, depth <n>`. Depth is in the label only when MTP is on. Weights is the loaded mix. For a mixed expert pack, name the resident plane and the expert counts. KV is the resolved plane. Rates are tok/s, prefill then decode. The measured date is the run date. The note link is the research file.
+
+The same pipeline, weights, KV, and MTP label updates that Active row. MTP on does not replace MTP off. A new weight mix or KV plane replaces the previous Active row for that pipeline and MTP label. The previous mix's note goes back to Historical. When Historical has a row whose note path is the file just written, remove that Historical row. The Active link is the index entry for that note.

@@ -51,20 +51,28 @@ uv run favlo --<pipeline> kernels
 uv run python -m harness.coding --model <pipeline>
 ```
 
+After that command exits 0, run the synthetic agent. Its printed prefill and decode are the only tok/s measurement. A coding-agent line is not that measurement.
+
+```text
+uv run python -m harness.synthetic --model <pipeline> --thinking off
+```
+
+The defaults are the measurement: temperature 0, decode filled to 128, and prompt lengths 512, 1024, 4096, and 10000. A harness that calls the listener uses `attach` and does not take the lock.
+
 ## 4. Commit
 
-Once the coding agent passes, commit the related code on the current branch, including `main`.
+Once the coding agent passes and the synthetic agent has printed its rates, commit the related code on the current branch, including `main`.
 
-Related code is this iteration's write set: the pipeline entry, package, `docs/<pipeline>/`, and tests that import only this package. When a printed series for the phase being optimized is at least 90% of the kernel ceiling, record that rate in the pipeline note before the commit.
+Related code is this iteration's write set: the pipeline entry, package, `docs/<pipeline>/`, and tests that import only this package. When the synthetic rate for the phase being optimized is at least 90% of the kernel ceiling, record that rate in the pipeline note before the commit.
 
 Leave models, artifacts, the machine lock, and other pipelines out of the commit. Use a Conventional Commit. Do not push.
 
-A failed pipeline smoke or a failed coding agent is not a commit.
+A failed pipeline smoke, a failed coding agent, or a failed synthetic run is not a commit.
 
 ## 5. Compare
 
-A phase is done when the coding agent's printed rate for that phase is at least 90% of the kernel ceiling. That series is the only one. Do not run the file agent, and do not compare a file-agent rate.
+A phase is done when the synthetic rate for that phase is at least 90% of the kernel ceiling. Use the row whose prompt length is nearest the context that ceiling names. Prefill is that row's prefill tok/s. Decode is that row's decode tok/s. Do not run the file agent, and do not compare a file-agent rate or a coding-agent rate.
 
-If it is short, modify again and run section 3. Reuse the saved ceiling unless a designed kernel changed. Each coding-agent run is a new run. Commit again when that run passes.
+If it is short, modify again and run section 3. Reuse the saved ceiling unless a designed kernel changed. Each synthetic run is a new measurement. Commit again when the coding agent passes and that synthetic run prints its rates.
 
 When 90% is met, report the ceiling and the printed rate. Do not write that rate into another pipeline's note.
