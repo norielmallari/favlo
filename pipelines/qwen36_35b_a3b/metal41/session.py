@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -235,7 +236,7 @@ class Session:
         self.pipes: dict[str, Any] = {}
         self._recording = False
         self._redirect: Any = None
-        self._inflight: list[tuple[Any, list[Any]]] = []
+        self._inflight: deque[tuple[Any, list[Any]]] = deque()
         self._sizes: dict[tuple[int, int, int], Any] = {}
         for name in KERNELS:
             function = library.newFunctionWithName_(name)
@@ -447,7 +448,7 @@ class Session:
     def wait_oldest(self) -> None:
         if not self._inflight:
             return
-        command, held = self._inflight.pop(0)
+        command, held = self._inflight.popleft()
         self._finish(command, held)
 
     def wait_inflight(self) -> None:

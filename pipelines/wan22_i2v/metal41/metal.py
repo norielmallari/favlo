@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import struct
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -109,7 +110,7 @@ class Gpu:
                     on_pipeline()
         self._cmd: Any = None
         self._enc: Any = None
-        self._inflight: list[Any] = []
+        self._inflight: deque[Any] = deque()
         self._held: list[bytes] = []
         self._owned: list[Any] = []
         self._kept: set[int] = set()
@@ -133,12 +134,12 @@ class Gpu:
         self._cmd = None
         self._held.clear()
         if len(self._inflight) > 1:
-            self._finish(self._inflight.pop(0))
+            self._finish(self._inflight.popleft())
 
     def end(self) -> None:
         self.commit()
         pending = self._inflight
-        self._inflight = []
+        self._inflight = deque()
         for cmd in pending:
             self._finish(cmd)
 
@@ -149,7 +150,7 @@ class Gpu:
         holds the dispatches since the previous finish.
         """
         pending = self._inflight
-        self._inflight = []
+        self._inflight = deque()
         for cmd in pending:
             self._finish(cmd)
         if self._enc is None:

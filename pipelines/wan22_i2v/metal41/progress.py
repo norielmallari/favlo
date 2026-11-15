@@ -8,6 +8,7 @@ the DiT walks take what remains.
 from __future__ import annotations
 
 import time
+from collections import deque
 from typing import Any
 
 from favlo.console import publish_count
@@ -128,8 +129,8 @@ class ClipProgress:
         self._encode_share = 0
         self._decode_share = 0
         self._pack_share = 0
-        self._load_shares: list[int] = []
-        self._step_shares: list[int] = []
+        self._load_shares: deque[int] = deque()
+        self._step_shares: deque[int] = deque()
         self.text_layers = 0
         self.pipelines = 0
         self.files = 0
@@ -166,8 +167,8 @@ class ClipProgress:
         self._encode_share = int(shares["encode"])
         self._decode_share = int(shares["decode"])
         self._pack_share = int(shares["pack"])
-        self._load_shares = [int(value) for value in shares["load"]]
-        self._step_shares = [int(value) for value in shares["step"]]
+        self._load_shares = deque(int(value) for value in shares["load"])
+        self._step_shares = deque(int(value) for value in shares["step"])
         self.started = time.perf_counter()
 
     def restore(self, done: int, stage: str) -> None:
@@ -294,11 +295,11 @@ class ClipProgress:
         if kind == "load":
             if not self._load_shares:
                 return 0
-            return self._load_shares.pop(0)
+            return self._load_shares.popleft()
         if kind == "step":
             if not self._step_shares:
                 return 0
-            return self._step_shares.pop(0)
+            return self._step_shares.popleft()
         if kind == "decode":
             value = self._decode_share
             self._decode_share = 0

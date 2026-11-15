@@ -195,6 +195,7 @@ class Memory:
         self._set: Any = None
         self._set_pool: Any = None
         self._queues: list[Any] = []
+        self._copy_queue: Any = None
         self._watchers: list[Any] = []
         self._segments: list[_Segment] = []
         self._spans: dict[int, _Span] = {}
@@ -447,14 +448,29 @@ class Memory:
                 self._reported.pop(owner, None)
 
     def make_queue(self) -> Any:
+        import objc
+
         with self._lock:
             device = self._device_locked()
-            queue = device.newCommandQueue()
+            with objc.autorelease_pool():
+                queue = device.newCommandQueue()
             if queue is None:
                 message = "Metal command queue is missing"
                 raise RuntimeError(message)
             self._attach_locked(queue)
             return queue
+
+    def copy_queue(self) -> Any:
+        """One queue for buffer copies. A new queue on every copy leaks a Metal context."""
+        with self._lock:
+            queue = self._copy_queue
+        if queue is not None:
+            return queue
+        queue = self.make_queue()
+        with self._lock:
+            if self._copy_queue is None:
+                self._copy_queue = queue
+            return self._copy_queue
 
     def watch(self, residency: Any) -> None:
         """Publish later heaps into a pipeline residency set."""
@@ -1117,15 +1133,18 @@ class Memory:
             raise OSError(err, os.strerror(err))
 
     def _blit(self, span: _Span, offset: int, nbytes: int, value: int) -> None:
-        queue = self.make_queue()
-        command = self.command_buffer(queue)
-        blit = command.blitCommandEncoder()
-        blit.fillBuffer_range_value_(
-            span.segment.buffer, _range(span.offset + offset, nbytes), value
-        )
-        blit.endEncoding()
-        command.commit()
-        status, error = self.retire(command)
+        import objc
+
+        with objc.autorelease_pool():
+            queue = self.copy_queue()
+            command = self.command_buffer(queue)
+            blit = command.blitCommandEncoder()
+            blit.fillBuffer_range_value_(
+                span.segment.buffer, _range(span.offset + offset, nbytes), value
+            )
+            blit.endEncoding()
+            command.commit()
+            status, error = self.retire(command)
         if status == 5:
             message = f"metal fill failed: {error}"
             raise RuntimeError(message)
@@ -1133,19 +1152,22 @@ class Memory:
     def _copy(
         self, source: _Span, src_offset: int, dest: _Span, dst_offset: int, nbytes: int
     ) -> None:
-        queue = self.make_queue()
-        command = self.command_buffer(queue)
-        blit = command.blitCommandEncoder()
-        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
-            source.segment.buffer,
-            source.offset + src_offset,
-            dest.segment.buffer,
-            dest.offset + dst_offset,
-            nbytes,
-        )
-        blit.endEncoding()
-        command.commit()
-        status, error = self.retire(command)
+        import objc
+
+        with objc.autorelease_pool():
+            queue = self.copy_queue()
+            command = self.command_buffer(queue)
+            blit = command.blitCommandEncoder()
+            blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
+                source.segment.buffer,
+                source.offset + src_offset,
+                dest.segment.buffer,
+                dest.offset + dst_offset,
+                nbytes,
+            )
+            blit.endEncoding()
+            command.commit()
+            status, error = self.retire(command)
         if status == 5:
             message = f"metal copy failed: {error}"
             raise RuntimeError(message)

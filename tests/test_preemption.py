@@ -321,3 +321,27 @@ def test_a_chat_call_does_not_unpickle_a_media_hold(tmp_path) -> None:
     assert "image_hold" not in chat
     image = _child_state(message, control, "image")
     assert image["image_hold"].stage == "text"
+    assert path.is_file()
+
+
+def test_a_hold_export_is_a_unique_file_removed_on_load() -> None:
+    from pathlib import Path
+
+    from favlo.pipeline_worker import _child_state, _export_holds
+    from z_image.metal41.hold import ImageHold
+
+    state = {"image_hold": ImageHold(stage="text")}
+    first = _export_holds(state)
+    second = _export_holds(state)
+    assert first["image_hold"] != second["image_hold"]
+    path = Path(first["image_hold"])
+    other = Path(second["image_hold"])
+    assert path.name.startswith("favlo-image_hold-")
+    assert path.suffix == ".pkl"
+    assert path.is_file()
+    message = {"holds": first}
+    control = {"preempt": threading.Event(), "cancel": threading.Event()}
+    image = _child_state(message, control, "image")
+    assert image["image_hold"].stage == "text"
+    assert not path.exists()
+    other.unlink(missing_ok=True)

@@ -17,6 +17,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -918,7 +919,6 @@ def _export_holds(state: dict[str, Any]) -> dict[str, str | None]:
     import pickle
 
     found: dict[str, str | None] = {}
-    root = Path(os.environ.get("TMPDIR") or "/tmp")
     for key in _HOLDS:
         if key not in state:
             continue
@@ -929,16 +929,24 @@ def _export_holds(state: dict[str, Any]) -> dict[str, str | None]:
         if value is None:
             found[key] = None
             continue
-        path = root / f"favlo-{key}-{os.getpid()}.pkl"
-        path.write_bytes(pickle.dumps(value))
-        found[key] = str(path)
+        fd, name = tempfile.mkstemp(prefix=f"favlo-{key}-", suffix=".pkl")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(pickle.dumps(value))
+        except Exception:
+            Path(name).unlink(missing_ok=True)
+            raise
+        found[key] = name
     return found
 
 
 def _load_hold(path: Path) -> Any:
     import pickle
 
-    return pickle.loads(path.read_bytes())
+    value = pickle.loads(path.read_bytes())
+    if path.name.startswith("favlo-") and path.suffix == ".pkl":
+        path.unlink(missing_ok=True)
+    return value
 
 
 def _shutdown(runtime: Any) -> None:

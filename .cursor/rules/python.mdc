@@ -1,12 +1,14 @@
 ---
-description: Use the Python standard library for common coding patterns
+description: Use the Python standard library for common coding patterns, including on the free-threaded build
 alwaysApply: true
 ---
 
 # Python
 
-Use the standard library for a common pattern. Do not write a private copy of one.
+Use the standard library for a common pattern. Do not write a private copy of one. These modules run on the free-threaded build. A shared object still needs a lock around a read-modify-write. One method that is safe to call from two threads is not that lock.
 
-Logging goes through `logging` and `logging.handlers`. A queue is `queue`. A bounded cache is `functools.lru_cache`. A deque, a counter, and a default dict are `collections`. A heap is `heapq`. A temporary file is `tempfile`. A path is `pathlib`. A subprocess is `subprocess`. A config file parser is `configparser`.
+Logging goes through `logging` and `logging.handlers`. A cross-thread queue is `queue.Queue` or `queue.SimpleQueue`. A deque is `collections.deque`. `append`, `appendleft`, `pop`, `popleft`, and `len` may run together. Do not iterate or copy a deque another thread is mutating. A bounded cache of a pure function is `functools.lru_cache`. The wrapped function runs outside the cache lock. A counter and a default dict are `collections.Counter` and `collections.defaultdict`. An increment is not atomic. A heap is `heapq`. A counter, a default dict, or a heap that two threads update takes a lock around the whole update, or stays on one thread. A temporary file is `tempfile.mkstemp`, or `NamedTemporaryFile` with `delete=False` when the file must outlive the call. A path is `pathlib`. A subprocess is `subprocess`. One `Popen` stays on one thread. A config file parser is `configparser`. One parser has one writer.
+
+An ordered cache that loads and releases a resource is `collections.OrderedDict` on the thread that owns it. `functools.lru_cache` cannot release that resource. Do not iterate an `OrderedDict` while another thread calls `popitem`, `clear`, or `move_to_end`. That race crashes the free-threaded build. A shared ordered cache takes a lock around the update and around the iteration.
 
 A thin adapter that calls the library is the right shape. A behavior the library does not have stays missing.
