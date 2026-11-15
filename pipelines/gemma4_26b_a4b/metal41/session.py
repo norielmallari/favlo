@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -116,42 +117,44 @@ class Session:
 
     def __init__(self, owner: str) -> None:
         import Metal
+        import objc
 
         self.owner = owner
         self.metal = Metal
         device = memory.device
-        options = Metal.MTLCompileOptions.alloc().init()
-        options.setLanguageVersion_((4 << 16) + 1)
-        library, error = _pair(
-            device.newLibraryWithSource_options_error_(
-                _SHADER.read_text(encoding="utf-8"),
-                options,
-                None,
+        with objc.autorelease_pool():
+            options = Metal.MTLCompileOptions.alloc().init()
+            options.setLanguageVersion_((4 << 16) + 1)
+            library, error = _pair(
+                device.newLibraryWithSource_options_error_(
+                    _SHADER.read_text(encoding="utf-8"),
+                    options,
+                    None,
+                )
             )
-        )
-        if library is None:
-            message = f"shader library failed to compile: {error}"
-            raise RuntimeError(message)
-        self.device = device
-        self.queue = memory.make_queue()
-        self._fence = device.newFence()
-        self._fence_armed = False
-        self.pipes: dict[str, object] = {}
-        for name in _KERNELS:
-            function = library.newFunctionWithName_(name)
-            if function is None:
-                message = f"{name} is not in the shader library"
+            if library is None:
+                message = f"shader library failed to compile: {error}"
                 raise RuntimeError(message)
-            pipeline, pipe_error = _pair(
-                device.newComputePipelineStateWithFunction_error_(function, None)
-            )
-            if pipeline is None:
-                message = f"{name} pipeline failed: {pipe_error}"
-                raise RuntimeError(message)
-            self.pipes[name] = pipeline
+            self.device = device
+            self.queue = memory.make_queue()
+            self._fence = device.newFence()
+            self._fence_armed = False
+            self.pipes = {}
+            for name in _KERNELS:
+                function = library.newFunctionWithName_(name)
+                if function is None:
+                    message = f"{name} is not in the shader library"
+                    raise RuntimeError(message)
+                pipeline, pipe_error = _pair(
+                    device.newComputePipelineStateWithFunction_error_(function, None)
+                )
+                if pipeline is None:
+                    message = f"{name} pipeline failed: {pipe_error}"
+                    raise RuntimeError(message)
+                self.pipes[name] = pipeline
         self._command = None
         self._encoder = None
-        self._inflight: list[object] = []
+        self._inflight: deque[object] = deque()
 
     def zeros(self, nbytes: int) -> object:
         return device_buffer(self.owner, nbytes, zero=True)
@@ -242,25 +245,47 @@ class Session:
         encoder.updateFence_(self._fence)
         self._fence_armed = True
         encoder.endEncoding()
-        if when_done is not None:
-            command.addCompletedHandler_(lambda _command: when_done())
         command.commit()
-        self._inflight.append(command)
+        self._inflight.append((command, when_done))
         self._encoder = None
         self._command = None
+        self._reap()
 
     def flush(self) -> None:
         """Submit the open buffer and wait until every submitted buffer has finished."""
         self.commit()
-        inflight = self._inflight
-        self._inflight = []
-        for command in inflight:
-            command.waitUntilCompleted()
-            failed = getattr(command, "error", None)
-            error = failed() if callable(failed) else None
-            if error is not None:
-                message = f"command buffer failed: {error}"
-                raise RuntimeError(message)
+        while self._inflight:
+            self._finish(self._inflight.popleft())
+
+    def wait_oldest(self) -> None:
+        """Wait for the oldest submitted buffer, then retire it."""
+        if not self._inflight:
+            return
+        self._finish(self._inflight.popleft())
+
+    def _reap(self) -> None:
+        """Retire buffers that have already finished. Do not wait."""
+        while self._inflight:
+            command, _when_done = self._inflight[0]
+            status_of = getattr(command, "status", None)
+            status = int(status_of()) if callable(status_of) else 0
+            if status not in {4, 5}:
+                return
+            self._finish(self._inflight.popleft())
+
+    def _finish(self, item: tuple[object, object]) -> None:
+        command, when_done = item
+        command.waitUntilCompleted()
+        failed = getattr(command, "error", None)
+        error = failed() if callable(failed) else None
+        try:
+            if error is None and when_done is not None:
+                when_done()
+        finally:
+            memory.retire(command)
+        if error is not None:
+            message = f"command buffer failed: {error}"
+            raise RuntimeError(message)
 
     def measure_us(self, launch) -> float:
         """One kernel per command buffer. Discard the first sample; median of four."""
@@ -270,7 +295,7 @@ class Session:
         for _ in range(4):
             launch()
             self.commit()
-            command = self._inflight[-1]
+            command = self._inflight[-1][0]
             self.flush()
             started = float(command.GPUStartTime())
             ended = float(command.GPUEndTime())
@@ -281,12 +306,15 @@ class Session:
     def _open(self) -> None:
         if self._encoder is not None:
             return
-        command = self.queue.commandBuffer()
-        encoder = command.computeCommandEncoder()
-        if self._fence_armed:
-            encoder.waitForFence_(self._fence)
-        self._command = command
-        self._encoder = encoder
+        import objc
+
+        with objc.autorelease_pool():
+            command = memory.command_buffer(self.queue)
+            encoder = command.computeCommandEncoder()
+            if self._fence_armed:
+                encoder.waitForFence_(self._fence)
+            self._command = command
+            self._encoder = encoder
 
     def dispatch(
         self,

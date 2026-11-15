@@ -1,6 +1,6 @@
 # This package
 
-This package is a language pipeline. It inherits `LanguagePipeline`. The class is the disconnect shell around one response. It does not encode a prompt, sample a token, or parse a tool call. The as-built note is the README under `docs/` whose folder name matches this package. Read that note before editing kernels.
+This package is a language pipeline. It inherits `LanguagePipeline`. The class is the disconnect shell around one response. It does not encode a prompt, sample a token, or parse a tool call. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder. Read that file before editing kernels.
 
 A shell change loads the seam-checks skill. A GPU smoke loads the smoke-testing skill. Do not paste those commands here.
 
@@ -12,7 +12,7 @@ This package implements the Responses API only. Do not translate Chat Completion
 
 `content` is the reply. It is null when the model only calls a tool. `tool_calls` are the calls, in the OpenAI function shape. `reasoning` is the trace when the model wrote one. `reasoning_content` is that same text. An empty thought is not that field. `finish_reason` is `stop`, `length`, or `tool_calls`. The reply fills `usage` with the OpenAI token fields and `max_prompt_tokens` before the body is encoded. This package may set `cached_tokens`, `context_length`, and `max_prompt_tokens` on the Response, including `_chat_usage` for the wire.
 
-`chat_to_responses` maps the chat body onto a Responses request. `reasoning_content` becomes a reasoning item. Effort and `preserve_thinking` pass through. Markers stay out of `content`. A call becomes `tool_calls`. An open trace stays `reasoning_content` and does not become the reply. A call that starts before the trace closes ends the trace. The marker strings belong to this package. Do not drop `reasoning_content` on the way in. A missing reasoning item breaks the stored prefix when `preserve_thinking` is on.
+`chat_to_responses` maps the chat body onto a Responses request. `reasoning_content` becomes a reasoning item. Effort passes through. A request `preserve_thinking` value is ignored: a tool-call thought stays, and a plain assistant thought drops. Markers stay out of `content`. A call becomes `tool_calls`. An open trace stays `reasoning_content` and does not become the reply. A call that starts before the trace closes ends the trace. The marker strings belong to this package. Do not drop `reasoning_content` on the way in. A missing reasoning item on a tool call breaks the stored prefix.
 
 The chat client in `src/favlo/chat_client.py` passes those fields through. It does not scan for markup, close a trace, or copy reasoning into the reply. A harness does not add its own parser for markup. There is no shared sampler on `LanguagePipeline`.
 

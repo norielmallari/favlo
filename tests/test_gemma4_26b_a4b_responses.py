@@ -422,8 +422,12 @@ def test_a_dropped_thought_shares_the_prompt_before_the_generation_suffix() -> N
     assert nxt[:cut] == prompt[:cut]
     assert nxt[: len(prompt)] == prompt
     plain = encode_chat(root, picture, True)
-    assert generation_cut(root, plain) is None
-    assert encode_chat(root, follow, True)[: len(plain)] == plain
+    plain_cut = generation_cut(root, plain)
+    assert plain_cut is not None
+    assert "<|image|>" in decode_text(root, plain[:plain_cut])
+    kept = encode_chat(root, follow, True)
+    assert kept[:plain_cut] == plain[:plain_cut]
+    assert kept[: len(plain)] == plain
 
     tools = [
         {
@@ -465,7 +469,6 @@ def test_a_dropped_thought_shares_the_prompt_before_the_generation_suffix() -> N
         ],
         True,
         tools,
-        preserve_thinking=False,
     )
     assert dropped[:opened_cut] == opened[:opened_cut]
     assert dropped[: len(opened)] != opened
@@ -512,3 +515,151 @@ def test_a_covered_image_span_is_not_encoded(monkeypatch: pytest.MonkeyPatch) ->
     assert later.notes == ["vision cached 2"]
     assert later.encoded == [b"fresh"]
     assert later.prefilled == [[BOI_TOKEN], [EOI_TOKEN]]
+
+
+def test_a_preserve_thinking_value_is_ignored(monkeypatch: Any) -> None:
+    runtime = _Runtime("ok")
+    _install(monkeypatch, runtime)
+    for value in ("true", False, True):
+        reply = MemoryReply("gemma4_26b_a4b")
+        handle_responses.handle_responses(
+            reply,
+            runtime,
+            {"input": "Hi", "preserve_thinking": value},
+            None,
+            None,
+            {},
+        )
+        assert reply.status == 200
+
+
+def test_a_later_user_keeps_the_tool_trace() -> None:
+    root = Path("models/gemma-4-26B-A4B-it-fp8-e20")
+    if not (root / "tokenizer.json").is_file():
+        pytest.skip("tokenizer is not installed")
+    from gemma4_26b_a4b.metal41.chat import decode_text, encode_chat
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "read",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    call = {
+        "id": "c1",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": {"path": "a.py"}},
+    }
+    user = {"role": "user", "content": "Read a.py"}
+    assistant = {
+        "role": "assistant",
+        "reasoning_content": "I should read the file first.",
+        "content": "",
+        "tool_calls": [call],
+    }
+    tool = {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "print(1)\n"}
+    mid = [user, assistant, tool]
+    follow = [
+        *mid,
+        {"role": "assistant", "reasoning_content": "The file prints one.", "content": "It prints 1."},
+        {"role": "user", "content": "Now change it."},
+    ]
+    for thinking in (False, True):
+        text = decode_text(root, encode_chat(root, mid, thinking, tools))
+        nxt = decode_text(root, encode_chat(root, follow, thinking, tools))
+        assert "I should read the file first." in text
+        assert "I should read the file first." in nxt
+        assert "The file prints one." not in nxt
+
+
+def test_a_tool_trace_stays_and_the_previous_prompt_is_shared() -> None:
+    root = Path("models/gemma-4-26B-A4B-it-fp8-e20")
+    if not (root / "tokenizer.json").is_file():
+        pytest.skip("tokenizer is not installed")
+    from gemma4_26b_a4b.metal41.chat import decode_text, encode_chat
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "read",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    call = {
+        "id": "c1",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": {"path": "a.py"}},
+    }
+    asked = [
+        {"role": "user", "content": "Call read_file with path a.py."},
+        {
+            "role": "assistant",
+            "reasoning_content": "older-trace",
+            "content": "",
+            "tool_calls": [call],
+        },
+        {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "print(1)\n"},
+        {"role": "user", "content": "Call read_file with path b.py."},
+    ]
+    plain = [
+        {"role": "user", "content": "Hello."},
+        {"role": "assistant", "reasoning_content": "older-trace", "content": "Hi."},
+        {"role": "user", "content": "Again."},
+    ]
+    for thinking in (False, True):
+        kept_ids = encode_chat(root, asked, thinking, tools)
+        kept = decode_text(root, kept_ids)
+        assert "older-trace" in kept
+        assert "older-trace" not in decode_text(root, encode_chat(root, plain, thinking, tools))
+        follow = encode_chat(
+            root,
+            [*asked, {"role": "user", "content": "Call read_file with path c.py."}],
+            thinking,
+            tools,
+        )
+        assert follow[: len(kept_ids)] == kept_ids
+
+
+def test_an_image_pad_shifts_the_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gemma4_26b_a4b.metal41.chat import expanded_cut
+    from gemma4_26b_a4b.metal41.geometry import IMAGE_TOKEN
+
+    monkeypatch.setattr("gemma4_26b_a4b.metal41.vision.image_soft_tokens", lambda _blob: 4)
+    text = [1, IMAGE_TOKEN, 2, 3]
+    assert expanded_cut(text, 2, [b"png"]) == 7
+    assert expanded_cut(text, 1, [b"png"]) == 1
+    assert expanded_cut(text, None, [b"png"]) is None
+
+
+def test_prefix_copy_keeps_the_scratch_name() -> None:
+    from types import SimpleNamespace
+
+    from favlo.memory import memory
+    from gemma4_26b_a4b.metal41.prefix import RuntimeAdapter
+
+    runtime = SimpleNamespace(
+        _owner="gemma4-prefix-copy",
+        _prefix_scratch="file-agent-evict",
+        _prefix_scratch_n=10**9,
+    )
+    copied = RuntimeAdapter(runtime)._scratch(16)
+    try:
+        assert copied != "file-agent-evict"
+        assert runtime._prefix_scratch == "file-agent-evict"
+    finally:
+        memory.release(copied)

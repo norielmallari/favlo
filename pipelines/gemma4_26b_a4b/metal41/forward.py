@@ -275,7 +275,7 @@ class Gemma4Runtime:
         path: Path,
         *,
         owner: str,
-        kv_cache: str = "fp8_e4m3",
+        kv_cache: str = "half",
         console: object = None,
     ) -> None:
         from gemma4_26b_a4b.metal41.atlas import kv_mode
@@ -356,23 +356,51 @@ class Gemma4Runtime:
         on_token: Any = None,
         images: list[bytes] | None = None,
         stops: list[str] | None = None,
+        channel_open: bool = False,
+        thought_budget: int | None = None,
+        fill: bool = False,
     ) -> tuple[list[int], str, str]:
-        """Sample after ``prompt``. Returns tokens, the prefill line, and the decode line."""
+        """Sample after ``prompt``. Returns tokens, the prefill line, and the decode line.
+
+        ``fill`` keeps sampling through the stop ids until ``limit`` tokens.
+        """
         pictures = list(images or [])
         halt_at = [item for item in (stops or []) if item]
+        text_prompt = list(prompt)
+        body_len = getattr(self, "_body_len", None)
+        pin = getattr(self, "_pin_cut", True)
+        self._body_len = None
+        self._pin_cut = True
+        from gemma4_26b_a4b.metal41.chat import expanded_cut, generation_cut
+
+        # A forced tool lead is appended after the generation suffix. The cut
+        # is the suffix of the body, then image pads shift that index.
+        scan = text_prompt
+        if isinstance(body_len, int) and 0 < body_len <= len(text_prompt):
+            scan = text_prompt[:body_len]
+        text_gen = generation_cut(self.root, scan)
         if pictures:
-            from gemma4_26b_a4b.metal41.vision import VisionTower, expand_image_placeholders
+            from gemma4_26b_a4b.metal41.vision import expand_image_placeholders
 
             prompt = expand_image_placeholders(prompt, pictures)
+        gen = expanded_cut(text_prompt, text_gen, pictures)
         visual = bool(pictures) or IMAGE_TOKEN in prompt or BOI_TOKEN in prompt
         self._hit_limit = False
         rng = random.Random(seed)
+        from favlo.prefix import aim_session
+
+        aim_session(
+            self.prefix,
+            budget=getattr(self, "_prefix_budget", None),
+            scratch=getattr(self, "_prefix_scratch", None),
+        )
         self._note("prompt", tokens=len(prompt))
         hit = self.prefix.align(prompt)
         if self.prefix.loaded:
             self._note("prefix_load", tokens=hit)
         self._cached_tokens = hit
         self._note("cache", hit=hit)
+        self._flush_log()
         pending = len(prompt) - hit
         prefill_row = self._begin_phase("prefill", max(pending, 0))
         self._prefill_progress = prefill_row
@@ -380,22 +408,33 @@ class Gemma4Runtime:
         decode_row = None
         try:
             start = time.perf_counter()
-            from gemma4_26b_a4b.metal41.chat import generation_cut
-
-            cut = generation_cut(self.root, prompt)
+            cuts: list[int] = []
+            if isinstance(gen, int) and 0 < gen < len(prompt):
+                cuts.append(gen)
+            # Pin the first read. A later tool turn stores its cut and leaves that pin.
+            held = gen if pin else None
             logged_cached = False
-            if cut is not None and hit < cut:
-                # The next encode drops this thought channel. The file that
-                # stops here is the one that follow-up hits through the still.
+            for cut in cuts:
+                if self._stop:
+                    break
+                if hit >= cut:
+                    if cut == held:
+                        self._keep_boundary(prompt[:cut])
+                    continue
                 if visual:
-                    self._prefill_visual(prompt, hit, pictures, stop=cut)
+                    self._prefill_visual(
+                        prompt, hit, pictures, stop=cut, log_cached=not logged_cached
+                    )
                     logged_cached = True
                 else:
                     self._prefill(prompt[hit:cut], finish=False)
-                if self.filled == cut:
-                    self.prefix.note(prompt[:cut])
-                    self._store_prefix()
-                    hit = cut
+                if self.filled != cut:
+                    break
+                self.prefix.note(prompt[:cut])
+                self._store_prefix(note=False)
+                if cut == held:
+                    self._keep_boundary(prompt[:cut])
+                hit = cut
             if not self._stop:
                 if visual:
                     self._prefill_visual(prompt, hit, pictures, log_cached=not logged_cached)
@@ -418,13 +457,23 @@ class Gemma4Runtime:
             decode_start = time.perf_counter()
             if hit == len(prompt):
                 self._logits()
+            open_ids: list[int] = []
+            close_ids: list[int] = []
+            budget = int(thought_budget or 0)
+            if budget > 0:
+                from gemma4_26b_a4b.metal41.chat import advance_thought, encode_text
+
+                open_ids = encode_text(self.root, "<|channel>thought\n")
+                close_ids = encode_text(self.root, "<channel|>")
+            inside = bool(channel_open)
+            reasoned = 0
             halted = False
             for _ in range(limit):
-                if self._stop:
+                if self._stop or len(drawn) >= limit:
                     halted = True
                     break
                 token = self._draw(temperature, top_p, top_k, presence, rng)
-                if token in _STOP:
+                if token in _STOP and not fill:
                     halted = True
                     break
                 drawn.append(token)
@@ -437,6 +486,24 @@ class Gemma4Runtime:
                 if stopped:
                     halted = True
                     break
+                if budget > 0 and close_ids:
+                    inside, reasoned, inject = advance_thought(
+                        drawn,
+                        inside=inside,
+                        reasoned=reasoned,
+                        budget=budget,
+                        open_ids=open_ids,
+                        close_ids=close_ids,
+                    )
+                    for piece in inject:
+                        if len(drawn) >= limit or (piece in _STOP and not fill):
+                            break
+                        drawn.append(piece)
+                        if on_token is not None:
+                            on_token(piece)
+                        if decode_row is not None:
+                            publish_count(self.console, decode_row, len(drawn))
+                        self._step(piece)
             if not halted:
                 self._hit_limit = True
             decode_s = time.perf_counter() - decode_start
@@ -445,6 +512,7 @@ class Gemma4Runtime:
             decode_line = format_rate("decode", len(drawn), decode_s)
             self._end_phase(decode_row, decode_line)
             decode_row = None
+            self._flush_log()
             return drawn, prefill_line, decode_line
         finally:
             self._prefill_progress = None
@@ -462,7 +530,12 @@ class Gemma4Runtime:
         temperature: float | None = None,
         seed: int = 0,
     ) -> str:
-        from gemma4_26b_a4b.metal41.chat import decode_text, encode_chat, reply_text
+        from gemma4_26b_a4b.metal41.chat import (
+            THOUGHT_BUDGET,
+            decode_text,
+            encode_chat,
+            reply_text,
+        )
         from gemma4_26b_a4b.metal41.sampling import DEFAULT_VARIANT, VARIANTS
 
         card = VARIANTS[DEFAULT_VARIANT]
@@ -476,6 +549,7 @@ class Gemma4Runtime:
             int(card["top_k"]),
             float(card["presence_penalty"]),
             seed=seed,
+            thought_budget=THOUGHT_BUDGET,
         )
         print(prefill_line, flush=True)
         print(decode_line, flush=True)
@@ -971,15 +1045,8 @@ class Gemma4Runtime:
         """Commit the open buffer so the window server can run between key tiles."""
         session = self.session
         session.commit()
-        inflight = session._inflight
-        while len(inflight) > 2:
-            command = inflight.pop(0)
-            command.waitUntilCompleted()
-            failed = getattr(command, "error", None)
-            error = failed() if callable(failed) else None
-            if error is not None:
-                message = f"command buffer failed: {error}"
-                raise RuntimeError(message)
+        while len(session._inflight) > 2:
+            session.wait_oldest()
 
     def _store_one(self, source: object, cache: object, heads: int, dim: int) -> None:
         if self._plain_kv:
@@ -1571,13 +1638,28 @@ class Gemma4Runtime:
         self._finish_load(summary)
         self._note("context", tokens=self.capacity, atlas=self.atlas.slots)
 
-    def _store_prefix(self) -> None:
+    def _keep_boundary(self, tokens: list[int]) -> None:
+        """Pin the stored file for these tokens so eviction leaves it in place."""
+        from favlo.prefix import object_name
+
+        store = self.prefix.store
+        name = object_name(store.model, store.digest, store.tag, tokens)
+        path = store.directory / f"{name}.bin"
+        if path.is_file():
+            store.pin(path)
+
+    def _store_prefix(self, *, note: bool = True) -> None:
+        # The copy reads a different queue from the one that wrote the cache.
+        # Wait until that command buffer finishes, or the file keeps the previous turn.
+        session = getattr(self, "session", None)
+        if session is not None:
+            session.flush()
         try:
             path = self.prefix.flush()
         except OSError as exc:
             self._note("prefix_store_failed", error=exc)
             return
-        if path is not None:
+        if path is not None and note:
             self._note("prefix_store", tokens=len(self.prefix.tokens))
 
     def _status(self, line: str) -> None:
@@ -1586,6 +1668,18 @@ class Gemma4Runtime:
             print(line, flush=True)
             return
         console.log(line)
+
+    def _flush_log(self) -> None:
+        """Write queued notes before the next request opens.
+
+        Prompt, prefill, and decode go through the console host. A vision line
+        is written on this thread. Flushing keeps one request's lines together
+        so the next prompt does not split them.
+        """
+        console = self.console
+        flush = getattr(console, "flush", None)
+        if callable(flush):
+            flush()
 
     def _begin_load(self, total: int) -> object:
         console = self.console

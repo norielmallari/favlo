@@ -9,8 +9,12 @@ import pytest
 from favlo.responses import chat_to_responses, template_messages
 from gemma4_26b_a4b.metal41.chat import (
     _stop_strings,
+    advance_thought,
+    close_model_turn,
     completion_fields,
     cut_stop,
+    encode_chat,
+    encode_text,
     render_chat,
     reply_text,
 )
@@ -153,6 +157,43 @@ def test_prompt_opened_thought_stays_reasoning_until_close() -> None:
     assert answer == ""
 
 
+def test_a_spent_thought_budget_closes_the_channel() -> None:
+    open_ids = [10, 11]
+    close_ids = [20]
+    drawn = [10, 11]
+    inside, reasoned, inject = advance_thought(
+        drawn, inside=False, reasoned=0, budget=3, open_ids=open_ids, close_ids=close_ids
+    )
+    assert (inside, reasoned, inject) == (True, 0, [])
+    for token, count in ((1, 1), (2, 2)):
+        drawn.append(token)
+        inside, reasoned, inject = advance_thought(
+            drawn,
+            inside=inside,
+            reasoned=reasoned,
+            budget=3,
+            open_ids=open_ids,
+            close_ids=close_ids,
+        )
+        assert (inside, reasoned, inject) == (True, count, [])
+    drawn.append(3)
+    inside, reasoned, inject = advance_thought(
+        drawn, inside=inside, reasoned=reasoned, budget=3, open_ids=open_ids, close_ids=close_ids
+    )
+    assert (inside, reasoned, inject) == (False, 0, [20])
+    drawn.extend(inject)
+    drawn.append(4)
+    inside, reasoned, inject = advance_thought(
+        drawn, inside=inside, reasoned=reasoned, budget=3, open_ids=open_ids, close_ids=close_ids
+    )
+    assert (inside, reasoned, inject) == (False, 0, [])
+    drawn = [7, 20]
+    inside, reasoned, inject = advance_thought(
+        drawn, inside=True, reasoned=2, budget=3, open_ids=open_ids, close_ids=close_ids
+    )
+    assert (inside, reasoned, inject) == (False, 0, [])
+
+
 def test_thinking_off_closes_the_ghost_channel() -> None:
     text = render_chat([{"role": "user", "content": "Hi"}], False)
     assert text.endswith("<|turn>model\n<|channel>thought\n<channel|>")
@@ -188,7 +229,7 @@ def test_json_arguments_render_as_gemma_calls() -> None:
     text = render_chat(messages, True, tools=[_read_tool()])
     assert 'call:read_file{file_path:<|"|>ledger.py<|"|>,offset:0}' in text
     assert '{"file_path"' not in text
-    assert "old thought" not in text
+    assert "old thought" in text
     assert text.endswith("<|turn>model\n")
 
 
@@ -269,7 +310,7 @@ def test_empty_tool_thought_replays_after_a_tool_result() -> None:
     assert text.count("<|channel>thought\n<channel|>") == 2
 
 
-def test_a_tool_thought_returns_until_the_next_user() -> None:
+def test_a_tool_thought_stays_on_the_next_user() -> None:
     call = {
         "id": "call_0",
         "type": "function",
@@ -289,7 +330,7 @@ def test_a_tool_thought_returns_until_the_next_user() -> None:
     assert "<|channel>thought\nlook\n<channel|>" in text
     assert text.endswith("<tool_response|><|channel>thought\n")
     messages.append({"role": "user", "content": "next"})
-    assert "look" not in _rendered_chat(messages)
+    assert "<|channel>thought\nlook\n<channel|>" in _rendered_chat(messages)
 
 
 def test_a_plain_chat_thought_stays_out_of_the_prompt() -> None:
@@ -413,6 +454,39 @@ def test_effort_opens_thinking_without_changing_the_card() -> None:
     assert open_by_default is True
     assert thinking_card["temperature"] == 0.95
     assert "reasoning_effort" not in thinking_card
+
+
+def test_a_required_thinking_call_shares_the_empty_thought() -> None:
+    from pathlib import Path
+
+    root = Path("models/gemma-4-26B-A4B-it-fp8-e20")
+    if not (root / "tokenizer.json").is_file():
+        pytest.skip("tokenizer is not installed")
+    tools = [_read_tool()]
+    user = [{"role": "user", "content": "Read console.py"}]
+    first = encode_chat(root, user, True, tools)
+    model_turn = encode_text(root, "<|turn>model\n")
+    empty = encode_text(root, "<|channel>thought\n<channel|>")
+    drawn = close_model_turn(first, model_turn, empty)
+    assert drawn[-len(empty) :] == empty
+    lead = encode_text(root, "<|tool_call>call:read_file{")
+    opening = [*drawn, *lead]
+    call = {
+        "id": "c1",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": {"file_path": "console.py"}},
+    }
+    follow = encode_chat(
+        root,
+        [
+            *user,
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "print(1)\n"},
+        ],
+        True,
+        tools,
+    )
+    assert follow[: len(opening)] == opening
 
 
 def _read_tool() -> dict[str, object]:

@@ -55,10 +55,12 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [gemma4_26b_a4b/references.md](gemma4_26b_a4b/references.md) | Papers and specifications for the Gemma 4 pipeline |
 | [gemma4_26b_a4b/research/kernel-ceilings.md](gemma4_26b_a4b/research/kernel-ceilings.md) | Gemma 4 26B-A4B packed kernel ceiling |
 | [gemma4_26b_a4b/research/recorded-forward.md](gemma4_26b_a4b/research/recorded-forward.md) | Gemma 4 26B-A4B recorded prefill and decode runs |
-| [gemma4_26b_a4b/research/coding-agent.md](gemma4_26b_a4b/research/coding-agent.md) | Gemma 4 26B-A4B vision coding-agent rates |
+| [gemma4_26b_a4b/research/coding-agent.md](gemma4_26b_a4b/research/coding-agent.md) | Gemma 4 26B-A4B vision coding-agent rates on fp8 keys and values |
+| [gemma4_26b_a4b/research/coding-agent-half.md](gemma4_26b_a4b/research/coding-agent-half.md) | Gemma 4 26B-A4B vision coding-agent rates on the fp8-e20 pack with half keys and values |
 | [gemma4_26b_a4b/research/coding-text.md](gemma4_26b_a4b/research/coding-text.md) | Gemma 4 26B-A4B text coding-agent rate |
 | [gemma4_26b_a4b/research/needle-page.md](gemma4_26b_a4b/research/needle-page.md) | Gemma 4 26B-A4B page-needle rate |
-| [gemma4_26b_a4b/research/synthetic-prompt.md](gemma4_26b_a4b/research/synthetic-prompt.md) | Gemma 4 26B-A4B cold 512-token and 10000-token prompts |
+| [gemma4_26b_a4b/research/synthetic-prompt.md](gemma4_26b_a4b/research/synthetic-prompt.md) | Gemma 4 26B-A4B cold 512-token and 10000-token prompts on fp8 keys and values |
+| [gemma4_26b_a4b/research/synthetic-prompt-half.md](gemma4_26b_a4b/research/synthetic-prompt-half.md) | Gemma 4 26B-A4B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e20 pack with half keys and values |
 | [gemma4_26b_a4b/benchmarks.md](gemma4_26b_a4b/benchmarks.md) | Gemma 4 26B-A4B harness scores against `serve` |
 | [qwen38_27b/benchmarks.md](qwen38_27b/benchmarks.md) | Harness scores against `serve` |
 | [qwen36_35b_a3b/benchmarks.md](qwen36_35b_a3b/benchmarks.md) | Harness scores against `serve` |

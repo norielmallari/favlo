@@ -216,15 +216,15 @@ class RuntimeAdapter:
 
     def _scratch(self, nbytes: int) -> object:
         runtime = self.runtime
-        held = int(getattr(runtime, "_prefix_scratch_n", 0))
-        current = getattr(runtime, "_prefix_scratch", None)
+        held = int(getattr(runtime, "_prefix_copy_n", 0))
+        current = getattr(runtime, "_prefix_copy", None)
         if current is not None and held >= nbytes:
             return current
         if current is not None:
             memory.release(current)
-        runtime._prefix_scratch = device_buffer(runtime._owner, nbytes)
-        runtime._prefix_scratch_n = nbytes
-        return runtime._prefix_scratch
+        runtime._prefix_copy = device_buffer(runtime._owner, nbytes)
+        runtime._prefix_copy_n = nbytes
+        return runtime._prefix_copy
 
 
 def encode_pack_kv(

@@ -1,14 +1,42 @@
 # Ceilings
 
-Bandwidth and kernel ceilings for the kernels `gemma4_26b_a4b` launches. Recompute when `gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `kv_dequant_heads`, `kv_cast_q`, `kv_softmax_raw`, `kv_acc_add`, `kv_attend_store`, `matmul_half_batch`, `matmul_half_64_batch`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, or `sample_topk` changes. The CPU reads one sampled token. Expert ids stay on device.
+Bandwidth and kernel ceilings for the kernels `gemma4_26b_a4b` launches. Recompute when any of these kernels changes:
 
-The divisor is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302.74 GB/s. That measurement is recorded in [../qwen36-35b-a3b/ceilings.md](../qwen36-35b-a3b/ceilings.md). Bytes below are divided by 302.74 GB/s.
+`gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `kv_dequant_heads`, `kv_cast_q`, `kv_softmax_raw`, `kv_acc_add`, `kv_attend_store`, `matmul_half_batch`, `matmul_half_64_batch`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, `sample_topk`.
 
-One token runs 30 layers. Twenty-five are local, with a sliding window of 1024. Five are global and attend every key. Eight of 128 experts run. The timed token uses six fp4 experts and two fp8 experts. A 20% promotion expects 1.6 fp8 experts in those eight. Both `gemv_fp4_at` and `gemv_fp8_at` launch, and a threadgroup returns when the width differs. Dense projections and the tied embedding are fp8. Decode reads them in `gemv_fp8` and `embed_fp8`. The router is one Metal half `matmul_half` of 8 by 128 by 2816. The default cache is `fp8_e4m3`. Decode dequantizes every key head with `kv_dequant_heads` and scores that half plane with `matmul_half_batch`. Prefill does the same with `matmul_half_64_batch` on tiles of 256 keys. `attend_span` and `attend_decode` remain the `half` cache. A value is an RMSNorm with no scale. A global value is that norm of the key projection and is stored apart from the keys.
+The CPU reads one sampled token. Expert ids stay on device.
+
+The divisor is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302.74 GB/s. That measurement is recorded in [../qwen36_35b_a3b/ceilings.md](../qwen36_35b_a3b/ceilings.md). Bytes below are divided by 302.74 GB/s.
+
+- One token runs 30 layers.
+- Twenty-five are local, with a sliding window of 1024.
+- Five are global and attend every key.
+- Eight of 128 experts run.
+- The timed token uses six fp4 experts and two fp8 experts.
+- A 20% promotion expects 1.6 fp8 experts in those eight.
+- Both `gemv_fp4_at` and `gemv_fp8_at` launch, and a threadgroup returns when the width differs.
+- Dense projections and the tied embedding are fp8.
+- Decode reads them in `gemv_fp8` and `embed_fp8`.
+- The router is one Metal half `matmul_half` of 8 by 128 by 2816.
+- The default cache is `half`. Decode scores it with `matmul_half_batch`, and prefill scores it with `matmul_half_64_batch` on tiles of 256 keys.
+- `fp8_e4m3` dequantizes every key head with `kv_dequant_heads` before those same matmuls.
+- `attend_span` and `attend_decode` remain the `half` cache.
+- A value is an RMSNorm with no scale.
+- A global value is that norm of the key projection and is stored apart from the keys.
 
 ## Bandwidth
 
-Weight bytes are one read of the codes and scales the launch visits. The fp8 dense total includes the logits matrix and one embedding row. A down projection stops at K 2112, so the pad to 2176 is outside that read. Each layer reads six fp4 expert images and two fp8 expert images. Gate-up is read in full. The down plane stops at K 704. The router row is the Metal half 128 by 2816 matrix, once per layer. The activation column is the source vector once per launch. The output column is the written rows. Attention counts each query head's Metal half key and value, the float32 query, and the float32 output. The remaining row is the norm, residual, copy, rotary, store, GeGLU, mix, router scratch, soft cap, and sampler buffers, once each.
+- Weight bytes are one read of the codes and scales the launch visits.
+- The fp8 dense total includes the logits matrix and one embedding row.
+- A down projection stops at K 2112, so the pad to 2176 is outside that read.
+- Each layer reads six fp4 expert images and two fp8 expert images.
+- Gate-up is read in full.
+- The down plane stops at K 704.
+- The router row is the Metal half 128 by 2816 matrix, once per layer.
+- The activation column is the source vector once per launch.
+- The output column is the written rows.
+- Attention counts each query head's Metal half key and value, the float32 query, and the float32 output.
+- The remaining row is the norm, residual, copy, rotary, store, GeGLU, mix, router scratch, soft cap, and sampler buffers, once each.
 
 | Traffic | Bytes | ms |
 |---|---:|---:|
@@ -32,7 +60,20 @@ Weight bytes are one read of the codes and scales the launch visits. The fp8 den
 
 ## Prefill
 
-One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes one tied-logits `gemv_fp8`. Large attention projections restore the packed fp8 matrix into a per-row int8 stage, quantize the float activation with `quantize_float_i8`, multiply with `prefill_i8_n64`, and scale the int32 product. That path does not cast through half. Local key and value, the shared gate and up, and the shared down stay on `matmul_fp8` with `write_rows_tight`. The router is `matmul_half`. Expert prefill uses 128 slots of 64, one slot for each expert: 102 fp4 and 26 fp8. `matmul_fp4_64_at` and `matmul_fp8_64_at` both launch on that grid. The TFLOP/s column counts the slots whose width matches. The 90% test uses the packed chunk, measured on 3 November 2026. The cache is `fp8_e4m3` and already holds the chunk, so growth is outside the interval. The chunk commits every ten layers: three command buffers, and those intervals do not overlap. The first sample is discarded. The figure is the median of the next four. The union is 588.022 ms, 1741.43 tok/s. The launch rows below were measured one kernel per command buffer on 2 November 2026. They are not added into this interval. A sum of those rows counts a command-buffer gap on every dispatch, and the packed chunk is faster than that sum.
+One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes one tied-logits `gemv_fp8`.
+
+- Large attention projections restore the packed fp8 matrix into a per-row int8 stage.
+- They quantize the float activation with `quantize_float_i8`, multiply with `prefill_i8_n64`, and scale the int32 product.
+- That path does not cast through half.
+- Local key and value, the shared gate and up, and the shared down stay on `matmul_fp8` with `write_rows_tight`.
+- The router is `matmul_half`.
+- Expert prefill uses 128 slots of 64, one slot for each expert: 102 fp4 and 26 fp8.
+- `matmul_fp4_64_at` and `matmul_fp8_64_at` both launch on that grid.
+- The TFLOP/s column counts the slots whose width matches.
+
+The 90% test uses the packed chunk, measured on 3 November 2026. The cache is `fp8_e4m3` and already holds the chunk, so growth is outside the interval. The chunk commits every ten layers: three command buffers, and those intervals do not overlap. The first sample is discarded. The figure is the median of the next four. The union is 588.022 ms, 1741.43 tok/s.
+
+The launch rows below were measured one kernel per command buffer on 2 November 2026. They are not added into this interval. A sum of those rows counts a command-buffer gap on every dispatch, and the packed chunk is faster than that sum.
 
 | Launch | Shape | Count | µs | TFLOP/s |
 |---|---|---:|---:|---:|
@@ -95,7 +136,13 @@ One chunk of 1024 tokens at position 0. The chunk finishes, so the sum includes 
 
 ## Decode kernels
 
-The 90% test uses the packed step, measured on 3 November 2026. One decode step is the embedding, the 30 layers, the tied logits, and the sample, in one command buffer. The cache is `fp8_e4m3`. The time is `GPUEndTime` minus `GPUStartTime`. The first sample is discarded. The figure is the median of the next four. Each sample rewrites the same position, so the key count stays fixed. Context 1 attends one key. Context 1024 starts at position 1023. Context 65536 starts at position 65535. Context 131072 starts at position 131071. Local layers keep the 1024-key window.
+The 90% test uses the packed step, measured on 3 November 2026. One decode step is the embedding, the 30 layers, the tied logits, and the sample, in one command buffer. The cache is `fp8_e4m3`. The time is `GPUEndTime` minus `GPUStartTime`. The first sample is discarded. The figure is the median of the next four. Each sample rewrites the same position, so the key count stays fixed.
+
+- Context 1 attends one key.
+- Context 1024 starts at position 1023.
+- Context 65536 starts at position 65535.
+- Context 131072 starts at position 131071.
+- Local layers keep the 1024-key window.
 
 Context 1 is 21.675 ms, 46.14 tok/s. Context 1024 is 24.641 ms, 40.58 tok/s. Context 65536 is 46.195 ms, 21.65 tok/s. Context 131072 is 67.564 ms, 14.80 tok/s.
 

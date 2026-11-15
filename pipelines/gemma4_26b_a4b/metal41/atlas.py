@@ -8,6 +8,7 @@ cache. A layer that is not resident is read into the oldest slot.
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,11 +33,11 @@ _ALIASES = {
 
 
 def kv_mode(name: str | None) -> str:
-    """``half`` or ``fp8_e4m3``. Empty means ``fp8_e4m3``.
+    """``half`` or ``fp8_e4m3``. Empty means ``half``.
 
     ``e4m3`` and ``fp8`` are ``fp8_e4m3``. ``f16`` and ``fp16`` are ``half``.
     """
-    text = "fp8_e4m3" if name is None or name == "" else str(name)
+    text = "half" if name is None or name == "" else str(name)
     text = _ALIASES.get(text, text)
     if text not in KV_MODES:
         message = f"kv cache {name} is not half or fp8_e4m3"
@@ -109,7 +110,7 @@ class ExpertAtlas:
         self.complete = self.limit >= LAYERS
         self._reader = reader
         self._files: dict[int, object] = {}
-        self._order: list[int] = []
+        self._order: OrderedDict[int, None] = OrderedDict()
         self._alloc: dict[object, int] = {}
         self.sizes: list[int] | None = None
 
@@ -128,7 +129,7 @@ class ExpertAtlas:
         for layer in range(self.limit):
             handle, size = self._open_layer(layer)
             self._files[layer] = handle
-            self._order.append(layer)
+            self._order[layer] = None
             total += size
             note(size)
         elapsed = time.perf_counter() - started
@@ -144,10 +145,10 @@ class ExpertAtlas:
         if len(self._files) < self.limit:
             handle, _size = self._open_layer(layer)
             self._files[layer] = handle
-            self._order.append(layer)
+            self._order[layer] = None
             return handle
         session.flush()
-        old = self._order.pop(0)
+        old = self._order.popitem(last=False)[0]
         handle = self._files.pop(old)
         size = self._file_size(layer)
         if self._alloc.get(handle) != size:
@@ -157,7 +158,7 @@ class ExpertAtlas:
             self._alloc[handle] = size
         self._read(handle, layer)
         self._files[layer] = handle
-        self._order.append(layer)
+        self._order[layer] = None
         return handle
 
     def admit(self, session: Any, room: int) -> None:
@@ -174,7 +175,7 @@ class ExpertAtlas:
                 continue
             handle, _size = self._open_layer(layer)
             self._files[layer] = handle
-            self._order.append(layer)
+            self._order[layer] = None
         if self.limit >= LAYERS and len(self._files) >= LAYERS:
             self.complete = True
 
@@ -191,7 +192,7 @@ class ExpertAtlas:
             return
         session.flush()
         while len(self._order) > limit:
-            layer = self._order.pop(0)
+            layer = self._order.popitem(last=False)[0]
             handle = self._files.pop(layer)
             self._alloc.pop(handle, None)
             memory.release(handle)
@@ -225,5 +226,4 @@ class ExpertAtlas:
 
     def _touch(self, layer: int) -> None:
         if layer in self._order:
-            self._order.remove(layer)
-        self._order.append(layer)
+            self._order.move_to_end(layer)

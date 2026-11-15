@@ -41,6 +41,8 @@ from gemma4_26b_a4b.metal41.tools import (
 from gemma4_26b_a4b.metal41.vision import collect_images
 
 _DEFAULT_LIMIT = 4096
+# An open thought that runs past this many tokens is closed, then the reply continues.
+THOUGHT_BUDGET = 2048
 
 _TEMPLATE = Path(__file__).with_name("chat_template.jinja")
 _THOUGHT = "<|channel>thought"
@@ -91,22 +93,60 @@ def _replay_empty_tool_thoughts(text: str) -> str:
     return "".join(pieces)
 
 
+def _opens_on_the_user(messages: list[dict[str, Any]]) -> bool:
+    """True when this prompt has not already run a tool call.
+
+    The generation cut of that first read is the boundary a later replay
+    still shares. A tool turn's longer cut stays stored and does not replace it.
+    """
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "tool":
+            return False
+        calls = message.get("tool_calls")
+        if isinstance(calls, list) and calls:
+            return False
+    return True
+
+
+def _bridge_omitted_assistant(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put an empty assistant turn where the previous prompt already opened the model turn.
+
+    Used when historical tool-call thinking is kept. A user message that follows
+    a user or a tool would otherwise skip that model turn, so the next prompt
+    would not extend the stored tokens.
+    """
+    bridged: list[dict[str, Any]] = []
+    previous: str | None = None
+    for message in messages:
+        role = message.get("role") if isinstance(message, dict) else None
+        if role == "user" and previous in {"user", "tool"}:
+            bridged.append({"role": "assistant", "content": ""})
+        bridged.append(message)
+        previous = role if isinstance(role, str) else None
+    return bridged
+
+
 def render_chat(
     messages: list[dict[str, Any]],
     thinking: bool,
     tools: Any = None,
-    *,
-    preserve_thinking: bool = False,
 ) -> str:
-    """The canonical Gemma 4 template. Tool arguments are objects before render."""
+    """The canonical Gemma 4 template. Tool arguments are objects before render.
+
+    A tool-call thought stays in later turns. A plain assistant thought drops.
+    A request ``preserve_thinking`` value is not read.
+    """
+    prepared = _bridge_omitted_assistant(_messages(messages))
     environment = Environment(autoescape=False, keep_trailing_newline=True)
     template = environment.from_string(_TEMPLATE.read_text(encoding="utf-8"))
     rendered = template.render(
-        messages=_messages(messages),
+        messages=prepared,
         tools=tools,
         add_generation_prompt=True,
         enable_thinking=thinking,
-        preserve_thinking=preserve_thinking,
+        preserve_thinking=True,
         bos_token="<bos>",
         eos_token="<eos>",
     )
@@ -118,11 +158,9 @@ def encode_chat(
     messages: list[dict[str, Any]],
     thinking: bool,
     tools: Any = None,
-    *,
-    preserve_thinking: bool = False,
 ) -> list[int]:
     """Render the canonical template and encode it, specials included."""
-    text = render_chat(messages, thinking, tools, preserve_thinking=preserve_thinking)
+    text = render_chat(messages, thinking, tools)
     return list(load_tokenizer(root).encode(text).ids)
 
 
@@ -130,22 +168,23 @@ def encode_text(root: Path, text: str) -> list[int]:
     return list(load_tokenizer(root).encode(text).ids)
 
 
-_GENERATION_SUFFIX: dict[Path, tuple[list[int], list[int]]] = {}
+_GENERATION_SUFFIX: dict[Path, tuple[list[int], ...]] = {}
 
 
 def generation_cut(root: Path, prompt: list[int]) -> int | None:
-    """Index where the thought-channel generation suffix starts.
+    """Index where the generation suffix starts, when this prompt ends with one.
 
     Thinking off ends with the closed empty thought. Thinking on, after a
-    tool result, ends with the open thought. A follow-up that drops that
-    channel does not repeat the suffix, so the tokens before it are the
-    prefix that follow-up still shares.
+    tool result, ends with the open thought. Thinking on after a user message
+    ends at ``<|turn>model``. A follow-up that drops the channel does not
+    repeat that suffix, so the tokens before it are the prefix it still shares.
     """
     pair = _GENERATION_SUFFIX.get(root)
     if pair is None:
         pair = (
             encode_text(root, "<|channel>thought\n<channel|>"),
             encode_text(root, "<|channel>thought\n"),
+            encode_text(root, "<|turn>model\n"),
         )
         _GENERATION_SUFFIX[root] = pair
     for suffix in pair:
@@ -153,6 +192,33 @@ def generation_cut(root: Path, prompt: list[int]) -> int | None:
         if count and len(prompt) > count and prompt[-count:] == suffix:
             return len(prompt) - count
     return None
+
+
+def expanded_cut(text: list[int], cut: int | None, images: list[bytes]) -> int | None:
+    """Map a text-token cut through the image pads ``generate`` expands.
+
+    One ``<|image|>`` becomes begin-of-image, one placeholder per soft token,
+    and end-of-image. Each pad before the cut adds that many tokens minus one.
+    No images leaves the cut unchanged.
+    """
+    if cut is None or not images:
+        return cut
+    from gemma4_26b_a4b.metal41.geometry import IMAGE_TOKEN
+    from gemma4_26b_a4b.metal41.vision import image_soft_tokens
+
+    softs = [image_soft_tokens(blob) for blob in images]
+    extra = 0
+    seen = 0
+    for position, token in enumerate(text):
+        if position >= cut:
+            break
+        if token != IMAGE_TOKEN:
+            continue
+        if seen >= len(softs):
+            break
+        extra += softs[seen] + 1
+        seen += 1
+    return cut + extra
 
 
 def decode_text(root: Path, tokens: list[int]) -> str:
@@ -196,6 +262,32 @@ def _tool_call(call: Any) -> Any:
         message = "tool call arguments must be a JSON object"
         raise ValueError(message)
     return {**call, "function": {**function, "arguments": arguments}}
+
+
+def advance_thought(
+    drawn: list[int],
+    *,
+    inside: bool,
+    reasoned: int,
+    budget: int,
+    open_ids: list[int],
+    close_ids: list[int],
+) -> tuple[bool, int, list[int]]:
+    """Update the thought channel after the token just appended to ``drawn``.
+
+    Return the channel state and the ``<channel|>`` ids to feed when the
+    reasoning budget is spent. An empty list means the next token is sampled.
+    """
+    if close_ids and len(drawn) >= len(close_ids) and drawn[-len(close_ids) :] == close_ids:
+        return False, 0, []
+    if open_ids and len(drawn) >= len(open_ids) and drawn[-len(open_ids) :] == open_ids:
+        return True, 0, []
+    if not inside:
+        return False, 0, []
+    reasoned += 1
+    if reasoned < budget or not close_ids:
+        return True, reasoned, []
+    return False, 0, list(close_ids)
 
 
 def reply_text(text: str, *, channel_open: bool = False) -> tuple[str, str]:
@@ -391,15 +483,24 @@ def _respond(
             messages.append({"role": "user", "content": note})
         tools = function_tools(prepared.get("tools"))
         rendered, prompt = _fit_prompt(runtime, prepared, messages, tools, thinking)
+        runtime._pin_cut = _opens_on_the_user(messages)
+        runtime._body_len = len(prompt)
     except (RequestError, ValueError) as exc:
         _reject(reply, str(exc))
         return
+    _prefix_run(runtime, prepared)
     pictures = collect_images(messages)
     channel_open = rendered.endswith("<|channel>thought\n")
     emit_tools = prepared.get("tool_choice") != "none"
     required = required_function(prepared.get("tool_choice")) if emit_tools else None
     lead = _call_lead(runtime, tools, required)
     if lead:
+        prompt = close_model_turn(
+            prompt,
+            encode_text(runtime.root, "<|turn>model\n"),
+            encode_text(runtime.root, "<|channel>thought\n<channel|>"),
+        )
+        runtime._body_len = len(prompt)
         prompt = [*prompt, *lead[1]]
     cap = prepared.get("max_output_tokens")
     limit = int(cap) if cap is not None else _DEFAULT_LIMIT
@@ -432,6 +533,9 @@ def _respond(
         top_k,
         presence,
         images=pictures,
+        channel_open=channel_open,
+        thought_budget=THOUGHT_BUDGET,
+        fill=bool(prepared.get("favlo:fill_decode")),
     )
     text = (lead[0] if lead else "") + decode_text(runtime.root, tokens)
     payload = _response_payload(
@@ -495,6 +599,34 @@ def _encode(
 ) -> tuple[str, list[int]]:
     rendered = render_chat(messages, thinking, tools or None)
     return rendered, list(load_tokenizer(root).encode(rendered).ids)
+
+
+def _prefix_run(runtime: Any, prepared: dict[str, Any]) -> None:
+    """Copy a scratch prefix budget onto the runtime for this request.
+
+    Absent fields clear a previous scratch run so the next chat uses the home
+    partition again.
+    """
+    budget = prepared.get("favlo:prefix_budget")
+    scratch = prepared.get("favlo:prefix_scratch")
+    runtime._prefix_budget = (
+        budget if isinstance(budget, int) and not isinstance(budget, bool) and budget > 0 else None
+    )
+    runtime._prefix_scratch = scratch if isinstance(scratch, str) and scratch else None
+
+
+def close_model_turn(prompt: list[int], model_turn: list[int], empty: list[int]) -> list[int]:
+    """Close a thinking-on model turn before a forced tool call.
+
+    The follow-up replays ``<|channel>thought\\n<channel|>`` in front of that
+    call. The generation prompt otherwise ends at ``<|turn>model``, so the
+    live tokens would stop matching there.
+    """
+    if empty and len(prompt) >= len(empty) and prompt[-len(empty) :] == empty:
+        return prompt
+    if model_turn and len(prompt) >= len(model_turn) and prompt[-len(model_turn) :] == model_turn:
+        return [*prompt, *empty]
+    return prompt
 
 
 def _call_lead(
@@ -715,6 +847,9 @@ def _stream(
             presence,
             on_token=enqueue,
             images=pictures,
+            channel_open=channel_open,
+            thought_budget=THOUGHT_BUDGET,
+            fill=bool(prepared.get("favlo:fill_decode")),
         )
     finally:
         handle.finish()

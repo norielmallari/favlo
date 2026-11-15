@@ -9,7 +9,7 @@ An unscaled RMSNorm then the embedding projection replace ``<|image|>``. The
 pixel resize is the only host step. The tower itself is Metal. Soft rows are
 stored by ``favlo.vision_cache`` under ``~/.favlo/vision-cache/gemma4_26b_a4b/``.
 The file name hashes the checkpoint path, the image digest, and a pixel budget
-of 0, 0. A hit logs ``vision cache`` and does not rerun the tower. The process
+of 0, 0. A tower run logs ``vision patches`` and ``vision merged``. A hit logs ``vision cache`` and does not rerun the tower. The process
 does not keep those rows.
 """
 
@@ -302,6 +302,7 @@ class VisionTower:
         self.session.flush()
         blob = memory.load(self.soft, 0, soft * HIDDEN * 4)
         _store_vision_disk(self.root, key, blob, soft, count)
+        self._status(f"vision merged {soft}")
         return self.soft, soft
 
     def _status(self, line: str) -> None:

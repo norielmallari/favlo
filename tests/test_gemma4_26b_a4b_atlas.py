@@ -6,9 +6,9 @@ from gemma4_26b_a4b.metal41 import atlas as atlas_mod
 from gemma4_26b_a4b.metal41.atlas import ExpertAtlas, kv_bytes, kv_mode, layer_slots, plain_cache
 
 
-def test_kv_mode_defaults_to_fp8() -> None:
-    assert kv_mode(None) == "fp8_e4m3"
-    assert kv_mode("") == "fp8_e4m3"
+def test_kv_mode_defaults_to_half() -> None:
+    assert kv_mode(None) == "half"
+    assert kv_mode("") == "half"
     assert kv_mode("fp8_e4m3") == "fp8_e4m3"
     assert kv_mode("fp8") == "fp8_e4m3"
     assert kv_mode("e4m3") == "fp8_e4m3"

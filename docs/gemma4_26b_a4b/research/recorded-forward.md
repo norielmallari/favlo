@@ -1,6 +1,6 @@
 # Recorded forward
 
-Measurement note for the `gemma4_26b_a4b` pipeline. The serving contract is [../README.md](../README.md). The request rows are in [../ceilings.md](../ceilings.md). This file records those runs. The isolated dispatch sum is [kernel-ceilings.md](kernel-ceilings.md).
+Measurement note for the `gemma4_26b_a4b` pipeline. The serving contract is [../ARCHITECTURE.md](../ARCHITECTURE.md). The request rows are in [../ceilings.md](../ceilings.md). This file records those runs. The isolated dispatch sum is [kernel-ceilings.md](kernel-ceilings.md).
 
 ## Remainder
 
@@ -9,13 +9,20 @@ On an M5 Pro with 48 GB, a varied prompt prefilled 1,024 tokens at 1,161.9 tok/s
 ## Predecessors
 
 - Method. The forward is the shader library summed in [kernel-ceilings.md](kernel-ceilings.md). Overlap, the prefix store, and the expert repack are inside these times. The kernel sum leaves them out.
-- Model. [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it). [oMLX n50yftgp](https://omlx.ai/benchmarks/performance/n50yftgp) reports 1,289 prefill tok/s and 72.5 decode tok/s at 1,024 tokens for a 4-bit MLX copy on an M5 Pro with 48 GB, oMLX 0.6.0rc1. [oMLX gv7qn8l9](https://omlx.ai/benchmarks/performance/gv7qn8l9) reports 2,082 and 76.9 at the same context on the same chip, oMLX 0.6.2.
+- Model. [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it).
+- [oMLX n50yftgp](https://omlx.ai/benchmarks/performance/n50yftgp) reports 1,289 prefill tok/s and 72.5 decode tok/s at 1,024 tokens for a 4-bit MLX copy on an M5 Pro with 48 GB, oMLX 0.6.0rc1.
+- [oMLX gv7qn8l9](https://omlx.ai/benchmarks/performance/gv7qn8l9) reports 2,082 and 76.9 at the same context on the same chip, oMLX 0.6.2.
 - Measurement. [ComputeArena](https://computearena.ai/models/gemma-4-26b-a4b-it) lists other prompt and generation rates for this checkpoint, including 80.3 generation tok/s and 1,669 prompt tok/s at 512 tokens on an M4 Max. [Rapid-MLX](https://rapidmlx.com/models/gemma-4-26b-4bit) reports 78.5 decode tok/s on an M4 Pro with 48 GB. They do not publish this harness run.
 - Mechanism. The carrot cases are greedy, the instruct card, and the thinking card. The coding agent is the thinking card with tools. This record has no drafter.
 
 ## Rule
 
-Prefill is the uncached forward of the named prompt. Decode is the sampled-token time after that forward. The varied-prompt rows are one chat encoding of a repeated paragraph, not a run of identical tokens. The carrot rows are the lines `tests/test_gemma4_26b_a4b_smoke.py` printed on 31 October 2026. The coding-agent row is the runtime log copied into the ceilings note. The harness summary for that run printed `no requests`.
+- Prefill is the uncached forward of the named prompt.
+- Decode is the sampled-token time after that forward.
+- The varied-prompt rows are one chat encoding of a repeated paragraph, not a run of identical tokens.
+- The carrot rows are the lines `tests/test_gemma4_26b_a4b_smoke.py` printed on 31 October 2026.
+- The coding-agent row is the runtime log copied into the ceilings note.
+- The harness summary for that run printed `no requests`.
 
 ## Command
 
