@@ -1,0 +1,12 @@
+---
+description: Use the Python standard library for common coding patterns
+alwaysApply: true
+---
+
+# Python
+
+Use the standard library for a common pattern. Do not write a private copy of one.
+
+Logging goes through `logging` and `logging.handlers`. A queue is `queue`. A bounded cache is `functools.lru_cache`. A deque, a counter, and a default dict are `collections`. A heap is `heapq`. A temporary file is `tempfile`. A path is `pathlib`. A subprocess is `subprocess`. A config file parser is `configparser`.
+
+A thin adapter that calls the library is the right shape. A behavior the library does not have stays missing.
