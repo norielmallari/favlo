@@ -179,6 +179,8 @@ class Console:
         self._draft: str | None = None
         self._status_lines = 0
         self._pending_summaries: list[str] = []
+        self._deferred_summary: str | None = None
+        self._deferred_phase: str = ""
         self._column = 0
         self._holding = False
         self._reply: str | None = None
@@ -278,6 +280,8 @@ class Console:
                     return
         self._note_prompt_displaced()
         self._erase()
+        if self.mode == "pretty" and not self._handles:
+            self._flush_deferred_summary()
         self._write(self._stamp(line) + "\n")
         self._redraw()
         if restore:
@@ -353,6 +357,8 @@ class Console:
                 return
             self._draft = None
             self._erase()
+            if not self._handles:
+                self._flush_deferred_summary()
             self._enable_wrap()
             self._write(line + "\n")
             self._redraw()
@@ -588,6 +594,8 @@ class Console:
         phase that already closed on the caller still announces once so end
         cannot outrun begin on the wire.
         """
+        if self.mode == "pretty":
+            self._resolve_deferred_for_begin(progress.phase)
         with self._lock:
             if progress in self._handles:
                 return
@@ -630,8 +638,13 @@ class Console:
                         and self._turn_depth > 0
                     ):
                         self._stash_turn(summary)
-                    else:
+                    elif remaining > 0 or progress.phase != "sample":
+                        # Sample may retarget (end then begin same phase). Defer
+                        # that durable line; every other phase prints now.
                         self._write(self._stamp(summary, dim=True) + "\n")
+                    else:
+                        self._deferred_summary = summary
+                        self._deferred_phase = progress.phase
                 if remaining == 0:
                     self._show_cursor()
                 else:
@@ -692,6 +705,7 @@ class Console:
                 self._draft = None
                 self._erase()
                 self._show_cursor()
+                self._flush_deferred_summary()
                 parts = self._turn_parts
                 self._turn_parts = []
                 self._turn_due = None
@@ -711,11 +725,13 @@ class Console:
                 self._paint_status_below(self._status_rows())
                 return
             if not handles:
+                if self.mode == "pretty":
+                    self._flush_deferred_summary()
                 return
             if self.mode == "pretty":
+                live = handles[-1]
                 width = self._terminal_width()
-                rows = [self._fit(self._row(progress, now), width) for progress in handles]
-                self._paint_rows(rows)
+                self._paint_rows([self._fit(self._row(live, now), width)])
                 return
             if self.mode != "json":
                 return
@@ -744,6 +760,7 @@ class Console:
                 progress.closed = True
             self._emit_end(progress, progress.summary)
         with self._lock:
+            self._flush_deferred_summary()
             self._flush_turn(force=True)
         self._show_cursor()
 
@@ -1120,9 +1137,32 @@ class Console:
         return f"\x1b[2m{text}\x1b[0m"
 
     def _status_rows(self) -> list[str]:
+        """The latest open handle only. Older open phases keep counting off-screen."""
+        if not self._handles:
+            return []
         now = self._clock()
         width = self._terminal_width()
-        return [self._fit(self._row(progress, now), width) for progress in self._handles]
+        return [self._fit(self._row(self._handles[-1], now), width)]
+
+    def _resolve_deferred_for_begin(self, phase: str) -> None:
+        """Same-phase begin drops a deferred end (stage retarget). Else flush it."""
+        if self._deferred_summary is None:
+            return
+        if self._deferred_phase == phase:
+            self._deferred_summary = None
+            self._deferred_phase = ""
+            return
+        self._flush_deferred_summary()
+
+    def _flush_deferred_summary(self) -> None:
+        """Write a deferred durable end line, or clear when empty."""
+        summary = self._deferred_summary
+        self._deferred_summary = None
+        self._deferred_phase = ""
+        if not summary:
+            return
+        self._note_prompt_displaced()
+        self._write(self._stamp(summary, dim=True) + "\n")
 
     def _clear_status_below(self) -> None:
         """Erase the progress lines under the reply and return to the reply."""

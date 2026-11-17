@@ -397,7 +397,7 @@ def test_a_daemon_tick_paints_the_row() -> None:
 
 
 def test_a_daemon_load_begin_opens_its_own_row() -> None:
-    ui, stream, _clock = _ui("pretty", color=0)
+    ui, stream, clock = _ui("pretty", color=0)
     local = ui.begin("load", total=0, unit="bytes")
     ui.apply_event(
         {
@@ -413,6 +413,59 @@ def test_a_daemon_load_begin_opens_its_own_row() -> None:
     assert not local.closed
     assert [item.phase for item in ui._handles] == ["load", "load"]
     assert "load" in stream.getvalue()
+    local.done = 3
+    clock.now += 1
+    ui._handles[-1].done = 50
+    ui.sample()
+    painted = stream.getvalue()
+    assert "record" in painted
+    assert "3 B" not in painted.split("record")[-1]
+
+
+def test_pretty_paints_only_the_latest_open_handle() -> None:
+    ui, stream, clock = _ui("pretty", color=0, width=160)
+    first = ui.begin("load", total=100, unit="bytes", detail="weights")
+    first.done = 10
+    clock.now += 1
+    ui.sample()
+    second = ui.begin("sample", total=20, unit="layers", detail="high")
+    second.done = 4
+    clock.now += 1
+    ui.sample()
+    line = [item for item in stream.getvalue().splitlines() if "layers" in item][-1]
+    assert "high" in line
+    assert "weights" not in line
+    first.done = 90
+    ui.sample()
+    later = [item for item in stream.getvalue().splitlines() if "layers" in item or "B/" in item][-1]
+    assert "high" in later
+    assert "90" not in later
+    ui.end(second, "sample done")
+    ui.sample()
+    assert "sample done" in stream.getvalue()
+    ui.sample()
+    assert "weights" in [item for item in stream.getvalue().splitlines() if "B/" in item][-1]
+    ui.end(first, "loaded weights")
+
+
+def test_a_sample_stage_retarget_drops_the_deferred_summary() -> None:
+    ui, stream, clock = _ui("pretty", color=0)
+    first = ui.begin("sample", total=10, unit="layers", detail="text")
+    first.done = 10
+    clock.now += 1
+    ui.sample()
+    ui.end(first, "text 10/10 layers")
+    assert "text 10/10 layers" not in stream.getvalue()
+    second = ui.begin("sample", total=40, unit="layers", detail="high")
+    assert "text 10/10 layers" not in stream.getvalue()
+    second.done = 40
+    clock.now += 1
+    ui.sample()
+    ui.end(second, "sample done")
+    ui.sample()
+    text = stream.getvalue()
+    assert "text 10/10 layers" not in text
+    assert "sample done" in text
 
 
 def test_a_reply_streams_without_a_second_copy() -> None:
@@ -560,6 +613,8 @@ def test_every_phase_ends_in_every_mode(mode: str, phase: str) -> None:
     clock.now += 1
     ui.sample()
     ui.end(progress, f"{phase} done")
+    if mode == "pretty":
+        ui.sample()
     text = stream.getvalue()
     if mode == "plain":
         assert text == f"[{_stamp(clock)}] {phase} done\n"
