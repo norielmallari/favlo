@@ -1,7 +1,10 @@
 """Chunked prompt prefill. Resident projections restore into an int8 stage.
 
 The stage is one matrix at a time, built from the packed fp4 or fp8 bytes,
-and dropped after the epilogue. Decode stays a GEMV on those packed bytes.
+and dropped after the epilogue. The shared-expert gate-up epilogue stores
+half. SiLU reads that half and writes half, and the down projection
+quantizes it. The other int8 products store float. Decode stays a GEMV on
+those packed bytes.
 A chunk is at most 2048 tokens so a routed expert's group is large enough
 for a 64-row tile. The groups are built on device, and the layer stays one
 command buffer. The Gated DeltaNet scan is chunks of 64, with the state
@@ -96,7 +99,6 @@ class _Workspace:
         self.route_ids = zeros(40 * cap * 8 * 4)
         self.mix = zeros(cap * 8 * 4)
         self.gate_up = zeros(cap * 1024 * 4)
-        self.gated = zeros(cap * 512 * 4)
         self.down = zeros(cap * HIDDEN * 4)
         self.pack = zeros(cap * HIDDEN * 2)
         self.expert_pack = zeros(_MAX_ROWS * HIDDEN * 2 + _SLACK)
@@ -726,16 +728,18 @@ def _expert_pass(
     if shared:
         _cast(runtime, work.normed, work.half, rows * HIDDEN)
         _quantize_i8(runtime, work, rows, HIDDEN)
-        _matmul_i8(runtime, work, prefix + "shared_expert.gate_up", work.gate_up, rows)
+        _matmul_i8(
+            runtime, work, prefix + "shared_expert.gate_up", work.gate_up, rows, half=work.half
+        )
+        gated_off = rows * 1024 * 2
         runtime.session.encode(
-            "silu_mul_rows",
-            [(work.gate_up, 0), (work.gated, 0)],
+            "silu_mul_f16",
+            [(work.half, 0), (work.half, gated_off)],
             [_u32(rows)],
             (rows * 2, 1, 1),
             (256, 1, 1),
         )
-        _cast(runtime, work.gated, work.half, rows * 512)
-        _quantize_i8(runtime, work, rows, 512)
+        _quantize_i8(runtime, work, rows, 512, source=work.half, source_off=gated_off)
         _matmul_i8(runtime, work, prefix + "shared_expert.down_proj.weight", work.down, rows)
         runtime.session.encode(
             "scatter_add_rows",
@@ -855,20 +859,36 @@ def _expert_pass(
     )
 
 
-def _quantize_i8(runtime: Any, work: _Workspace, rows: int, inner: int) -> None:
+def _quantize_i8(
+    runtime: Any,
+    work: _Workspace,
+    rows: int,
+    inner: int,
+    *,
+    source: Any | None = None,
+    source_off: int = 0,
+) -> None:
     if rows * inner > I8_ACT:
         message = f"int8 activation {rows} by {inner} exceeds the stage"
         raise RuntimeError(message)
     runtime.session.encode(
         "quantize_half_i8",
-        [(work.half, 0), (work.i8_act, 0), (work.i8_act_scale, 0)],
+        [(work.half if source is None else source, source_off), (work.i8_act, 0), (work.i8_act_scale, 0)],
         [_u32(rows), _u32(inner)],
         (rows, 1, 1),
         (256, 1, 1),
     )
 
 
-def _matmul_i8(runtime: Any, work: _Workspace, name: str, dest: Any, rows: int) -> None:
+def _matmul_i8(
+    runtime: Any,
+    work: _Workspace,
+    name: str,
+    dest: Any,
+    rows: int,
+    *,
+    half: Any | None = None,
+) -> None:
     buf, offset, entry = runtime._loc(name)
     cols, inner = (int(value) for value in entry["stored_shape"])
     kind = entry.get("dtype", "fp4")
@@ -902,9 +922,18 @@ def _matmul_i8(runtime: Any, work: _Workspace, name: str, dest: Any, rows: int) 
         _i8_threads(runtime),
     )
     n = rows * cols
+    if half is None:
+        runtime.session.encode(
+            "scale_i8_f32",
+            [(dest, 0), (work.i8_act_scale, 0), (work.i8_stage, scale)],
+            [_u32(rows), _u32(cols)],
+            ((n + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+        return
     runtime.session.encode(
-        "scale_i8_f32",
-        [(dest, 0), (work.i8_act_scale, 0), (work.i8_stage, scale)],
+        "scale_i8_f16",
+        [(dest, 0), (work.i8_act_scale, 0), (work.i8_stage, scale), (half, 0)],
         [_u32(rows), _u32(cols)],
         ((n + 255) // 256, 1, 1),
         (256, 1, 1),

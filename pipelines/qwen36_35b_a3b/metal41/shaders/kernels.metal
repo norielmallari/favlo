@@ -1168,6 +1168,27 @@ kernel void prefill_i8_n64(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// Same scale as scale_i8_f32. The product stays int32. The store is half so the
+// next quantize reads the activation the accelerator accepts.
+kernel void scale_i8_f16(
+    device const int* acc [[buffer(0)]],
+    device const float* row_scale [[buffer(1)]],
+    device const float* col_scale [[buffer(2)]],
+    device half* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = rows * cols;
+    if (gid >= n) {
+        return;
+    }
+    uint col = gid % cols;
+    uint row = gid / cols;
+    float value = float(acc[gid]) * row_scale[row] * col_scale[col];
+    destination[gid] = half(value);
+}
+
 // Token scale times channel scale. The int32 product and the float result share the buffer.
 kernel void scale_i8_f32(
     device int* acc [[buffer(0)]],
@@ -3928,6 +3949,25 @@ kernel void silu_mul_rows(
     float gate = gate_up[token * 1024u + row];
     float up = gate_up[token * 1024u + 512u + row];
     gated[tid] = silu_f(gate) * up;
+}
+
+// Gate and up are half, concatenated per token. The SiLU product is computed
+// in float and stored as half.
+kernel void silu_mul_f16(
+    device const half* gate_up [[buffer(0)]],
+    device half* gated [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint span = rows * 512u;
+    if (tid >= span) {
+        return;
+    }
+    uint token = tid >> 9;
+    uint row = tid & 511u;
+    float gate = float(gate_up[token * 1024u + row]);
+    float up = float(gate_up[token * 1024u + 512u + row]);
+    gated[tid] = half(silu_f(gate) * up);
 }
 
 kernel void gather_half_rows(

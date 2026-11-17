@@ -1524,6 +1524,62 @@ def check_i8_prefill(session: Session) -> None:
         ).astype(np.float32)
         got = session.download_f32(destination, rows * cols).reshape(rows, cols)
         _close(f"{kind} int8 tile", got, expect, rtol=1e-5, atol=1e-4)
+    _check_half_gate(session)
+
+
+def _check_half_gate(session: Session) -> None:
+    """The gate-up epilogue stores half, and SiLU reads that half."""
+    rows, cols = 2, 8
+    acc = np.array(
+        [[1000, -2000, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13, 14, 15, 16]],
+        dtype=np.int32,
+    )
+    row_scale = np.array([0.01, 0.02], dtype=np.float32)
+    col_scale = np.array([0.5, 0.25, 1, 1, 1, 1, 1, 1], dtype=np.float32)
+    expect = (acc.astype(np.float64) * row_scale[:, None] * col_scale[None, :]).astype(np.float16)
+    acc_buf = session.zeros(rows * cols * 4)
+    row_buf = session.zeros(rows * 4)
+    col_buf = session.zeros(cols * 4)
+    half_buf = session.zeros(rows * cols * 2)
+    memoryview(acc_buf.contents().as_buffer(acc.nbytes))[:] = acc.tobytes()
+    memoryview(row_buf.contents().as_buffer(row_scale.nbytes))[:] = row_scale.tobytes()
+    memoryview(col_buf.contents().as_buffer(col_scale.nbytes))[:] = col_scale.tobytes()
+    session.begin()
+    session.encode(
+        "scale_i8_f16",
+        [(acc_buf, 0), (row_buf, 0), (col_buf, 0), (half_buf, 0)],
+        [np.uint32(rows).tobytes(), np.uint32(cols).tobytes()],
+        (1, 1, 1),
+        (256, 1, 1),
+    )
+    session.end()
+    got = np.frombuffer(session.download(half_buf, rows * cols * 2), dtype=np.float16).reshape(rows, cols)
+    _close("int8 half epilogue", got, expect, rtol=0.0, atol=0.0)
+
+    tokens = 2
+    gate_up = np.zeros(tokens * 1024, dtype=np.float16)
+    gate_up[:512] = np.linspace(-2.0, 2.0, 512, dtype=np.float32).astype(np.float16)
+    gate_up[512:1024] = np.float16(0.5)
+    gate_up[1024:1536] = np.float16(1.0)
+    gate_up[1536:] = np.linspace(-1.0, 1.0, 512, dtype=np.float32).astype(np.float16)
+    source = session.zeros(tokens * 1024 * 2)
+    dest = session.zeros(tokens * 512 * 2)
+    memoryview(source.contents().as_buffer(gate_up.nbytes))[:] = gate_up.tobytes()
+    session.begin()
+    session.encode(
+        "silu_mul_f16",
+        [(source, 0), (dest, 0)],
+        [np.uint32(tokens).tobytes()],
+        (tokens * 2, 1, 1),
+        (256, 1, 1),
+    )
+    session.end()
+    got_gate = np.frombuffer(session.download(dest, tokens * 512 * 2), dtype=np.float16)
+    flat = gate_up.astype(np.float32)
+    silu = flat[:512] / (1.0 + np.exp(-flat[:512])) * flat[512:1024]
+    silu2 = flat[1024:1536] / (1.0 + np.exp(-flat[1024:1536])) * flat[1536:]
+    expect_gate = np.concatenate([silu, silu2]).astype(np.float16)
+    _close("half SiLU", got_gate, expect_gate, rtol=1e-3, atol=1e-3)
 
 
 def check_fill_rope(session: Session) -> None:

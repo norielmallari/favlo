@@ -192,6 +192,8 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - The close finishes the open command buffer, closes the expert files, and drops the device buffers.
 - A chunk restores each resident language projection from its packed fp4 or fp8 bytes into a per-row int8 stage, quantizes the half activation the same way, and multiplies with a 64 by 64 int8 `matmul2d`.
 - The stage holds one matrix and is dropped after the epilogue multiplies the int32 product by the token scale and the channel scale.
+- The shared-expert gate-up epilogue stores half. SiLU reads that half and writes half, and the down projection quantizes that half.
+- The other int8 products store float.
 - Those matrices are the Gated DeltaNet qkv, z, and out projections, the attention q, k, v, and o projections, and the shared expert.
 - `in_proj_a` and `in_proj_b` stay on the 64 by 32 packed tile.
 - The router is a float16 matrix product.
