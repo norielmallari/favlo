@@ -77,6 +77,14 @@ def quantize(weights: Path, copy: str | None, root: Path | None = None) -> Path:
             json.dumps({"weights": str(weights.resolve())}) + "\n",
             encoding="utf-8",
         )
+        write_dit_record(directory)
+        vae_file = Path(vae)
+        if not vae_file.is_file():
+            from favlo.cli import repo_root
+
+            vae_file = repo_root() / vae
+        if vae_file.is_file():
+            write_vae_checkpoint(vae_file, directory / "vae.bin")
         umt5 = models_dir(root) / "google" / "umt5-xxl-int8"
         _release_stale_alias(root)
         register_quantized(
@@ -128,6 +136,62 @@ def _gelu_kind(archive: Archive) -> str:
     if error > 0.5:
         return "erf"
     return "tanh"
+
+
+def write_dit_record(directory: Path) -> Path:
+    """Copy the packed DiT into ``dit.bin``. Int8 codes are copied. Float16 N is padded to 32."""
+    from wan22_ti2v_5b.metal41.blob import Writer, f16_matrix, i8_bias
+    from wan22_ti2v_5b.metal41.dit import BLOCK_MATRICES, STEMS
+
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    layers = int(manifest["layers"])
+    writer = Writer()
+    for name in STEMS:
+        weight = np.load(directory / f"{name}.npy")
+        logical_n, logical_k = int(weight.shape[0]), int(weight.shape[1])
+        writer.add(
+            name,
+            f16_matrix(weight),
+            layout="f16",
+            logical_n=logical_n,
+            logical_k=logical_k,
+            source_shape=[logical_n, logical_k],
+            rank=2,
+        )
+    for index in range(layers):
+        block = directory / "blocks" / f"{index:02d}"
+        for name in BLOCK_MATRICES:
+            with np.load(block / f"{name}.npz") as packed:
+                codes = np.ascontiguousarray(packed["packed"])
+                scales = np.ascontiguousarray(packed["scales"])
+                bias = np.ascontiguousarray(packed["bias"]) if "bias" in packed.files else None
+                logical_n = int(packed["logical_n"]) if "logical_n" in packed.files else int(codes.shape[0])
+                logical_k = int(packed["logical_k"]) if "logical_k" in packed.files else int(codes.shape[1])
+            label = f"blocks.{index:02d}.{name}"
+            writer.add(
+                label,
+                codes,
+                layout="i8",
+                logical_n=logical_n,
+                logical_k=logical_k,
+                source_shape=[logical_n, logical_k],
+            )
+            writer.add(f"{label}.scales", scales, layout="f32")
+            if bias is not None:
+                writer.add(f"{label}.bias", i8_bias(codes, bias, logical_n), layout="f16")
+    return writer.finish(directory / "dit.bin", directory / "dit.json")
+
+
+def write_vae_checkpoint(path: Path, dest: Path) -> Path:
+    """Read the VAE pickle and write the padded planes. The pickle stays."""
+    from wan22_ti2v_5b.metal41.blob import write_vae_arrays
+
+    archive = load_state(path)
+    try:
+        arrays = {key: np.array(archive.tensor(key)) for key in archive.keys()}
+    finally:
+        archive.close()
+    return write_vae_arrays(arrays, dest)
 
 
 def _save_float(archive: Archive, directory: Path) -> None:

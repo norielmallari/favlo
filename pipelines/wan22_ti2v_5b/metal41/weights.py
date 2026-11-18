@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from wan22_ti2v_5b.metal41.activations import softmax
+from wan22_ti2v_5b.metal41.blob import expect_f16, expect_i8
 from wan22_ti2v_5b.metal41.gpu import Gpu
 
 
@@ -20,6 +21,21 @@ class Matrix:
     perm: np.ndarray | None
     logical_n: int
     logical_k: int
+    span: object | None = None
+    packed_at: int | None = None
+    scales_at: int | None = None
+    bias_at: int | None = None
+    stored_shape: tuple[int, ...] | None = None
+
+    def stored_n(self) -> int:
+        if self.stored_shape is not None:
+            return int(self.stored_shape[0])
+        return int(self.packed.shape[0])
+
+    def stored_k(self) -> int:
+        if self.stored_shape is not None:
+            return int(self.stored_shape[1])
+        return int(self.packed.shape[1])
 
 
 def load_matrix(path: Path) -> Matrix:
@@ -41,10 +57,85 @@ def load_matrix(path: Path) -> Matrix:
     return Matrix(kind, data, scales, bias, perm, logical_n, logical_k)
 
 
+def matrix_from_planes(
+    handle: object,
+    planes: dict[str, dict],
+    name: str,
+    *,
+    kind: str,
+    bias_path: Path | None = None,
+) -> Matrix:
+    """Bind one matrix at its plane offset. The packed codes stay in the span."""
+    plane = planes.get(name)
+    if plane is None:
+        plane = planes.get(f"{name}.packed")
+    if plane is None:
+        message = f"weight pack is missing {name}"
+        raise FileNotFoundError(message)
+    shape = tuple(int(value) for value in plane["shape"])
+    if kind == "f16":
+        if "logical_n" not in plane or "logical_k" not in plane:
+            message = f"{name} is missing its float16 extents"
+            raise RuntimeError(message)
+        expect_f16(plane)
+    elif kind == "int8":
+        expect_i8(plane)
+    else:
+        message = f"unknown kind {kind}"
+        raise RuntimeError(message)
+    scales_at = None
+    bias_at = None
+    bias = None
+    if kind == "int8":
+        scale = planes.get(f"{name}.scales")
+        if scale is None:
+            message = f"weight pack is missing {name}.scales"
+            raise FileNotFoundError(message)
+        if tuple(int(value) for value in scale["shape"]) != (shape[0],):
+            message = f"{name}.scales length does not match the int8 rows"
+            raise RuntimeError(message)
+        if np.dtype(scale["dtype"]) != np.float32:
+            message = f"{name}.scales is not float32"
+            raise RuntimeError(message)
+        scales_at = int(scale["offset"])
+        bias_plane = planes.get(f"{name}.bias")
+        if bias_plane is not None and tuple(int(value) for value in bias_plane["shape"]) == (shape[0],):
+            if np.dtype(bias_plane["dtype"]) != np.float16:
+                message = f"{name}.bias is not float16"
+                raise RuntimeError(message)
+            bias_at = int(bias_plane["offset"])
+        elif bias_plane is not None:
+            from wan22_ti2v_5b.metal41.blob import copy_plane
+
+            bias = copy_plane(handle, bias_plane)
+    if bias_path is not None and bias_path.is_file():
+        bias = np.load(bias_path)
+    logical_n = int(plane["logical_n"]) if "logical_n" in plane else int(shape[0])
+    logical_k = int(plane["logical_k"]) if "logical_k" in plane else int(shape[1])
+    if kind == "int8" and "logical_n" not in plane and bias is not None:
+        bias_n = int(np.asarray(bias).reshape(-1).shape[0])
+        if bias_n < logical_n:
+            logical_n = bias_n
+    return Matrix(
+        kind,
+        None,
+        None,
+        bias,
+        None,
+        logical_n,
+        logical_k,
+        handle,
+        int(plane["offset"]),
+        scales_at,
+        bias_at,
+        shape,
+    )
+
+
 def apply(gpu: Gpu, rows: np.ndarray, matrix: Matrix) -> np.ndarray:
     """``rows @ weight.T`` plus bias. ``rows`` is ``[M, K]``."""
     data = np.ascontiguousarray(rows, dtype=np.float32)
-    stored_k = int(matrix.packed.shape[1])
+    stored_k = matrix.stored_k()
     if matrix.kind == "int8" and data.shape[1] != stored_k:
         if data.shape[1] > stored_k:
             message = f"K {data.shape[1]} is wider than the int8 weight"
@@ -54,7 +145,10 @@ def apply(gpu: Gpu, rows: np.ndarray, matrix: Matrix) -> np.ndarray:
         data = padded
     if matrix.perm is not None:
         data = np.ascontiguousarray(data[:, matrix.perm])
-    values = gpu.linear(data, matrix.packed, matrix.scales, kind=matrix.kind, bias=matrix.bias)
+    if matrix.span is not None:
+        values = gpu.linear_span(data, matrix)
+    else:
+        values = gpu.linear(data, matrix.packed, matrix.scales, kind=matrix.kind, bias=matrix.bias)
     if matrix.kind == "int8" and values.shape[1] != matrix.logical_n:
         return values[:, : matrix.logical_n]
     return values

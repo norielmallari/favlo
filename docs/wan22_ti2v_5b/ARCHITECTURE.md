@@ -8,6 +8,7 @@ This page is the as-built detail for the `wan22_ti2v_5b` package. [README.md](RE
 - The record is `models/Wan2.2-TI2V-5B-int8`.
 - The umT5 encoder is the int8 pack named by `parts.umt5` on the registry row, `models/google/umt5-xxl-int8`.
 - A clip reads that pack and does not open the BF16 encoder file.
+- When the pack contains `weights.bin` and `planes.json`, the text encoder reads that pair into one span. Otherwise it uses `np.load`.
 - The tokenizer is `tokenizer.json` inside that pack.
 - `favlo --wan22_ti2v_5b umt5` writes the pack.
 - This pipeline does not pack the encoder.
@@ -33,7 +34,7 @@ The sampler uses four knots, 1000, 960, 888.888889, and 727.272727. Each knot is
 - The worst matrix was `blocks.11.ffn.2` at 0.014504 ([research/int8-weight-error.md](research/int8-weight-error.md)).
 - The feed-forward activation is tanh-GELU (tanh versus erf max abs 0.000473).
 - Time, text, the patch, the head, norms, and modulation stay float16.
-- The VAE stays float32.
+- The VAE checkpoint stays float32. A wide convolution is stored as the padded float16 matrix the upload builds.
 - It is the 48-channel Wan2.2 autoencoder.
 - Pixels are grouped 2×2 into 12 channels with the width offset outside the height offset, then restored the same way.
 - The VAE walks one latent frame at a time and keeps the causal cache.
@@ -61,7 +62,7 @@ The sampler uses four knots, 1000, 960, 888.888889, and 727.272727. Each knot is
 - Open refuses when three decoder frames do not fit.
 - The 30 DiT blocks and the 24 text blocks stay resident until that request's `close`.
 
-- The VAE file stays.
+- The VAE pickle stays on disk. Serve reads `vae.bin` when that file is present.
 - `still.png` is the horse still.
 - A still that is not the clip size is resized to that size, and that frame is the first latent.
 - A canvas smaller than 832×480 is a routing check.
@@ -82,9 +83,25 @@ uv run favlo --wan22_ti2v_5b ceilings
 - `setup` writes `Wan2.2_VAE.pth` under `models/Wan-AI/Wan2.2-TI2V-5B/`.
 - `--student-dir` optionally downloads the Turbo student `model.pt`.
 - `quantize --weights` packs `models/Wan2.2-TI2V-5B-int8` and registers that folder.
-- The VAE is not packed.
+- It also writes `dit.bin`. When `Wan2.2_VAE.pth` is present it writes `vae.bin` beside the DiT record.
+- The `.npy` and `.npz` files stay. They are the fallback when a raw pair is missing.
 - `kernels` compiles and checks `matmul2d`.
 - `ceilings` times the isolated kernels.
+
+## Weight read
+
+- `dit.bin` and `dit.json` are the DiT planes. `vae.bin` and `vae.json` are the VAE planes. Both pairs live in the packed folder.
+- Serve reads a pair when both files are present. A missing pair keeps `np.load` for the DiT and the text encoder, and unpickles the VAE. One file without the other is a broken pack.
+- Each raw file is one shared span. The read is `readinto` in 8 MiB steps. A kernel binds that span at the plane offset.
+- `dit.json`, `vae.json`, and umT5 `planes.json` are lists of `{name, dtype, offset, nbytes, shape}`. A start is 128-byte aligned. `nbytes` is the array size, not the gap after it.
+- Int8 codes are copied. N is padded to 128 and K to 256. The scale plane is float32, one value per stored row. The bias plane is float16, one value per stored row.
+- Float16 GEMM weights are stored with N padded to 32. K is unchanged.
+- A convolution of at least 32 outputs and 64 taps is float16 `[pad(N, 64), pad(K, 64)]`. The row is the flattened taps, after a 4D weight gains a time tap of 1. That is not the 5D checkpoint order.
+- A smaller convolution stays float32 in `conv3d` order.
+- A `conv64` plane uses the wide kernel even when the map has fewer than 1024 sites. The pickle path still uses that site threshold.
+- Norms, modulation, `head_mod`, and a float16 bias the GEMM adds on the host stay `.npy`.
+- The text encoder keeps the umT5 span until close. RMSNorm weights are a host copy. The token table is a view of `embed`.
+- umT5 kernel names are `blocks.{layer}.attn.q.weight` and the same stem for `k`, `v`, `o`, `ffn.gate.0.weight`, `ffn.fc1.weight`, and `ffn.fc2.weight`, plus `.scales` and `.bias`. Host names are `embed`, `norm`, `blocks.{layer}.norm1`, `norm2`, and `pos`.
 
 ## Registry
 

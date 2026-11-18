@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from favlo.memory import bind, device_buffer, memory
+from wan22_ti2v_5b.metal41.blob import CONV_OUT, CONV_TAP, BoundTensor, fill, pad_multiple
 from wan22_ti2v_5b.metal41.spec import FP16_MAX, TILE_M, TILE_N, TILE_N_I8
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
@@ -33,6 +34,20 @@ class Gpu:
     def upload(self, array: np.ndarray):
         raw = np.ascontiguousarray(array)
         return memory.upload(raw.tobytes(), owner=self.owner)
+
+    def read_blob(self, path: Path):
+        """One shared span. The file is read in 8 MiB steps at the span, not a second copy."""
+        size = path.stat().st_size
+        if size < 1:
+            message = f"{path.name} is empty"
+            raise RuntimeError(message)
+        handle = memory.allocate(size, owner=self.owner, heap="resident", storage="shared")
+        view = memory.map(handle, 0, size)
+        try:
+            fill(view, path)
+        finally:
+            del view
+        return handle
 
     def zeros(self, nbytes: int):
         return device_buffer(self.owner, nbytes, zero=True)
@@ -112,6 +127,11 @@ class Gpu:
         stride: int | None = None,
     ) -> np.ndarray:
         """``left @ weight.T``. ``left`` is ``[M, K]``. int8 stores float32."""
+        if isinstance(packed, BoundTensor):
+            if kind != "f16":
+                message = f"{packed.name} is bound as {kind}"
+                raise RuntimeError(message)
+            return self._linear_f16_bound(left, packed, bias)
         if kind == "int8":
             return self._linear_i8(left, packed, scales, bias)
         rows, cols = int(left.shape[0]), int(left.shape[1])
@@ -206,6 +226,144 @@ class Gpu:
         values = self.download(dest, np.float32, (padded_m, out_n))[:rows, :logical]
         for handle in (left_h, row_h, bias_h, dest):
             self.release(handle)
+        return values
+
+    def linear_span(self, left: np.ndarray, matrix) -> np.ndarray:
+        """Bind a plane in the shared span. The packed array is not on the host."""
+        if matrix.kind == "int8":
+            return self._linear_i8_span(left, matrix)
+        if matrix.kind != "f16":
+            message = f"unknown kind {matrix.kind}"
+            raise RuntimeError(message)
+        return self._linear_f16_matrix(left, matrix)
+
+    def _linear_f16_bound(self, left: np.ndarray, packed: BoundTensor, bias: np.ndarray | None) -> np.ndarray:
+        rows, cols = int(left.shape[0]), int(left.shape[1])
+        stored_n, stored_k = packed.stored_shape
+        if stored_k != cols:
+            message = f"K {cols} does not match {packed.name}"
+            raise RuntimeError(message)
+        padded_n = _pad(int(packed.logical_n), TILE_N)
+        if (stored_n, stored_k) != (padded_n, int(packed.logical_k)):
+            message = f"{packed.name} is {(stored_n, stored_k)}, kernel wants {(padded_n, packed.logical_k)}"
+            raise RuntimeError(message)
+        if packed.dtype != np.float16:
+            message = f"{packed.name} is not float16"
+            raise RuntimeError(message)
+        values = self._gemm_f16_span(
+            left,
+            packed.handle,
+            int(packed.offset),
+            rows,
+            cols,
+            padded_n,
+            int(packed.logical_n),
+        )
+        if bias is not None:
+            values = values + np.ascontiguousarray(bias, dtype=np.float32).reshape(1, -1)
+        return _store_half(values)
+
+    def _linear_f16_matrix(self, left: np.ndarray, matrix) -> np.ndarray:
+        rows, cols = int(left.shape[0]), int(left.shape[1])
+        stored_n, stored_k = matrix.stored_shape
+        if stored_k != cols:
+            message = f"K {cols} does not match the weight"
+            raise RuntimeError(message)
+        padded_n = _pad(stored_n, TILE_N)
+        if padded_n != stored_n:
+            message = f"f16 N {stored_n} is not padded to {padded_n}"
+            raise RuntimeError(message)
+        values = self._gemm_f16_span(
+            left,
+            matrix.span,
+            int(matrix.packed_at),
+            rows,
+            cols,
+            padded_n,
+            int(matrix.logical_n),
+        )
+        if matrix.bias is not None:
+            values = values + matrix.bias.astype(np.float32).reshape(1, -1)
+        return _store_half(values)
+
+    def _gemm_f16_span(self, left, handle, offset: int, rows: int, cols: int, padded_n: int, logical_n: int):
+        padded_m = _pad(rows, TILE_M)
+        host = np.zeros((padded_m, cols), dtype=np.float16)
+        host[:rows] = np.ascontiguousarray(left, dtype=np.float16)
+        left_h = self.upload(host)
+        dest = self.zeros(padded_m * padded_n * 4)
+        dims = np.array([padded_m, padded_n, cols, cols, cols], dtype=np.int32)
+        group = _Dispatch(self)
+        group.gemm(
+            "gemm_f16_tn",
+            (left_h, handle, dest),
+            dims,
+            tile_n=TILE_N,
+            offsets=(0, offset, 0),
+        )
+        group.finish("linear_f16")
+        values = self.download(dest, np.float32, (padded_m, padded_n))[:rows, :logical_n]
+        self.release(left_h)
+        self.release(dest)
+        return values
+
+    def _linear_i8_span(self, left: np.ndarray, matrix) -> np.ndarray:
+        from wan22_ti2v_5b.metal41.quant import quantize_activation
+
+        rows, cols = int(left.shape[0]), int(left.shape[1])
+        out_n, stored_k = (int(value) for value in matrix.stored_shape)
+        if stored_k != cols:
+            message = f"K {cols} does not match the int8 weight"
+            raise RuntimeError(message)
+        if out_n % TILE_N_I8 != 0:
+            message = f"int8 N {out_n} is not a multiple of {TILE_N_I8}"
+            raise RuntimeError(message)
+        if matrix.scales_at is None:
+            message = "int8 weight is missing its row scales"
+            raise RuntimeError(message)
+        logical = int(matrix.logical_n)
+        padded_m = _pad(rows, TILE_M)
+        host = np.zeros((padded_m, cols), dtype=np.float32)
+        host[:rows] = np.ascontiguousarray(left, dtype=np.float32)
+        codes, row_scale = quantize_activation(host)
+        left_h = self.upload(codes)
+        row_h = self.upload(row_scale)
+        if matrix.bias_at is None:
+            bias_row = np.zeros(out_n, dtype=np.float16)
+            if matrix.bias is not None:
+                flat = np.ascontiguousarray(matrix.bias, dtype=np.float16).reshape(-1)
+                bias_row[:logical] = flat[:out_n]
+            bias_h = self.upload(bias_row)
+            bias_off = 0
+            release_bias = True
+        else:
+            bias_h = matrix.span
+            bias_off = int(matrix.bias_at)
+            release_bias = False
+        dest = self.zeros(padded_m * out_n * 4)
+        dims = np.array([padded_m, out_n, cols, cols, cols], dtype=np.int32)
+        shape = np.array([padded_m, out_n, logical], dtype=np.int32)
+        group = _Dispatch(self)
+        group.gemm(
+            "gemm_i8",
+            (left_h, matrix.span, dest),
+            dims,
+            tile_n=TILE_N_I8,
+            offsets=(0, int(matrix.packed_at), 0),
+        )
+        group.launch(
+            "scale_i8",
+            (dest, row_h, matrix.span, bias_h),
+            shape.tobytes(),
+            padded_m * out_n,
+            offsets=(0, 0, int(matrix.scales_at), bias_off),
+        )
+        group.finish("linear_i8")
+        values = self.download(dest, np.float32, (padded_m, out_n))[:rows, :logical]
+        for handle in (left_h, row_h, dest):
+            self.release(handle)
+        if release_bias:
+            self.release(bias_h)
         return values
 
     def gemm_half(
@@ -365,7 +523,11 @@ class Gpu:
         """``source`` is ``[C, T, H, W]``. A wide convolution is im2col plus ``matmul2d``."""
         in_c, frames, height, width = (int(v) for v in source.shape)
         origin = weight
-        if weight.ndim == 4:
+        bound = weight if isinstance(weight, BoundTensor) else None
+        if bound is not None and bound.rank == 4:
+            stride = (1, stride[1], stride[2])
+            padding = (0, padding[1], padding[2])
+        elif weight.ndim == 4:
             weight = weight.reshape(
                 weight.shape[0], weight.shape[1], 1, weight.shape[2], weight.shape[3]
             )
@@ -395,6 +557,7 @@ class Gpu:
             out_t,
             out_h,
             out_w,
+            bound,
         )
         group.finish("conv3d")
         return self.download(result, np.float32, (int(weight.shape[0]), out_t, out_h, out_w))
@@ -418,10 +581,15 @@ class Gpu:
         src_h = self._stage("conv-src", data)
         group = _Dispatch(self)
         sites = frames * height * width
-        scale = np.ascontiguousarray(gamma, dtype=np.float32).reshape(-1)
-        gamma_h = self._keep(("channel-rms", id(gamma), channels), scale)
+        gamma_h, gamma_off = self._gamma_pair(gamma, channels)
         shape = np.array([channels, sites], dtype=np.int32)
-        group.launch("rms_nchw_f32", (src_h, gamma_h), shape.tobytes(), sites)
+        group.launch(
+            "rms_nchw_f32",
+            (src_h, gamma_h),
+            shape.tobytes(),
+            sites,
+            offsets=(0, gamma_off),
+        )
         group.launch("silu_f32", (src_h,), np.int32(data.size).tobytes(), int(data.size))
         take = min(int(tail), frames)
         tail_h = self._buffer("conv-tail", channels * take * height * width * 4)
@@ -449,7 +617,11 @@ class Gpu:
             conv_src = joined
             conv_frames = prev_t + frames
         origin = weight
-        if weight.ndim == 4:
+        bound = weight if isinstance(weight, BoundTensor) else None
+        if bound is not None and bound.rank == 4:
+            stride = (1, stride[1], stride[2])
+            padding = (0, padding[1], padding[2])
+        elif weight.ndim == 4:
             weight = weight.reshape(
                 weight.shape[0], weight.shape[1], 1, weight.shape[2], weight.shape[3]
             )
@@ -471,6 +643,7 @@ class Gpu:
             out_t,
             out_h,
             out_w,
+            bound,
         )
         group.finish("activated-conv")
         values = self.download(out, np.float32, (int(weight.shape[0]), out_t, out_h, out_w))
@@ -489,12 +662,17 @@ class Gpu:
         data = np.ascontiguousarray(values, dtype=np.float32)
         channels = int(data.shape[0])
         sites = int(data.size // channels)
-        scale = np.ascontiguousarray(gamma, dtype=np.float32).reshape(-1)
         handle = self.upload(data)
-        gamma_h = self._keep(("channel-rms", id(gamma), channels), scale)
+        gamma_h, gamma_off = self._gamma_pair(gamma, channels)
         shape = np.array([channels, sites], dtype=np.int32)
         group = _Dispatch(self)
-        group.launch("rms_nchw_f32", (handle, gamma_h), shape.tobytes(), sites)
+        group.launch(
+            "rms_nchw_f32",
+            (handle, gamma_h),
+            shape.tobytes(),
+            sites,
+            offsets=(0, gamma_off),
+        )
         if silu:
             group.launch("silu_f32", (handle,), np.int32(data.size).tobytes(), int(data.size))
         group.finish("channel_rms")
@@ -518,11 +696,61 @@ class Gpu:
         out_t: int,
         out_h: int,
         out_w: int,
+        bound: BoundTensor | None = None,
     ):
         out_c, _ic, kt, kh, kw = (int(v) for v in weight.shape)
         taps = in_c * kt * kh * kw
         outputs = out_t * out_h * out_w
-        if out_c < 32 or outputs < 1024 or taps < 64:
+        if bound is not None:
+            if bound.layout == "conv64":
+                return self._enqueue_wide(
+                    group,
+                    src_h,
+                    origin,
+                    weight,
+                    bias,
+                    out_c,
+                    in_c,
+                    frames,
+                    height,
+                    width,
+                    kt,
+                    kh,
+                    kw,
+                    taps,
+                    stride,
+                    padding,
+                    out_t,
+                    out_h,
+                    out_w,
+                    outputs,
+                    bound,
+                )
+            if bound.layout == "conv32":
+                return self._enqueue_small(
+                    group,
+                    src_h,
+                    origin,
+                    weight,
+                    bias,
+                    out_c,
+                    in_c,
+                    frames,
+                    height,
+                    width,
+                    kt,
+                    kh,
+                    kw,
+                    stride,
+                    padding,
+                    out_t,
+                    out_h,
+                    out_w,
+                    bound,
+                )
+            message = f"{bound.name} layout {bound.layout} is not a convolution"
+            raise RuntimeError(message)
+        if out_c < CONV_OUT or outputs < 1024 or taps < CONV_TAP:
             return self._enqueue_small(
                 group,
                 src_h,
@@ -586,18 +814,30 @@ class Gpu:
         out_t,
         out_h,
         out_w,
+        bound: BoundTensor | None = None,
     ):
         args = _conv_args(
             out_c, in_c, frames, height, width, kt, kh, kw, padding, stride, out_t, out_h, out_w, 0
         )
-        packed = np.ascontiguousarray(weight, dtype=np.float32)
-        held = self._resident(origin, factory=lambda: packed)
+        if bound is None:
+            packed = np.ascontiguousarray(weight, dtype=np.float32)
+            held = self._resident(origin, factory=lambda: packed)
+            weight_off = 0
+        else:
+            want = (out_c, in_c, kt, kh, kw)
+            if bound.stored_shape != want or bound.dtype != np.float32:
+                message = f"{bound.name} is {bound.stored_shape} {bound.dtype}, conv3d wants {want} float32"
+                raise RuntimeError(message)
+            held = bound.handle
+            weight_off = bound.offset
+        bias_h, bias_off = self._bias_pair(bias, out_c)
         dest = self._buffer("conv-nchw", out_c * out_t * out_h * out_w * 4)
         group.launch(
             "conv3d_f32",
-            (src_h, held, self._bias_row(bias, out_c), dest),
+            (src_h, held, bias_h, dest),
             args.tobytes(),
             out_c * out_t * out_h * out_w,
+            offsets=(0, weight_off, bias_off, 0),
         )
         return dest
 
@@ -623,10 +863,22 @@ class Gpu:
         out_h,
         out_w,
         outputs,
+        bound: BoundTensor | None = None,
     ):
         k_pad = _pad(taps, 64)
         padded_n = _pad(out_c, 64)
-        weight_h = self._resident_conv(origin, weight, padded_n, k_pad, out_c, taps)
+        if bound is None:
+            weight_h = self._resident_conv(origin, weight, padded_n, k_pad, out_c, taps)
+            weight_off = 0
+        else:
+            want = (padded_n, k_pad)
+            if bound.stored_shape != want or bound.dtype != np.float16:
+                message = (
+                    f"{bound.name} is {bound.stored_shape} {bound.dtype}, wide conv wants {want} float16"
+                )
+                raise RuntimeError(message)
+            weight_h = bound.handle
+            weight_off = bound.offset
         col_m = _pad(min(_CONV_ROWS, outputs), TILE_M)
         col_h = self._buffer("conv-col", col_m * k_pad * 2)
         if k_pad != taps:
@@ -661,7 +913,7 @@ class Gpu:
                 (col_h, weight_h, dest),
                 dims,
                 tile_n=64,
-                offsets=(0, 0, row0 * padded_n * 4),
+                offsets=(0, weight_off, row0 * padded_n * 4),
             )
             row0 += valid
         nchw = self._buffer("conv-nchw", out_c * outputs * 4)
@@ -672,13 +924,32 @@ class Gpu:
         epi["out_h"] = out_h
         epi["out_w"] = out_w
         epi["limit"] = np.float32(FP16_MAX)
+        bias_h, bias_off = self._bias_pair(bias, out_c)
         group.launch(
             "conv_epilogue_nchw",
-            (dest, self._bias_row(bias, out_c), nchw),
+            (dest, bias_h, nchw),
             epi.tobytes(),
             outputs,
+            offsets=(0, bias_off, 0),
         )
         return nchw
+
+    def _bias_pair(self, bias, out_c: int) -> tuple[object, int]:
+        if isinstance(bias, BoundTensor):
+            if bias.stored_shape != (out_c,) or bias.dtype != np.float32:
+                message = f"{bias.name} bias is {bias.stored_shape} {bias.dtype}"
+                raise RuntimeError(message)
+            return bias.handle, bias.offset
+        return self._bias_row(bias, out_c), 0
+
+    def _gamma_pair(self, gamma, channels: int) -> tuple[object, int]:
+        if isinstance(gamma, BoundTensor):
+            if gamma.stored_shape != (channels,) or gamma.dtype != np.float32:
+                message = f"{gamma.name} is {gamma.stored_shape} {gamma.dtype}"
+                raise RuntimeError(message)
+            return gamma.handle, gamma.offset
+        scale = np.ascontiguousarray(gamma, dtype=np.float32).reshape(-1)
+        return self._keep(("channel-rms", id(gamma), channels), scale), 0
 
     def _bias_row(self, bias: np.ndarray | None, out_c: int):
         if bias is None:
@@ -882,7 +1153,7 @@ _EPI = np.dtype(
 
 
 def _pad(count: int, multiple: int) -> int:
-    return max(multiple, ((count + multiple - 1) // multiple) * multiple)
+    return pad_multiple(count, multiple)
 
 
 def _store_half(values: np.ndarray) -> np.ndarray:

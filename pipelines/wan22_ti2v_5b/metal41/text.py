@@ -13,10 +13,21 @@ import numpy as np
 from tokenizers import Tokenizer
 
 from wan22_ti2v_5b.metal41.activations import gelu_tanh, merge_heads, rmsnorm, split_heads
+from wan22_ti2v_5b.metal41.blob import copy_plane, load_planes, map_plane, resolve_named
 from wan22_ti2v_5b.metal41.gpu import Gpu
 from wan22_ti2v_5b.metal41.schedule import relative_bucket
 from wan22_ti2v_5b.metal41.spec import TEXT_DIM, TEXT_LEN
-from wan22_ti2v_5b.metal41.weights import apply, attend, load_matrix
+from wan22_ti2v_5b.metal41.weights import apply, attend, load_matrix, matrix_from_planes
+
+WEIGHTS = (
+    "attn.q.weight",
+    "attn.k.weight",
+    "attn.v.weight",
+    "attn.o.weight",
+    "ffn.gate.0.weight",
+    "ffn.fc1.weight",
+    "ffn.fc2.weight",
+)
 
 _HEADS = 64
 _LAYERS = 24
@@ -27,11 +38,28 @@ class TextEncoder:
     def __init__(self, root: Path, gpu: Gpu, tokenizer: Path) -> None:
         self.root = root
         self.gpu = gpu
-        self._embed = np.load(root / "embed.npy", mmap_mode="r")
-        self._norm = np.load(root / "norm.npy")
+        self._kept: list[memoryview] = []
+        self._span = None
         self._tokenizer = Tokenizer.from_file(str(tokenizer))
         buckets = _buckets(TEXT_LEN)
-        self._layers = [_layer(root, buckets, layer) for layer in range(_LAYERS)]
+        blob = resolve_named(root, "weights.bin", "planes.json")
+        if blob is None:
+            self._embed = np.load(root / "embed.npy", mmap_mode="r")
+            self._norm = np.load(root / "norm.npy")
+            self._layers = [_layer(root, buckets, layer) for layer in range(_LAYERS)]
+            return
+        self._span = gpu.read_blob(blob)
+        planes = load_planes(root / "planes.json")
+        self._embed, embed_view = map_plane(self._span, _plane(planes, "embed"))
+        self._kept.append(embed_view)
+        self._norm = copy_plane(self._span, _plane(planes, "norm")).astype(np.float32).reshape(-1)
+        self._layers = [
+            _Layer(root, buckets, layer, planes=planes, span=self._span) for layer in range(_LAYERS)
+        ]
+
+    def close(self) -> None:
+        self._kept.clear()
+        self._span = None
 
     def encode(self, prompt: str) -> tuple[np.ndarray, np.ndarray]:
         if not prompt.strip():
@@ -78,22 +106,55 @@ class TextEncoder:
 
 
 class _Layer:
-    def __init__(self, root: Path, buckets: np.ndarray, layer: int) -> None:
+    def __init__(
+        self,
+        root: Path,
+        buckets: np.ndarray,
+        layer: int,
+        planes: dict | None = None,
+        span: object | None = None,
+    ) -> None:
         stem = f"blocks.{layer}"
-        self.norm1 = _vector(root / f"{stem}.norm1.npy")
-        self.norm2 = _vector(root / f"{stem}.norm2.npy")
-        self.q = load_matrix(root / f"{stem}.attn.q.weight.npz")
-        self.k = load_matrix(root / f"{stem}.attn.k.weight.npz")
-        self.v = load_matrix(root / f"{stem}.attn.v.weight.npz")
-        self.o = load_matrix(root / f"{stem}.attn.o.weight.npz")
-        self.gate = load_matrix(root / f"{stem}.ffn.gate.0.weight.npz")
-        self.up = load_matrix(root / f"{stem}.ffn.fc1.weight.npz")
-        self.down = load_matrix(root / f"{stem}.ffn.fc2.weight.npz")
-        self.bias = _position_bias(_vector_2d(root / f"{stem}.pos.npy"), buckets)
+        if planes is None:
+            self.norm1 = _vector(root / f"{stem}.norm1.npy")
+            self.norm2 = _vector(root / f"{stem}.norm2.npy")
+            for name, suffix in _FIELDS:
+                setattr(self, name, load_matrix(root / f"{stem}.{suffix}.npz"))
+            self.bias = _position_bias(_vector_2d(root / f"{stem}.pos.npy"), buckets)
+            return
+        self.norm1 = copy_plane(span, _plane(planes, f"{stem}.norm1")).astype(np.float32).reshape(-1)
+        self.norm2 = copy_plane(span, _plane(planes, f"{stem}.norm2")).astype(np.float32).reshape(-1)
+        for name, suffix in _FIELDS:
+            setattr(
+                self,
+                name,
+                matrix_from_planes(span, planes, f"{stem}.{suffix}", kind="int8"),
+            )
+        pos = copy_plane(span, _plane(planes, f"{stem}.pos")).astype(np.float32)
+        self.bias = _position_bias(pos, buckets)
 
 
 def _layer(root: Path, buckets: np.ndarray, layer: int) -> _Layer:
     return _Layer(root, buckets, layer)
+
+
+def _plane(planes: dict, name: str) -> dict:
+    found = planes.get(name)
+    if found is None:
+        message = f"umT5 pack is missing {name}"
+        raise FileNotFoundError(message)
+    return found
+
+
+_FIELDS = (
+    ("q", WEIGHTS[0]),
+    ("k", WEIGHTS[1]),
+    ("v", WEIGHTS[2]),
+    ("o", WEIGHTS[3]),
+    ("gate", WEIGHTS[4]),
+    ("up", WEIGHTS[5]),
+    ("down", WEIGHTS[6]),
+)
 
 
 def _vector(path: Path) -> np.ndarray:

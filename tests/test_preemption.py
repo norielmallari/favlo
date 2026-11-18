@@ -279,8 +279,10 @@ def test_media_queue_for_follows_the_handler_class(monkeypatch: pytest.MonkeyPat
 
 def test_served_video_handlers_are_bulk_instances() -> None:
     from wan22_i2v.metal41.chat import handle_video as i2v
+    from wan22_ti2v_5b.metal41.runtime import handle_video as ti2v
 
     assert isinstance(i2v, BulkMediaPipeline)
+    assert isinstance(ti2v, BulkMediaPipeline)
     assert isinstance(i2v, MediaPipeline)
 
 

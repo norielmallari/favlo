@@ -1,6 +1,6 @@
 # This package
 
-This package is a media pipeline. It inherits `MediaPipeline`. Kind is `video`. `id_prefix` and `object_name` are set on the class. The smoke tool local names are `generate_video_t2v` and `generate_video_i2v`. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder.
+This package is a media pipeline. It inherits `BulkMediaPipeline`. Kind is `video`. `id_prefix` and `object_name` are set on the class. The smoke tool local names are `generate_video_t2v` and `generate_video_i2v`. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder.
 
 A change to `parse`, `generate`, `pack`, pause, or the job dict loads the media-preemption skill. Do not paste those commands here.
 
@@ -21,3 +21,7 @@ A new abstract method on `MediaPipeline` updates every served media package in t
 The runtime implements `ensure_open(request)` and `close()`. The shell calls `ensure_open` after parse and always calls `close` before `on_finish`, including on pause, fail, and cancel. Helpers live in `src/favlo/media_memory.py`: `stamp_owner`, `open_gate`, `begin_release`, `confirm_release`, and `finish_release`. Do not keep `_memory_cap`, a private `parse_memory`, or a private reclaim wait.
 
 `src/favlo/memory.py` is the only allocator. `open_runtime` accepts `owner` and calls `memory.set_max_memory`. Stamp with `stamp_owner` before the first allocate. The example shape is `example-model:1`. `working_set_bytes(request)` returns weights plus scratch for the named shape. `ensure_open` runs `open_gate` and reloads when closed. The request keeps its resolution, frame count, and duration. Shrink only the scratch knob.
+
+## Weights
+
+`dit.bin` and `vae.bin` are this package's kernel-order planes. The umT5 pack is `weights.bin` and `planes.json` when that pair is present. A missing pair keeps `np.load` for the DiT and the text encoder, and the VAE pickle. Plane starts are 128-byte aligned. Open reads a file into one shared span in 8 MiB steps, and the kernel binds that span. Host RMSNorm stays a host copy. The pad is int8 N 128 and K 256, float16 GEMM N 32, and wide conv N and K 64. A wide conv is the flattened tap matrix, not the 5D checkpoint order.

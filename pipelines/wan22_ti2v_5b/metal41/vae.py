@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from wan22_ti2v_5b.metal41.blob import BlobTable, load_planes, resolve_named
 from wan22_ti2v_5b.metal41.checkpoint import Archive, load_state
 from wan22_ti2v_5b.metal41.gpu import Gpu
 
@@ -38,16 +39,21 @@ _STD = np.array(
 
 
 class WanVae:
-    def __init__(self, path: Path, gpu: Gpu) -> None:
+    def __init__(self, path: Path, gpu: Gpu, pack: Path | None = None) -> None:
         self.gpu = gpu
         self._archive: Archive | None = None
+        self._source: Archive | BlobTable | None = None
         self.path = path
+        self._pack = pack
         self._weights: dict[tuple, np.ndarray] = {}
+        if _vae_blob(path, pack) is not None:
+            self._open()
 
     def close(self) -> None:
         if self._archive is not None:
             self._archive.close()
             self._archive = None
+        self._source = None
 
     def encode(self, frame: np.ndarray) -> np.ndarray:
         """One RGB frame in ``[-1, 1]``, HWC, to a normalized latent ``[48, 1, h, w]``."""
@@ -74,13 +80,20 @@ class WanVae:
         folded = np.concatenate(pieces, axis=1)
         return np.clip(_unpatch(folded), -1.0, 1.0)
 
-    def _open(self) -> Archive:
-        if self._archive is None:
-            if not self.path.is_file():
-                message = f"VAE checkpoint is missing: {self.path}"
-                raise FileNotFoundError(message)
-            self._archive = load_state(self.path)
-        return self._archive
+    def _open(self) -> Archive | BlobTable:
+        if self._source is not None:
+            return self._source
+        blob = _vae_blob(self.path, self._pack)
+        if blob is not None:
+            planes = load_planes(blob.with_suffix(".json"))
+            self._source = BlobTable(self.gpu.read_blob(blob), planes)
+            return self._source
+        if not self.path.is_file():
+            message = f"VAE checkpoint is missing: {self.path}"
+            raise FileNotFoundError(message)
+        self._archive = load_state(self.path)
+        self._source = self._archive
+        return self._source
 
     def _encode_chunk(self, archive: Archive, hidden: np.ndarray, cache: _Cache) -> np.ndarray:
         cache.rewind()
@@ -327,11 +340,13 @@ class WanVae:
     def _attend(self, archive: Archive, hidden: np.ndarray, prefix: str) -> np.ndarray:
         channels, frames, height, width = hidden.shape
         tokens = height * width
-        gamma = self._weight(archive, f"{prefix}.norm.gamma").reshape(channels, 1, 1)
+        gamma = self._weight(archive, f"{prefix}.norm.gamma")
+        if not isinstance(archive, BlobTable):
+            gamma = np.ascontiguousarray(gamma).reshape(channels, 1, 1)
         qkv_w = self._shaped(archive, f"{prefix}.to_qkv.weight", (channels * 3, channels))
-        qkv_b = self._weight(archive, f"{prefix}.to_qkv.bias")
+        qkv_b = self._host(archive, f"{prefix}.to_qkv.bias")
         proj_w = self._shaped(archive, f"{prefix}.proj.weight", (channels, channels))
-        proj_b = self._weight(archive, f"{prefix}.proj.bias")
+        proj_b = self._host(archive, f"{prefix}.proj.bias")
         flats = []
         for frame in range(frames):
             normed = self.gpu.channel_rms(hidden[:, frame], gamma)
@@ -362,20 +377,34 @@ class WanVae:
         ]
         return np.stack(pieces, axis=1)
 
-    def _weight(self, archive: Archive, name: str) -> np.ndarray:
+    def _weight(self, archive: Archive | BlobTable, name: str):
         key = (name,)
         found = self._weights.get(key)
         if found is None:
-            found = np.ascontiguousarray(archive.tensor(name))
+            if isinstance(archive, BlobTable):
+                found = archive.tensor(name)
+            else:
+                found = np.ascontiguousarray(archive.tensor(name))
             self._weights[key] = found
         return found
 
-    def _shaped(self, archive: Archive, name: str, shape: tuple[int, ...]) -> np.ndarray:
+    def _host(self, archive: Archive | BlobTable, name: str) -> np.ndarray:
+        if isinstance(archive, BlobTable):
+            return archive.host(name)
+        return self._weight(archive, name)
+
+    def _shaped(self, archive: Archive | BlobTable, name: str, shape: tuple[int, ...]):
         key = (name, shape)
         found = self._weights.get(key)
         if found is None:
-            raw = archive.tensor(name).reshape(shape)
-            found = np.ascontiguousarray(raw, dtype=np.float16)
+            if isinstance(archive, BlobTable):
+                found = archive.tensor(name)
+                if tuple(found.source_shape) != tuple(shape):
+                    message = f"{name} is {found.source_shape}, forward wants {shape}"
+                    raise RuntimeError(message)
+            else:
+                raw = archive.tensor(name).reshape(shape)
+                found = np.ascontiguousarray(raw, dtype=np.float16)
             self._weights[key] = found
         return found
 
@@ -404,6 +433,16 @@ class WanVae:
         return self.gpu.conv3d(
             hidden, weight, bias, stride=stride, padding=padding, out_size=out_size
         )
+
+
+def _vae_blob(path: Path, pack: Path | None) -> Path | None:
+    """``vae.bin`` in the packed folder, else the file beside the pickle."""
+    if pack is not None:
+        folder = pack.parent if pack.suffix == ".bin" else pack
+        found = resolve_named(folder, "vae.bin", "vae.json")
+        if found is not None:
+            return found
+    return resolve_named(path.parent, path.with_suffix(".bin").name, path.with_suffix(".json").name)
 
 
 def _patch(frame: np.ndarray) -> np.ndarray:

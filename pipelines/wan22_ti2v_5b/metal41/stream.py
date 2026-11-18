@@ -213,7 +213,7 @@ class Stream:
     def _project(
         self, group: _Dispatch, source, rows: int, cols: int, matrix: Matrix, dest
     ) -> None:
-        out_n = int(matrix.packed.shape[0])
+        out_n = matrix.stored_n()
         logical = int(matrix.logical_n)
         group.rows(
             "quantize_i8",
@@ -221,19 +221,24 @@ class Stream:
             np.array([rows, cols], dtype=np.int32).tobytes(),
             rows,
         )
+        weight_h, weight_off = self._plane(matrix, "packed")
+        scale_h, scale_off = self._plane(matrix, "scales")
+        bias_h, bias_off = self._bias_plane(matrix)
         dims = np.array([rows, out_n, cols, cols, cols], dtype=np.int32)
         group.gemm(
             "gemm_i8",
-            (self._codes, self._matrix(matrix.packed), dest),
+            (self._codes, weight_h, dest),
             dims,
             tile_n=TILE_N_I8,
+            offsets=(0, weight_off, 0),
         )
         shape = np.array([rows, out_n, logical], dtype=np.int32)
         group.launch(
             "scale_i8",
-            (dest, self._row_scale, self._matrix(matrix.scales), self._bias(matrix)),
+            (dest, self._row_scale, scale_h, bias_h),
             shape.tobytes(),
             rows * out_n,
+            offsets=(0, 0, scale_off, bias_off),
         )
 
     def _norm(self, group, source, dest, rows: int, cols: int, weight, bias) -> None:
@@ -371,16 +376,24 @@ class Stream:
             np.ascontiguousarray(values, dtype=np.float32).reshape(-1),
         )
 
-    def _matrix(self, values: np.ndarray):
-        return self.gpu._resident(values)
+    def _plane(self, matrix: Matrix, part: str):
+        if part == "packed" and matrix.packed_at is not None:
+            return matrix.span, int(matrix.packed_at)
+        if part == "scales" and matrix.scales_at is not None:
+            return matrix.span, int(matrix.scales_at)
+        values = matrix.packed if part == "packed" else matrix.scales
+        return self.gpu._resident(values), 0
 
-    def _bias(self, matrix: Matrix):
-        out_n = int(matrix.packed.shape[0])
+    def _bias_plane(self, matrix: Matrix):
+        if matrix.bias_at is not None:
+            return matrix.span, int(matrix.bias_at)
+        out_n = matrix.stored_n()
         row = np.zeros(out_n, dtype=np.float16)
         if matrix.bias is not None:
             flat = np.ascontiguousarray(matrix.bias, dtype=np.float16).reshape(-1)
             row[: int(matrix.logical_n)] = flat[:out_n]
-        return self.gpu._keep((id(matrix.packed), "bias", out_n), row)
+        key = id(matrix.packed) if matrix.packed is not None else (id(matrix.span), matrix.packed_at)
+        return self.gpu._keep((key, "bias", out_n), row), 0
 
     def _proj_offset(self, slot: int, rows: int) -> int:
         return slot * rows * DIM * 4

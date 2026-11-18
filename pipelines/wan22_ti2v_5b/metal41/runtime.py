@@ -9,7 +9,8 @@ from pathlib import Path
 
 from favlo.cli import repo_root
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.media_pipeline import MediaTool, MediaCall, MediaPaused, MediaPipeline
+from favlo.bulk_media_pipeline import BulkMediaPipeline
+from favlo.media_pipeline import MediaTool, MediaCall, MediaPaused
 from favlo.memory import memory
 from favlo.registry import models_dir
 from wan22_ti2v_5b.metal41.clip import Clip, ClipHold
@@ -68,7 +69,7 @@ class Runtime:
         self.gpu = Gpu(self._owner)
         try:
             self.text = TextEncoder(self._umt5, self.gpu, self._tokenizer)
-            self.vae = WanVae(self._vae_path, self.gpu)
+            self.vae = WanVae(self._vae_path, self.gpu, pack=self.record)
             self.dit = DiT(self.record, self.gpu)
             self.clip = Clip(self.dit, self.text, self.vae)
             self._closed = False
@@ -86,11 +87,14 @@ class Runtime:
         try:
             vae = self.vae
             gpu = self.gpu
+            text = self.text
             self.vae = None
             self.gpu = None
             self.dit = None
             self.text = None
             self.clip = None
+            if text is not None:
+                text.close()
             if vae is not None:
                 vae.close()
             if gpu is not None:
@@ -141,7 +145,7 @@ def open_runtime(
     return Runtime(record, owner_name, umt5, vae_path, tokenizer)
 
 
-class Pipeline(MediaPipeline):
+class Pipeline(BulkMediaPipeline):
     """Wan TI2V's listener contract. The clip sampler stays in this package."""
 
     kind = "video"

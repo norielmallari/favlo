@@ -22,10 +22,25 @@ from wan22_ti2v_5b.metal41.activations import (
     sinusoidal,
     split_heads,
 )
+from wan22_ti2v_5b.metal41.blob import load_planes, resolve_named
 from wan22_ti2v_5b.metal41.gpu import Gpu
 from wan22_ti2v_5b.metal41.spec import HEADS, IN_DIM
 from wan22_ti2v_5b.metal41.stream import Stream
-from wan22_ti2v_5b.metal41.weights import apply, attend, load_matrix
+from wan22_ti2v_5b.metal41.weights import apply, attend, load_matrix, matrix_from_planes
+
+STEMS = ("patch", "text0", "text2", "time0", "time2", "time_proj", "head")
+BLOCK_MATRICES = (
+    "self_q",
+    "self_k",
+    "self_v",
+    "self_o",
+    "cross_q",
+    "cross_k",
+    "cross_v",
+    "cross_o",
+    "ffn0",
+    "ffn2",
+)
 
 
 class DiT:
@@ -38,16 +53,19 @@ class DiT:
         self._cached_text: np.ndarray | None = None
         self._cached_context: np.ndarray | None = None
         self._stream: Stream | None = None
-        self.patch = load_matrix(root / "patch.npy")
-        self.text0 = load_matrix(root / "text0.npy")
-        self.text2 = load_matrix(root / "text2.npy")
-        self.time0 = load_matrix(root / "time0.npy")
-        self.time2 = load_matrix(root / "time2.npy")
-        self.time_proj = load_matrix(root / "time_proj.npy")
-        self.head = load_matrix(root / "head.npy")
+        blob = resolve_named(root, "dit.bin", "dit.json")
+        planes = None
+        span = None
+        if blob is not None:
+            span = gpu.read_blob(blob)
+            planes = load_planes(root / "dit.json")
+        self._span = span
+        for name in STEMS:
+            setattr(self, name, _stem(root, name, span, planes))
         self.head_mod = np.load(root / "head_mod.npy").astype(np.float32)
         self._blocks = [
-            _Block.load(root / "blocks" / f"{index:02d}") for index in range(self.layers)
+            _Block.load(root / "blocks" / f"{index:02d}", span, planes, index)
+            for index in range(self.layers)
         ]
 
     def velocity(
@@ -162,7 +180,7 @@ class DiT:
 
 
 class _Block:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, span: object | None, planes: dict | None, index: int) -> None:
         self.modulation = np.load(root / "modulation.npy").astype(np.float32).reshape(1, -1)
         self.norm3 = np.load(root / "norm3.npy")
         self.norm3_bias = np.load(root / "norm3.bias.npy")
@@ -170,20 +188,28 @@ class _Block:
         self.self_norm_k = np.load(root / "self_norm_k.npy")
         self.cross_norm_q = np.load(root / "cross_norm_q.npy")
         self.cross_norm_k = np.load(root / "cross_norm_k.npy")
-        self.self_q = load_matrix(root / "self_q.npz")
-        self.self_k = load_matrix(root / "self_k.npz")
-        self.self_v = load_matrix(root / "self_v.npz")
-        self.self_o = load_matrix(root / "self_o.npz")
-        self.cross_q = load_matrix(root / "cross_q.npz")
-        self.cross_k = load_matrix(root / "cross_k.npz")
-        self.cross_v = load_matrix(root / "cross_v.npz")
-        self.cross_o = load_matrix(root / "cross_o.npz")
-        self.ffn0 = load_matrix(root / "ffn0.npz")
-        self.ffn2 = load_matrix(root / "ffn2.npz")
+        for name in BLOCK_MATRICES:
+            if planes is None:
+                matrix = load_matrix(root / f"{name}.npz")
+            else:
+                matrix = matrix_from_planes(span, planes, f"blocks.{index:02d}.{name}", kind="int8")
+            setattr(self, name, matrix)
 
     @staticmethod
-    def load(root: Path) -> _Block:
-        return _Block(root)
+    def load(root: Path, span: object | None, planes: dict | None, index: int) -> _Block:
+        return _Block(root, span, planes, index)
+
+
+def _stem(root: Path, name: str, span: object | None, planes: dict | None):
+    if planes is None:
+        return load_matrix(root / f"{name}.npy")
+    return matrix_from_planes(
+        span,
+        planes,
+        name,
+        kind="f16",
+        bias_path=root / f"{name}.bias.npy",
+    )
 
 
 def _unpatch(tokens: np.ndarray, time: int, height: int, width: int) -> np.ndarray:
