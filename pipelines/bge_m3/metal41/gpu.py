@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,15 @@ _NAMES = (
 _EPS = np.float32(1e-5)
 _LAYERS = 24
 _PROJECTIONS = ("q", "k", "v", "o", "up", "down")
+_CHUNK = 8 << 20
+
+
+@dataclass(frozen=True)
+class Bound:
+    """One tensor inside a shared span. ``offset`` is a byte index."""
+
+    handle: Any
+    offset: int
 
 
 def workspace_bytes(length: int) -> int:
@@ -103,6 +113,25 @@ class Gpu:
         self._handles.append(handle)
         view = np.frombuffer(memory.map(handle, 0, raw.nbytes), dtype=raw.dtype)
         view[...] = raw.reshape(-1)
+        return handle
+
+    def read_shared(self, path: Path, nbytes: int) -> Any:
+        """One shared span. The file is read in 8 MiB steps, with no second copy."""
+        count = int(nbytes)
+        handle = memory.allocate(max(count, 16), owner=self.owner, storage="shared")
+        self._handles.append(handle)
+        if count < 1:
+            return handle
+        view = memory.map(handle, 0, count)
+        with path.open("rb") as src:
+            offset = 0
+            while offset < count:
+                piece = min(_CHUNK, count - offset)
+                read = src.readinto(view[offset : offset + piece])
+                if not read:
+                    message = f"{path.name} stopped at {offset} of {count}"
+                    raise OSError(message)
+                offset += read
         return handle
 
     def scratch(self, nbytes: int, *, zero: bool = False) -> Any:
@@ -268,7 +297,10 @@ class Gpu:
         enc = self._enc
         enc.setComputePipelineState_(self.pipes[name])
         for index, buf in enumerate(buffers):
-            memory.bind(enc, index, buf, 0)
+            if isinstance(buf, Bound):
+                memory.bind(enc, index, buf.handle, buf.offset)
+            else:
+                memory.bind(enc, index, buf, 0)
         for index, blob in enumerate(constants):
             self._held.append(blob)
             enc.setBytes_length_atIndex_(blob, len(blob), len(buffers) + index)

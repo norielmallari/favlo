@@ -11,11 +11,21 @@ import numpy as np
 
 from bge_m3.metal41.pack import pack_int8
 from bge_m3.metal41.passages import passages
-from bge_m3.metal41.text import HIDDEN, l2_normalize, pad_ids, padded_length, position_ids
+from bge_m3.metal41.text import (
+    HIDDEN,
+    LAYERS,
+    l2_normalize,
+    pad_ids,
+    padded_length,
+    position_ids,
+)
 
 RECORD = "bge-m3-int8"
 _COSINE_MIN = 0.96
 _MATCH_MIN = 0.999
+_PROJECTIONS = ("q", "k", "v", "o", "up", "down")
+_BLOB = "weights.bin"
+_INDEX = "weights.json"
 
 
 def quantize(source: Path, dest: Path) -> None:
@@ -110,7 +120,11 @@ def _write_weights(dest: Path, encoder: Any) -> None:
         arrays[f"l{index}_attn_b"] = _half(attention.norm.bias)
         arrays[f"l{index}_ffn_w"] = _half(feed.norm.weight)
         arrays[f"l{index}_ffn_b"] = _half(feed.norm.bias)
+    if tuple(arrays) != _weight_names():
+        message = "weight image order does not match the upload order"
+        raise RuntimeError(message)
     np.savez(dest / "weights.npz", **arrays)
+    _write_blob(dest, arrays)
 
 
 def _score(encoder: Any, dest: Path) -> dict[str, float]:
@@ -194,8 +208,98 @@ def _half(tensor: Any) -> np.ndarray:
     return np.ascontiguousarray(tensor.detach().half().cpu().numpy())
 
 
+def _weight_names() -> tuple[str, ...]:
+    """Array names in the order ``Runtime`` uploads them."""
+    names = ["word", "position", "type", "embed_w", "embed_b"]
+    for layer in range(LAYERS):
+        for name in _PROJECTIONS:
+            prefix = f"l{layer}_{name}"
+            names.append(f"{prefix}_codes")
+            names.append(f"{prefix}_scale")
+            names.append(f"{prefix}_bias")
+        names.append(f"l{layer}_attn_w")
+        names.append(f"l{layer}_attn_b")
+        names.append(f"l{layer}_ffn_w")
+        names.append(f"l{layer}_ffn_b")
+    return tuple(names)
+
+
+def _write_blob(dest: Path, arrays: dict[str, np.ndarray]) -> None:
+    """Raw ``weights.bin`` plus ``weights.json``. Offsets are the real sizes."""
+    names = _weight_names()
+    missing = [name for name in names if name not in arrays]
+    if missing:
+        message = f"{missing[0]} is not in the weight image"
+        raise RuntimeError(message)
+    rows: list[dict[str, Any]] = []
+    cursor = 0
+    with (dest / _BLOB).open("wb") as handle:
+        for name in names:
+            array = np.ascontiguousarray(arrays[name])
+            payload = array.tobytes()
+            handle.write(payload)
+            rows.append(
+                {
+                    "name": name,
+                    "dtype": str(array.dtype),
+                    "shape": [int(dim) for dim in array.shape],
+                    "offset": cursor,
+                    "nbytes": len(payload),
+                }
+            )
+            cursor += len(payload)
+    _write_json(dest / _INDEX, {"arrays": rows})
+
+
+def _load_weight_index(path: Path) -> list[dict[str, Any]]:
+    """Checked rows. Each offset is the sum of the real sizes before it."""
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+        rows = body["arrays"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        message = f"{path.name} is not a weight index"
+        raise RuntimeError(message) from exc
+    names = _weight_names()
+    if not isinstance(rows, list) or len(rows) != len(names):
+        message = f"{path.name} is not a weight index"
+        raise RuntimeError(message)
+    checked: list[dict[str, Any]] = []
+    cursor = 0
+    for row, name in zip(rows, names, strict=True):
+        try:
+            stored = row["name"]
+            offset = int(row["offset"])
+            nbytes = int(row["nbytes"])
+            shape = tuple(int(dim) for dim in row["shape"])
+            dtype = np.dtype(row["dtype"])
+        except (KeyError, TypeError, ValueError) as exc:
+            message = f"{path.name} is not a weight index"
+            raise RuntimeError(message) from exc
+        if not shape:
+            message = f"{name} is not at its real size in {path.name}"
+            raise RuntimeError(message)
+        count = 1
+        for dim in shape:
+            if dim < 1:
+                message = f"{name} is not at its real size in {path.name}"
+                raise RuntimeError(message)
+            count *= dim
+        if stored != name or offset != cursor or nbytes != count * int(dtype.itemsize):
+            message = f"{name} is not at its real size in {path.name}"
+            raise RuntimeError(message)
+        checked.append({"name": name, "shape": shape, "offset": offset, "nbytes": nbytes})
+        cursor += nbytes
+    return checked
+
+
+def _weights_ready(dest: Path) -> bool:
+    if (dest / "weights.npz").is_file():
+        return True
+    return (dest / _BLOB).is_file() and (dest / _INDEX).is_file()
+
+
 def _finished(dest: Path) -> bool:
-    if not (dest / "weights.npz").is_file() or not (dest / "tokenizer.json").is_file():
+    if not _weights_ready(dest) or not (dest / "tokenizer.json").is_file():
         return False
     cosine = _read_cosine(dest / "cosine.json")
     if cosine is None:

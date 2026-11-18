@@ -17,7 +17,7 @@ from tokenizers import Tokenizer
 
 from favlo.embeddings_pipeline import EmbeddingsPipeline
 from . import sampling as _sampling_mod
-from bge_m3.metal41.gpu import Gpu, fit_length
+from bge_m3.metal41.gpu import Bound, Gpu, fit_length
 from bge_m3.metal41.text import (
     HIDDEN,
     INTERMEDIATE,
@@ -54,8 +54,14 @@ class Runtime:
         if not manifest.get("complete") or manifest.get("quant") != "int8":
             message = f"{path.name} is not a finished record"
             raise FileNotFoundError(message)
+        blob = path / "weights.bin"
+        index = path / "weights.json"
         weights_path = path / "weights.npz"
-        if not weights_path.is_file():
+        if blob.is_file():
+            if not index.is_file():
+                message = f"{path.name} has no weight index"
+                raise FileNotFoundError(message)
+        elif not weights_path.is_file():
             message = f"{path.name} has no weights"
             raise FileNotFoundError(message)
         self.path = path
@@ -63,8 +69,11 @@ class Runtime:
         self._owner = owner or f"bge_m3:{id(self)}"
         self.gpu = Gpu(self._owner)
         try:
-            packed = np.load(weights_path)
-            self._weights = _upload(self.gpu, packed)
+            if blob.is_file():
+                self._weights = _load_blob(self.gpu, blob, index)
+            else:
+                packed = np.load(weights_path)
+                self._weights = _upload(self.gpu, packed)
             self.limit = fit_length(0, max_memory)
             self._work = _workspace(self.gpu, self.limit)
             self.gpu.bind_workspace(self._work)
@@ -94,6 +103,49 @@ class Runtime:
         )
         vector = l2_normalize(hidden)
         return Embedding(vector=vector.tolist(), tokens=len(ids))
+
+
+def _load_blob(gpu: Gpu, blob: Path, index: Path) -> dict[str, Any]:
+    """One shared span. Each tensor binds at the offset in ``weights.json``."""
+    from bge_m3.metal41.quantize import _load_weight_index
+
+    rows = _load_weight_index(index)
+    total = int(rows[-1]["offset"]) + int(rows[-1]["nbytes"])
+    size = blob.stat().st_size
+    if size != total:
+        message = f"{blob.name} is {size} bytes and the index is {total}"
+        raise RuntimeError(message)
+    handle = gpu.read_shared(blob, total)
+    by_name = {str(row["name"]): row for row in rows}
+
+    def bind(name: str) -> Bound:
+        return Bound(handle, int(by_name[name]["offset"]))
+
+    weights: dict[str, Any] = {
+        "word": bind("word"),
+        "position": bind("position"),
+        "type": bind("type"),
+        "embed_w": bind("embed_w"),
+        "embed_b": bind("embed_b"),
+        "layers": [],
+    }
+    for layer in range(LAYERS):
+        item: dict[str, Any] = {}
+        for name in _PROJECTIONS:
+            prefix = f"l{layer}_{name}"
+            codes = by_name[f"{prefix}_codes"]
+            item[name] = {
+                "n": int(codes["shape"][0]),
+                "codes": Bound(handle, int(codes["offset"])),
+                "scale": bind(f"{prefix}_scale"),
+                "bias": bind(f"{prefix}_bias"),
+            }
+        item["attn_w"] = bind(f"l{layer}_attn_w")
+        item["attn_b"] = bind(f"l{layer}_attn_b")
+        item["ffn_w"] = bind(f"l{layer}_ffn_w")
+        item["ffn_b"] = bind(f"l{layer}_ffn_b")
+        weights["layers"].append(item)
+    return weights
 
 
 def _upload(gpu: Gpu, packed: np.lib.npyio.NpzFile) -> dict[str, Any]:

@@ -9,10 +9,17 @@ import numpy as np
 
 from bge_m3.metal41.pack import pack_int8, restore_int8
 from bge_m3.metal41.passages import passages
-from bge_m3.metal41.quantize import _COSINE_MIN, _finished
+from bge_m3.metal41.quantize import (
+    _COSINE_MIN,
+    _finished,
+    _load_weight_index,
+    _weight_names,
+    _write_blob,
+)
 from bge_m3.metal41.text import (
     BUCKETS,
     HIDDEN,
+    LAYERS,
     PAD_ID,
     bucket_for,
     key_mask,
@@ -131,6 +138,98 @@ def test_only_a_complete_directory_counts_as_finished(tmp_path: Path) -> None:
 
 def test_the_cosine_gate_is_the_quantized_line() -> None:
     assert _COSINE_MIN == 0.96
+
+
+def test_weight_names_follow_the_upload_order() -> None:
+    names = _weight_names()
+    assert names[:5] == ("word", "position", "type", "embed_w", "embed_b")
+    layer: list[str] = []
+    for proj in ("q", "k", "v", "o", "up", "down"):
+        layer.extend((f"l0_{proj}_codes", f"l0_{proj}_scale", f"l0_{proj}_bias"))
+    layer.extend(("l0_attn_w", "l0_attn_b", "l0_ffn_w", "l0_ffn_b"))
+    assert names[5 : 5 + len(layer)] == tuple(layer)
+    assert names[-5] == "l23_down_bias"
+    assert names[-4:] == ("l23_attn_w", "l23_attn_b", "l23_ffn_w", "l23_ffn_b")
+    assert len(names) == 5 + LAYERS * len(layer)
+
+
+def test_the_weight_blob_stores_real_sizes(tmp_path: Path) -> None:
+    arrays: dict[str, np.ndarray] = {}
+    for index, name in enumerate(_weight_names()):
+        if name.endswith("_codes"):
+            arrays[name] = np.arange(3 + (index % 5), dtype=np.int8)
+        elif name.endswith("_scale"):
+            arrays[name] = np.ones(index % 3 + 1, dtype=np.float32)
+        else:
+            arrays[name] = np.ones(index % 4 + 1, dtype=np.float16)
+    dest = tmp_path / "bge-m3-int8"
+    dest.mkdir()
+    _write_blob(dest, arrays)
+    blob = (dest / "weights.bin").read_bytes()
+    body = json.loads((dest / "weights.json").read_text(encoding="utf-8"))
+    cursor = 0
+    for row, name in zip(body["arrays"], _weight_names(), strict=True):
+        raw = np.ascontiguousarray(arrays[name]).tobytes()
+        assert row["name"] == name
+        assert row["offset"] == cursor
+        assert row["nbytes"] == len(raw)
+        assert blob[cursor : cursor + len(raw)] == raw
+        cursor += len(raw)
+    assert len(blob) == cursor
+    assert any(int(row["nbytes"]) < 16 for row in body["arrays"])
+    rows = _load_weight_index(dest / "weights.json")
+    assert rows[-1]["offset"] + rows[-1]["nbytes"] == len(blob)
+    short = next(row for row in rows if int(row["nbytes"]) < 16)
+    follow = rows[rows.index(short) + 1]
+    assert follow["offset"] == short["offset"] + short["nbytes"]
+
+
+def test_the_weight_index_rejects_a_pad(tmp_path: Path) -> None:
+    rows = []
+    for name in _weight_names():
+        rows.append(
+            {"name": name, "dtype": "int8", "shape": [4], "offset": 16, "nbytes": 4}
+        )
+    path = tmp_path / "weights.json"
+    path.write_text(json.dumps({"arrays": rows}), encoding="utf-8")
+    try:
+        _load_weight_index(path)
+    except RuntimeError as exc:
+        assert "real size" in str(exc)
+    else:
+        raise AssertionError("expected a padded index to fail")
+
+
+def test_the_weight_blob_refuses_a_missing_array(tmp_path: Path) -> None:
+    dest = tmp_path / "partial"
+    dest.mkdir()
+    try:
+        _write_blob(dest, {})
+    except RuntimeError as exc:
+        assert "word" in str(exc)
+    else:
+        raise AssertionError("expected a missing array")
+    assert not (dest / "weights.bin").exists()
+
+
+def test_a_blob_tree_counts_as_finished(tmp_path: Path) -> None:
+    dest = tmp_path / "bge-m3-int8"
+    dest.mkdir()
+    (dest / "weights.bin").write_bytes(b"\x00")
+    (dest / "weights.json").write_text("{}", encoding="utf-8")
+    (dest / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (dest / "cosine.json").write_text(
+        json.dumps({"passages": 128, "min": 0.995, "mean": 0.995}),
+        encoding="utf-8",
+    )
+    (dest / "manifest.json").write_text(
+        json.dumps({"complete": True, "quant": "int8", "hidden": HIDDEN, "context": 4096}),
+        encoding="utf-8",
+    )
+    assert not (dest / "weights.npz").exists()
+    assert _finished(dest)
+    (dest / "weights.bin").unlink()
+    assert not _finished(dest)
 
 
 def _record(root: Path) -> Path:

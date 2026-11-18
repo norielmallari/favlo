@@ -29,7 +29,7 @@ uv run favlo --bge_m3 kernels
 
 ## Packed record
 
-- One int8 weight image on the GPU.
+- One int8 weight image on the GPU, in one shared span when `weights.bin` is present.
 - Each projection is symmetric int8 with one float32 scale per output channel (peak divided by 127).
 - The activation row that enters a projection is quantized the same way.
 - The product is int8 times int8 with an int32 accumulator, then the two scales and the float16 bias.
@@ -41,6 +41,22 @@ uv run favlo --bge_m3 kernels
 - The tokenizer and the pad run on the host.
 - The dense vector is the L2 norm of hidden row 0, the `<s>` token.
 - Position ids start at 2.
+
+## Weight file
+
+- `quantize` writes `weights.npz` and `weights.bin`.
+- `weights.bin` is those same arrays, raw, in the order the loader uploads them.
+- That order is the word table, the position table, the type row, the embedding LayerNorm, then each layer.
+- A layer is q, k, v, o, up, and down, each as int8 codes, a float32 scale, and a float16 bias, then the attention LayerNorm and the feed-forward LayerNorm.
+- Codes stay `[N, K]` row-major.
+- `weights.json` lists each array's name, dtype, shape, byte offset, and byte size.
+- An offset is the sum of the real array sizes before it.
+- The file does not store the 16-byte floor `Gpu.upload` uses, so a later array does not move.
+- When `weights.bin` is present, open reads it into one shared span in 8 MiB steps and binds each tensor at its offset.
+- That open does not call `np.load`.
+- When `weights.bin` is absent, open still reads `weights.npz` and uploads each array.
+- A finished tree may contain `weights.npz`, or `weights.bin` together with `weights.json`.
+- The tokenizer, `cosine.json`, and `manifest.json` checks are unchanged, so an existing `weights.npz` tree is not packed again.
 
 ## Memory
 
