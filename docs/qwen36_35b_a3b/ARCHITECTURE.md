@@ -271,8 +271,14 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - Omitting the cap uses the ledger's full answer.
 - A larger answer between chunks grows the atlas.
 - The resident record, the key/value cache, the state, and the chunk workspace are allocated inside that maximum.
+- `resident.bin` is `pread` into one shared span in pieces of 8 MiB.
+- A deferred MTP suffix and `experts/mtp.bin` use that same read when a draft opens them.
+- `experts/widths.bin`, `experts/offsets.bin`, and `experts/order.bin` when that file is present are `pread` into the span the kernel binds.
+- The atlas indexes those width and offset bytes from that span.
+- A missing `experts/offsets.bin` writes the packed offsets into that span.
+- `experts/mtp.widths` and `experts/mtp.offsets` use that same read when a draft opens them.
 - Language expert files stay on SSD.
-- When the maximum holds all 40 × 256 images, each layer file is read once and the kernels index that buffer.
+- When the maximum holds all 40 × 256 images, each layer file is read once, by that same `pread`, and the kernels index that buffer.
 - The next token's layers are recorded while the current token's command buffer runs.
 - When it holds fewer, the misses for one layer are read in file order.
 - Adjacent misses are one sequential read, in pieces of 8 MiB when that run is at least that long.

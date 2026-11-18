@@ -1319,6 +1319,17 @@ def test_sequential_windows_cover_a_short_gap() -> None:
     ]
 
 
+class _Span:
+    def __init__(self, nbytes: int) -> None:
+        self.data = bytearray(nbytes)
+
+    def contents(self) -> _Span:
+        return self
+
+    def as_buffer(self, nbytes: int) -> memoryview:
+        return memoryview(self.data)[:nbytes]
+
+
 def test_a_short_expert_read_fills_the_piece(tmp_path: Path) -> None:
     import os
 
@@ -1334,6 +1345,96 @@ def test_a_short_expert_read_fills_the_piece(tmp_path: Path) -> None:
     finally:
         os.close(fd)
     assert bytes(out) == blob
+
+
+def test_a_layer_file_is_pread_in_pieces(tmp_path: Path) -> None:
+    from qwen36_35b_a3b.metal41.atlas import _PIECE, _read_file
+
+    payload = bytes([index % 251 for index in range(_PIECE + 16)])
+    path = tmp_path / "0.bin"
+    path.write_bytes(payload)
+    notes: list[int] = []
+    span = _Span(len(payload))
+    _read_file(span, path, len(payload), notes.append)
+    assert bytes(span.data) == payload
+    assert notes == [_PIECE, 16]
+
+
+def test_a_short_layer_file_names_the_path(tmp_path: Path) -> None:
+    from qwen36_35b_a3b.metal41.atlas import _read_file
+
+    path = tmp_path / "0.bin"
+    path.write_bytes(b"abc")
+    with pytest.raises(OSError, match="0.bin stopped at 3 of 8"):
+        _read_file(_Span(8), path, 8)
+
+
+def test_a_resident_slice_is_pread_into_the_span(tmp_path: Path) -> None:
+    from qwen36_35b_a3b.metal41.forward import _file_buffer
+
+    payload = bytes([index % 251 for index in range(64)])
+    path = tmp_path / "resident.bin"
+    path.write_bytes(payload)
+    notes: list[int] = []
+    held: list[_Span] = []
+
+    def allocate(nbytes: int) -> _Span:
+        span = _Span(nbytes)
+        held.append(span)
+        return span
+
+    session = SimpleNamespace(allocate=allocate, _load_note=notes.append)
+    _file_buffer(session, path, start=10, nbytes=20)
+    assert bytes(held[0].data[:20]) == payload[10:30]
+    assert notes == [20]
+
+
+def test_an_index_table_is_pread_into_the_span(tmp_path: Path) -> None:
+    from qwen36_35b_a3b.metal41.forward import _index_span, _span_array
+
+    payload = bytes([index % 251 for index in range(32)])
+    path = tmp_path / "widths.bin"
+    path.write_bytes(payload)
+    held: list[_Span] = []
+
+    def allocate(nbytes: int) -> _Span:
+        span = _Span(nbytes)
+        held.append(span)
+        return span
+
+    buffer = _index_span(SimpleNamespace(allocate=allocate), path, len(payload))
+    viewed = _span_array(buffer, len(payload), np.dtype(np.uint8), (4, 8))
+    assert bytes(held[0].data[: len(payload)]) == payload
+    assert viewed.tobytes() == payload
+    held[0].data[0] = 9
+    assert int(viewed.reshape(-1)[0]) == 9
+
+
+def test_an_index_table_rejects_the_wrong_length(tmp_path: Path) -> None:
+    from qwen36_35b_a3b.metal41.forward import _index_span
+
+    path = tmp_path / "order.bin"
+    path.write_bytes(b"abcd")
+    with pytest.raises(RuntimeError, match="order.bin is 4 bytes, not 8"):
+        _index_span(SimpleNamespace(), path, 8)
+
+
+def test_a_computed_offset_table_lands_in_the_span() -> None:
+    from qwen36_35b_a3b.metal41.forward import _fill_span, _span_array
+
+    values = np.arange(4, dtype="<u8") * np.uint64(128)
+    held: list[_Span] = []
+
+    def allocate(nbytes: int) -> _Span:
+        span = _Span(nbytes)
+        held.append(span)
+        return span
+
+    buffer = _fill_span(SimpleNamespace(allocate=allocate), values)
+    viewed = _span_array(buffer, int(values.nbytes), np.dtype("<u8"), (4,))
+    assert viewed.tolist() == [0, 128, 256, 384]
+    held[0].data[0] = 7
+    assert int(viewed[0]) == 7
 
 
 def test_grow_releases_the_previous_planes(monkeypatch: pytest.MonkeyPatch) -> None:

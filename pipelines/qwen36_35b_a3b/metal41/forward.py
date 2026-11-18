@@ -21,6 +21,8 @@ from qwen36_35b_a3b.metal41.atlas import (
     LAYERS,
     MIN_IMAGES,
     ExpertAtlas,
+    ExpertLayout,
+    _pread_span,
     atlas_slots,
     read_expert_layout,
 )
@@ -284,20 +286,42 @@ def _file_buffer(session: Session, path: Path, *, start: int = 0, nbytes: int | 
         message = f"device refused a {size} byte file"
         raise RuntimeError(message)
     view = memoryview(buffer.contents().as_buffer(size))
-    note = session._load_note
-    with path.open("rb") as handle:
-        handle.seek(start)
-        offset = 0
-        while offset < size:
-            chunk = handle.read(min(8 << 20, size - offset))
-            if not chunk:
-                message = f"{path.name} stopped at {start + offset} of {start + size}"
-                raise OSError(message)
-            view[offset : offset + len(chunk)] = chunk
-            offset += len(chunk)
-            if note is not None:
-                note(len(chunk))
+    _pread_span(path, view, start, session._load_note, end=start + size)
     return buffer
+
+
+def _index_span(session: Session, path: Path, nbytes: int) -> Any:
+    """Read ``path`` into the shared span. The view starts at the span mapping."""
+    size = path.stat().st_size
+    if size != nbytes:
+        message = f"{path.name} is {size} bytes, not {nbytes}"
+        raise RuntimeError(message)
+    buffer = session.allocate(max(nbytes, 16))
+    if buffer is None:
+        message = f"device refused a {nbytes} byte table"
+        raise RuntimeError(message)
+    view = memoryview(buffer.contents().as_buffer(nbytes))
+    _pread_span(path, view, 0, None, end=nbytes)
+    return buffer
+
+
+def _fill_span(session: Session, values: np.ndarray) -> Any:
+    """Write ``values`` into a shared span. The array is not uploaded again."""
+    raw = np.ascontiguousarray(values)
+    blob = raw.tobytes()
+    nbytes = len(blob)
+    buffer = session.allocate(max(nbytes, 16))
+    if buffer is None:
+        message = f"device refused a {nbytes} byte table"
+        raise RuntimeError(message)
+    memoryview(buffer.contents().as_buffer(nbytes))[:] = blob
+    return buffer
+
+
+def _span_array(buffer: Any, nbytes: int, dtype: np.dtype, shape: tuple[int, ...]) -> np.ndarray:
+    """View ``nbytes`` of ``buffer``. The array does not own a second copy."""
+    mapped = memoryview(buffer.contents().as_buffer(nbytes))
+    return np.ndarray(shape, dtype=dtype, buffer=mapped)
 
 
 class RequestClosed(ClientClosed):
@@ -457,6 +481,8 @@ class Qwen36Runtime:
         try:
             self.session = Session(self._owner)
             self.session._load_note = self._note_load
+            if self.expert_layout.mixed:
+                self.expert_layout = self._bind_expert_tables()
             self.resident = _file_buffer(
                 self.session, self.root / "resident.bin", nbytes=resident_bytes
             )
@@ -469,8 +495,6 @@ class Qwen36Runtime:
                 layout=self.expert_layout,
             )
             if self.expert_layout.mixed:
-                self.expert_widths = self.session.upload(self.expert_layout.widths)
-                self.expert_offsets = self.session.upload(self.expert_layout.offsets)
                 self.token_offsets = self.session.zeros(EXPERTS * 8)
             self.hidden = self.session.zeros(HIDDEN * 4)
             self.normed = self.session.zeros(HIDDEN * 4)
@@ -495,11 +519,11 @@ class Qwen36Runtime:
             order_path = self.root / "experts" / "order.bin"
             self.expert_order = None
             if order_path.is_file():
-                order = order_path.read_bytes()
-                if len(order) != SLOT_MAP_BYTES:
-                    message = f"expert slot map is {len(order)} bytes"
+                size = order_path.stat().st_size
+                if size != SLOT_MAP_BYTES:
+                    message = f"expert slot map is {size} bytes"
                     raise RuntimeError(message)
-                self.expert_order = self.session.upload(order)
+                self.expert_order = _index_span(self.session, order_path, SLOT_MAP_BYTES)
             self.mix_w = self.session.zeros(8 * 4)
             self.acc = self.session.zeros(HIDDEN * 4)
             self.router = self.session.zeros(256 * 4)
@@ -1604,6 +1628,25 @@ class Qwen36Runtime:
         self._mtp_snapped = False
         self._refit_atlas()
 
+    def _bind_expert_tables(self) -> ExpertLayout:
+        """Read the width and offset tables into the spans the kernels bind."""
+        width_bytes = LAYERS * EXPERTS
+        offset_bytes = width_bytes * 8
+        self.expert_widths = _index_span(
+            self.session, self.root / "experts" / "widths.bin", width_bytes
+        )
+        offsets_path = self.root / "experts" / "offsets.bin"
+        if offsets_path.is_file():
+            self.expert_offsets = _index_span(self.session, offsets_path, offset_bytes)
+        else:
+            self.expert_offsets = _fill_span(self.session, self.expert_layout.offsets)
+        return ExpertLayout(
+            _span_array(self.expert_widths, width_bytes, np.dtype(np.uint8), (LAYERS, EXPERTS)),
+            _span_array(self.expert_offsets, offset_bytes, np.dtype("<u8"), (LAYERS, EXPERTS)),
+            True,
+            self.expert_layout.file_bytes,
+        )
+
     def _open_mtp(self) -> None:
         """Read the MTP expert file and, when it is a suffix, the dense MTP matrices."""
         if self._mtp_resident_base is not None:
@@ -1614,21 +1657,18 @@ class Qwen36Runtime:
         widths_path = self.root / "experts" / "mtp.widths"
         offsets_path = self.root / "experts" / "mtp.offsets"
         file_path = self.root / "experts" / "mtp.bin"
-        widths = np.fromfile(widths_path, dtype=np.uint8)
-        offsets = np.fromfile(offsets_path, dtype="<u8")
-        if widths.size != EXPERTS or int(widths.min()) != 8 or int(widths.max()) != 8:
+        self.mtp_widths = _index_span(self.session, widths_path, EXPERTS)
+        self.mtp_offsets = _index_span(self.session, offsets_path, EXPERTS * 8)
+        widths = _span_array(self.mtp_widths, EXPERTS, np.dtype(np.uint8), (EXPERTS,))
+        offsets = _span_array(self.mtp_offsets, EXPERTS * 8, np.dtype("<u8"), (EXPERTS,))
+        if int(widths.min()) != 8 or int(widths.max()) != 8:
             message = "MTP routed experts are not fp8"
-            raise RuntimeError(message)
-        if offsets.size != EXPERTS:
-            message = "MTP expert offsets do not match the pool"
             raise RuntimeError(message)
         size = file_path.stat().st_size
         if int(offsets.max()) + EXPERT_FP8 > size:
             message = "MTP expert offset is past the file"
             raise RuntimeError(message)
         self.mtp_experts = _file_buffer(self.session, file_path)
-        self.mtp_widths = self.session.upload(np.ascontiguousarray(widths))
-        self.mtp_offsets = self.session.upload(np.ascontiguousarray(offsets))
         self._mtp_state = self.session.zeros(_STATE_WORDS * 4)
         self._mtp_history = self.session.zeros(_HISTORY_WORDS * 4)
         zeros = self.session.zeros

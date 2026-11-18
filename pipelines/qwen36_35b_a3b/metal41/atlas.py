@@ -367,8 +367,19 @@ _LIBC.pread.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c
 _LIBC.pread.restype = ctypes.c_ssize_t
 
 
-def _pread_into(fd: int, view: memoryview, file_off: int) -> None:
-    """Read ``view`` from ``file_off``. A long view is split into 8 MiB pieces."""
+class _ShortRead(OSError):
+    """``pread`` returned zero before the span was full."""
+
+    def __init__(self, at: int) -> None:
+        self.at = at
+        super().__init__(f"expert read stopped at {at}")
+
+
+def _pread_into(fd: int, view: memoryview, file_off: int, note: Any = None) -> None:
+    """Read ``view`` from ``file_off``. A long view is split into 8 MiB pieces.
+
+    ``note`` receives each piece length after those bytes are in ``view``.
+    """
     offset = 0
     total = len(view)
     while offset < total:
@@ -389,29 +400,38 @@ def _pread_into(fd: int, view: memoryview, file_off: int) -> None:
                     err = ctypes.get_errno()
                     raise OSError(err, os.strerror(err))
                 if rc == 0:
-                    message = f"expert read stopped at {file_off + offset + got}"
-                    raise OSError(message)
+                    raise _ShortRead(file_off + offset + got)
                 got += int(rc)
         finally:
             del holder
         offset += step
+        if note is not None:
+            note(step)
+
+
+def _pread_span(
+    path: Path,
+    view: memoryview,
+    file_off: int,
+    note: Any = None,
+    *,
+    end: int,
+) -> None:
+    """Read ``view`` from ``path`` at ``file_off`` straight into that span."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            _pread_into(fd, view, file_off, note)
+        except _ShortRead as exc:
+            message = f"{path.name} stopped at {exc.at} of {end}"
+            raise OSError(message) from exc
+    finally:
+        os.close(fd)
 
 
 def _read_file(buffer: Any, path: Path, nbytes: int, note: Any = None) -> None:
     view = memoryview(buffer.contents().as_buffer(nbytes))
-    with path.open("rb") as handle:
-        offset = 0
-        while offset < nbytes:
-            chunk = handle.read(8 << 20)
-            if not chunk:
-                break
-            view[offset : offset + len(chunk)] = chunk
-            offset += len(chunk)
-            if note is not None:
-                note(len(chunk))
-    if offset != nbytes:
-        message = f"{path.name} stopped at {offset} of {nbytes}"
-        raise OSError(message)
+    _pread_span(path, view, 0, note, end=nbytes)
 
 
 class ExpertAtlas:
