@@ -21,15 +21,23 @@ stays, and so does the one file named in ``pinned``.
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import os
 import re
 import struct
+import sys
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+if sys.platform == "darwin":
+    import fcntl
+else:
+    fcntl = None  # type: ignore[assignment]
+
+_IO = threading.Lock()
 
 PAGE = 16384
 PREFERRED_IO = 1 << 20
@@ -157,14 +165,16 @@ class PrefixStore:
         fd = os.open(temporary, os.O_CREAT | os.O_RDWR | os.O_EXCL, 0o644)
         prior_fd = os.open(prior.path, os.O_RDONLY) if prior is not None else None
         try:
-            _bypass_cache(fd)
-            _write_file(fd, self, record, prior, prior_fd)
-            os.fsync(fd)
+            try:
+                _bypass_cache(fd)
+                _write_file(fd, self, record, prior, prior_fd)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+                if prior_fd is not None:
+                    os.close(prior_fd)
             os.replace(temporary, dest)
         finally:
-            os.close(fd)
-            if prior_fd is not None:
-                os.close(prior_fd)
             temporary.unlink(missing_ok=True)
         self._evict(dest)
         return dest
@@ -537,7 +547,7 @@ def _write_file(
     prior_regions = {ref.name: ref for ref in prior.regions} if prior is not None else {}
     for region, ref in zip(ordered, refs, strict=True):
         _write_region(fd, ref, region.data, prior_fd, prior_regions.get(region.name))
-    os.pwrite(fd, header, 0)
+    _pwrite(fd, header, 0)
 
 
 def _header_bytes(
@@ -607,7 +617,7 @@ def _same_prefix(fd: int, prior: RegionRef, blob: Blob) -> bool:
     pos = 0
     while pos < prior.length:
         take = min(PREFERRED_IO, prior.length - pos)
-        got = os.pread(fd, take, prior.offset + pos)
+        got = _pread(fd, take, prior.offset + pos)
         if got != view[pos : pos + take]:
             return False
         pos += take
@@ -618,11 +628,11 @@ def _copy_pages(src: int, src_at: int, dst: int, dst_at: int, nbytes: int) -> No
     pos = 0
     while pos < nbytes:
         take = min(PREFERRED_IO, nbytes - pos)
-        got = os.pread(src, take, src_at + pos)
+        got = _pread(src, take, src_at + pos)
         if len(got) != take:
             message = "prefix file ended early"
             raise OSError(message)
-        os.pwrite(dst, got, dst_at + pos)
+        _pwrite(dst, got, dst_at + pos)
         pos += take
 
 
@@ -638,7 +648,7 @@ def _materialize(header: PrefixHeader) -> PrefixRecord:
 def _read_ref(fd: int, ref: RegionRef) -> bytes:
     if ref.length == 0:
         return b""
-    got = os.pread(fd, ref.length, ref.offset)
+    got = _pread(fd, ref.length, ref.offset)
     if len(got) != ref.length:
         message = f"prefix region {ref.name} ended early"
         raise OSError(message)
@@ -692,16 +702,65 @@ class _PageWriter:
         if count % PAGE:
             message = "prefix write length is not a multiple of the page"
             raise OSError(message)
-        os.pwrite(self.fd, memoryview(self.buf)[:count], self.dest)
+        _pwrite(self.fd, memoryview(self.buf)[:count], self.dest)
         self.dest += count
         self.written += count
         self.filled = 0
+
+
+def _binary(fd: int) -> None:
+    """Stop Windows from expanding a newline while the prefix file is written."""
+    if os.name != "nt":
+        return
+    import msvcrt
+
+    msvcrt.setmode(fd, os.O_BINARY)
+
+
+def _pwrite(fd: int, data: bytes | memoryview, offset: int) -> None:
+    """Positioned write. Windows has no ``os.pwrite``."""
+    _binary(fd)
+    writer = getattr(os, "pwrite", None)
+    if writer is not None:
+        writer(fd, data, offset)
+        return
+    view = memoryview(data)
+    with _IO:
+        os.lseek(fd, offset, os.SEEK_SET)
+        while view:
+            wrote = os.write(fd, view)
+            if wrote <= 0:
+                message = "prefix write ended short"
+                raise OSError(message)
+            view = view[wrote:]
+
+
+def _pread(fd: int, count: int, offset: int) -> bytes:
+    """Positioned read. Windows has no ``os.pread``."""
+    _binary(fd)
+    reader = getattr(os, "pread", None)
+    if reader is not None:
+        return reader(fd, count, offset)
+    chunks: list[bytes] = []
+    left = count
+    with _IO:
+        os.lseek(fd, offset, os.SEEK_SET)
+        while left:
+            got = os.read(fd, left)
+            if not got:
+                break
+            chunks.append(got)
+            left -= len(got)
+    return b"".join(chunks)
 
 
 def _preallocate(fd: int, nbytes: int) -> None:
     if nbytes <= 0 or nbytes % PAGE:
         message = f"allocation {nbytes} is not a positive multiple of {PAGE}"
         raise ValueError(message)
+    if sys.platform != "darwin":
+        os.ftruncate(fd, nbytes)
+        return
     os.ftruncate(fd, 0)
     filled = 0
     while filled < nbytes:
@@ -753,6 +812,8 @@ def _alloc_piece(fd: int, nbytes: int, *, contig: bool) -> int | None:
 
 
 def _bypass_cache(fd: int) -> None:
+    if fcntl is None:
+        return
     flag = getattr(fcntl, "F_NOCACHE", None)
     if flag is not None:
         fcntl.fcntl(fd, flag, 1)

@@ -276,19 +276,40 @@ class PipelineChild:
         budget_read, budget_write = os.pipe()
         os.set_inheritable(budget_read, True)
         env = dict(os.environ)
-        env["FAVLO_CONTROL_FD"] = str(read_fd)
-        env["FAVLO_BUDGET_FD"] = str(budget_read)
+        control_name = read_fd
+        budget_name = budget_read
+        if os.name == "nt":
+            import msvcrt
+
+            control_name = msvcrt.get_osfhandle(read_fd)
+            budget_name = msvcrt.get_osfhandle(budget_read)
+        env["FAVLO_CONTROL_FD"] = str(int(control_name))
+        env["FAVLO_BUDGET_FD"] = str(int(budget_name))
         if self.stub:
             env["FAVLO_WORKER_STUB"] = "1"
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "favlo.pipeline_worker"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            pass_fds=(read_fd, budget_read),
-            start_new_session=True,
-        )
+        command = [sys.executable, "-m", "favlo.pipeline_worker"]
+        if os.name == "nt":
+            startup = subprocess.STARTUPINFO()
+            startup.lpAttributeList["handle_list"] = [int(control_name), int(budget_name)]
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                startupinfo=startup,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        else:
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                pass_fds=(read_fd, budget_read),
+                start_new_session=True,
+            )
         _CHILD_PIDS.add(proc.pid)
         os.close(read_fd)
         os.close(budget_read)
@@ -581,6 +602,16 @@ def _log_line(text: str) -> None:
     _log(text)
 
 
+def _inherited(raw: str):
+    """The control pipe. Windows passes a handle; other hosts pass a descriptor."""
+    number = int(raw)
+    if os.name == "nt":
+        import msvcrt
+
+        number = msvcrt.open_osfhandle(number, os.O_BINARY)
+    return os.fdopen(number, "rb", buffering=0)
+
+
 def _drain(stream: Any) -> None:
     for line in stream:
         text = line.decode("utf-8", errors="replace").rstrip()
@@ -595,7 +626,7 @@ def _install_ledger(proto: Any) -> None:
         return
     from favlo.memory import memory
 
-    reply = os.fdopen(int(raw), "rb", buffering=0)
+    reply = _inherited(raw)
     gate = threading.Lock()
 
     def publish(payload: dict[str, Any]) -> None:
@@ -707,7 +738,7 @@ def _control_events() -> dict[str, threading.Event]:
         return events
 
     def read() -> None:
-        stream = os.fdopen(int(raw), "rb", buffering=0)
+        stream = _inherited(raw)
         pending = b""
         while True:
             chunk = stream.read(4096)

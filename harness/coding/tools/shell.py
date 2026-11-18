@@ -311,13 +311,13 @@ class ShellJobs:
                 self._save(job)
                 return
         proc = subprocess.Popen(
-            [_SHELL, "-c", job.command],
+            _argv(job.command),
             cwd=str(job.cwd),
             env=_environment(self.workspace),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            **_spawn_flags(),
         )
         with job.lock:
             job.proc = proc
@@ -470,8 +470,22 @@ def _directory(workspace: Path, raw: str) -> Path:
     return path
 
 
+def _argv(command: str) -> list[str] | str:
+    """``/bin/sh -c`` on Unix. A raw ``cmd /c`` line on Windows, so quotes survive."""
+    if os.name != "nt":
+        return [_SHELL, "-c", command]
+    comspec = os.environ.get("COMSPEC") or r"C:\Windows\System32\cmd.exe"
+    return f"{comspec} /d /c {command}"
+
+
+def _spawn_flags() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
 def _environment(workspace: Path) -> dict[str, str]:
-    return {
+    env = {
         "HOME": str(workspace),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
@@ -479,10 +493,41 @@ def _environment(workspace: Path) -> dict[str, str]:
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
     }
+    if os.name != "nt":
+        return env
+    env["PATH"] = _python3_dir()
+    root = os.environ.get("SYSTEMROOT")
+    if root:
+        env["SYSTEMROOT"] = root
+        env["WINDIR"] = root
+    return env
+
+
+def _python3_dir() -> str:
+    """A directory whose ``python3`` is this interpreter. The shell PATH is only this."""
+    import sys
+    import tempfile
+
+    root = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "favlo-coding-bin"
+    root.mkdir(parents=True, exist_ok=True)
+    shim = root / "python3.cmd"
+    body = f'@"{Path(sys.executable)}" %*\r\n'
+    if not shim.is_file() or shim.read_text(encoding="utf-8") != body:
+        shim.write_text(body, encoding="utf-8")
+    return str(root)
 
 
 def _signal(proc: subprocess.Popen[bytes], sig: signal.Signals) -> None:
     if proc.pid is None or proc.pid <= 0:
+        return
+    if os.name == "nt":
+        try:
+            if sig == getattr(signal, "SIGKILL", None):
+                proc.kill()
+            else:
+                proc.terminate()
+        except OSError:
+            return
         return
     try:
         os.killpg(proc.pid, sig)

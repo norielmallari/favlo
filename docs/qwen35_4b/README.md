@@ -4,12 +4,13 @@ Summary for the `qwen35_4b` language pipeline. Kernels, the packed record, the f
 
 - `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
 - After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
-- Package commands (`download`, `quantize`, `setup`, `mtp-half`, `kernels`, `complete`, `models`) require `favlo --qwen35_4b`, which loads `qwen35_4b.metal41`.
+- Package commands (`download`, `quantize`, `setup`, `mtp-half`, `kernels`, `complete`, `models`) require `favlo --qwen35_4b`. Apple Silicon loads `qwen35_4b.metal41`. Windows loads `qwen35_4b.cuda`.
 
 - The official checkpoint is [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B).
 - Those weights are under the Apache License, Version 2.0.
 - Registration sets `default_variant` to `thinking` and `kv_cache` to `fp8_e4m3` unless the request overrides them.
-- The packed record is `models/Qwen3.5-4B-fp8`.
+- The packed record on Apple Silicon is `models/Qwen3.5-4B-fp8`.
+- On Windows the pack follows the device budget: `models/Qwen3.5-4B-int8` at 6 GiB and above, `models/Qwen3.5-4B-int4` at 4 GiB.
 - The served context window is 262144 tokens.
 
 After changing an open-time registry field, unload the resident model:
@@ -24,8 +25,8 @@ How to download, pack, and talk to `qwen35_4b`. The kernel contract is [ARCHITEC
 
 ### What you need
 
-- Apple Silicon
-- Metal 4.1
+- Apple Silicon, or Windows with the NVIDIA CUDA Toolkit
+- Metal 4.1 on Apple Silicon
 - 16 GB of memory
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
@@ -160,3 +161,5 @@ uv run favlo --qwen35_4b complete
 - [research/coding-agent-mtp.md](research/coding-agent-mtp.md) — coding agent with MTP
 - [research/coding-text.md](research/coding-text.md) — text coding agent
 - [research/synthetic-prompt.md](research/synthetic-prompt.md) — cold 512, 1024, 4096, and 10000-token prompts on fp8 weights and `fp8_e4m3` keys and values
+- [research/synthetic-prompt-thinking-cuda.md](research/synthetic-prompt-thinking-cuda.md) — cold 512, 1024, 4096, and 10000-token prompts on CUDA int8 weights and int8 keys and values, thinking on
+- [research/synthetic-prompt-cuda.md](research/synthetic-prompt-cuda.md) — cold 512, 1024, 4096, and 10000-token prompts on CUDA int8 weights and int8 keys and values, thinking off

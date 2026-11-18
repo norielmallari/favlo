@@ -226,3 +226,30 @@ The packed record may also hold the official MTP head as Metal `half` (`mtp-half
 - Prefix flush stays on the generate thread, outside both clocks.
 - A stop check stays on that thread once per chunk and once per token.
 - This pipeline is dense; it has no expert-firing histogram and no deferred telemetry pull.
+
+## CUDA
+
+As-built note for the CUDA runtime of `qwen35_4b`. The official checkpoint is [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) (Apache License 2.0). The compiler and libraries are the NVIDIA CUDA Toolkit on this machine, `nvcc` from that install. A pip wheel is not the toolkit.
+
+`favlo serve` on a Windows terminal with an empty registry downloads the checkpoint and packs the plane that fits the device budget. The budget is the live free memory from the driver, minus a 256 MiB hold-back. The CUDA runtime reports that free count and does not guarantee an allocation of all of it. The registry key `device_budget` is a positive byte count and lowers that budget. An omitted key leaves the live count. The int8 cache stops at 131072 tokens.
+
+| Budget | Weights | Vision on device | Cache | Context the opening holds |
+|---|---|---|---|---|
+| 4 GiB | int4 `s4 * s4 + s32` | no | int8, one scale byte per 32 channels | 65,536 |
+| 6 GiB | int8 `CUDA_R_8I` | yes | int8, one scale byte per 32 channels | grown inside the budget |
+
+A 4 GiB budget does not hold int8 weights. The int8 opening is past 4 GiB before the first cached token. int4 language weights, Gated DeltaNet state, convolution history, the prefill workspace, and a 65,536-token int8 cache fit in 4 GiB. The same int8 cache at 32,768 tokens fits with more room.
+
+Norms, convolution taps, `A_log`, and `dt_bias` stay fp16. Gated DeltaNet state stays fp32. The attend kernel reads the int8 cache. It does not keep a second fp16 copy and it does not allocate a score plane.
+
+```text
+uv run favlo --qwen35_4b --help
+uv run favlo --qwen35_4b setup
+uv run favlo --qwen35_4b kernels
+```
+
+`kernels` compiles with the CUDA Toolkit for compute capability 8.6 and later. The cubins are sm_86 (RTX 30), sm_89 (RTX 40), and sm_120 (RTX 50), plus sm_120 PTX so a later device of that family can JIT. A device below 8.6 is refused. The int8 check is a cuBLASLt `s8 * s8 + s32` matmul. The int4 check is one toolkit WMMA s4 tile, shape 8×8×32, `s4 * s4 + s32`. Nibbles are packed low-first, the same order as the quantizer.
+
+The text coding agent on this int8 opening, MTP off, vision off, and thinking on, is recorded in [research/coding-text-cuda.md](research/coding-text-cuda.md). The same agent with thinking off is recorded in [research/coding-instruct-cuda.md](research/coding-instruct-cuda.md). The page needle on this int8 opening, MTP off and thinking off, is recorded in [research/needle-page-int8.md](research/needle-page-int8.md). The thinking-on cold synthetic prompts on this int8 opening, MTP off, are recorded in [research/synthetic-prompt-thinking-cuda.md](research/synthetic-prompt-thinking-cuda.md). The instruct cold synthetic prompts on this int8 opening, MTP off, are recorded in [research/synthetic-prompt-cuda.md](research/synthetic-prompt-cuda.md). Kernel and bandwidth ceilings are in [cuda-ceilings.md](cuda-ceilings.md).
+
+`favlo serve` runs the int8 record. Prefill projects 128 tokens with `mma.m16n8k32` and replays that tile from a CUDA graph. Independent projections of one activation, such as gate and up, share that quantization and run together. Prefill attention quantizes each query in groups of 32 channels, scores those codes against the int8 keys with `mma.m16n8k32`, and mixes the values with `mma.m16n8k16`. Sixteen query tokens share each staged key tile. Decode is one token and replays its own graph. Its attention scan streams each key once. Each product keeps the packed int8 codes and the fp32 row scale, and quantizes the activation to int8 with one scale per 32 channels. Norms, the depthwise convolution, Gated DeltaNet, partial RoPE, and the int8 key/value cache stay on the device. The cache scale is one E8M0 byte per 32 channels. A temperature of 0 is argmax on device after the presence penalty. A positive temperature with a top-k of 1 to 64 draws the nucleus on device. The draft model is off. `favlo:fill_decode` true keeps sampling through stop ids until the output cap. An image part is refused. The int4 record packs, and this opening does not serve it.

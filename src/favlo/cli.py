@@ -163,33 +163,45 @@ def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _host_runtime(runtimes: dict[str, Path]) -> str | None:
+    """This machine's runtime when the model ships it, else Metal, else portable."""
+    from favlo.host import runtime_name
+
+    preferred = runtime_name()
+    if preferred in runtimes:
+        return preferred
+    if "metal41" in runtimes:
+        return "metal41"
+    if "portable" in runtimes:
+        return "portable"
+    if runtimes:
+        return sorted(runtimes)[0]
+    return None
+
+
 def pipeline_entries(root: Path | None = None) -> dict[str, Path]:
-    """Model id to a representative runtime package directory."""
+    """Model id to the runtime package directory this host loads."""
     found: dict[str, Path] = {}
     for model, runtimes in pipeline_runtimes(root).items():
-        if "metal41" in runtimes:
-            found[model] = runtimes["metal41"]
-        elif "portable" in runtimes:
-            found[model] = runtimes["portable"]
-        else:
-            found[model] = runtimes[sorted(runtimes)[0]]
+        chosen = _host_runtime(runtimes)
+        if chosen is not None:
+            found[model] = runtimes[chosen]
     return found
 
 
 def default_runtime(name: str, root: Path | None = None) -> str:
-    """Sole runtime for a model, else ``metal41``, else ``portable``."""
+    """Sole runtime for a model, else the runtime this host runs."""
     runtimes = pipeline_runtimes(root).get(name) or {}
     if not runtimes:
         message = f"pipeline is missing: {name}"
         raise FileNotFoundError(message)
     if len(runtimes) == 1:
         return next(iter(runtimes))
-    if "metal41" in runtimes:
-        return "metal41"
-    if "portable" in runtimes:
-        return "portable"
-    message = f"pipeline {name} has multiple runtimes; pass runtime explicitly"
-    raise ValueError(message)
+    chosen = _host_runtime(runtimes)
+    if chosen is None:
+        message = f"pipeline {name} has multiple runtimes; pass runtime explicitly"
+        raise ValueError(message)
+    return chosen
 
 
 def _help(names: Sequence[str]) -> str:

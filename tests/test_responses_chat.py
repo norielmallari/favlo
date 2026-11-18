@@ -138,6 +138,16 @@ def test_chat_effort_fields_map_onto_reasoning() -> None:
     assert by_body["reasoning"] == {"effort": "medium"}
 
 
+def test_chat_fill_decode_stays_on_the_responses_body() -> None:
+    translated = chat_to_responses(
+        {
+            "messages": [{"role": "user", "content": "x"}],
+            "favlo:fill_decode": True,
+        }
+    )
+    assert translated["favlo:fill_decode"] is True
+
+
 def test_chat_prefix_fields_stay_on_the_responses_body() -> None:
     translated = chat_to_responses(
         {

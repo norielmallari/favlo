@@ -101,6 +101,13 @@ def _store_initial_model(model_id: str) -> None:
 
 
 def _spawn(command: list[str], cwd: Path, env: dict[str, str]) -> subprocess.Popen[bytes]:
+    if os.name == "nt":
+        return subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
     return subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
 
 
@@ -134,6 +141,14 @@ def _wait(api_proc: subprocess.Popen[bytes], web_proc: subprocess.Popen[bytes]) 
 
 def _stop(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
         return
     try:
         os.killpg(proc.pid, signal.SIGTERM)

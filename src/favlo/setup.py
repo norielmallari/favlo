@@ -1,7 +1,8 @@
 """First serve with an empty registry. The pipeline owns the download.
 
-A terminal with no registered rows checks Metal 4.1, then runs
-``favlo --qwen35_4b setup``. A pipe leaves the registry empty.
+A terminal with no registered rows checks this host, then runs
+``favlo --qwen35_4b setup``. Apple Silicon checks Metal 4.1. Windows checks
+for a CUDA device. A pipe leaves the registry empty.
 """
 
 from __future__ import annotations
@@ -43,20 +44,30 @@ def metal_ready() -> bool:
     return library is not None
 
 
+def host_ready() -> bool:
+    """True when this machine can run the runtime it selects."""
+    from favlo.host import is_windows, vram_bytes
+
+    if is_windows():
+        return vram_bytes() is not None
+    return metal_ready()
+
+
 def prepare(
     root: Path,
     *,
     stdin_tty: bool,
     console: str,
-    metal: Callable[[], bool] = metal_ready,
+    metal: Callable[[], bool] | None = None,
     run: Callable[..., Any] = subprocess.run,
 ) -> int:
     """Download and pack when this terminal has no models. ``0`` continues to listen."""
+    ready = host_ready if metal is None else metal
     if not registry_empty(root):
         return 0
     if not stdin_tty:
         return 0
-    if not metal():
+    if not ready():
         sys.stderr.write("this runtime cannot run here\n")
         return 1
     env = os.environ.copy()

@@ -31,9 +31,9 @@ Spawn = Callable[[], int]
 
 def physical_bytes() -> int:
     """Installed memory. Reclaimable pages shrink while a model is loaded."""
-    page = int(os.sysconf("SC_PAGE_SIZE"))
-    pages = int(os.sysconf("SC_PHYS_PAGES"))
-    return page * pages
+    from favlo.host import physical_bytes as host_physical
+
+    return host_physical()
 
 
 def free_bytes(path: Path) -> int:
@@ -231,7 +231,11 @@ def _spawn(root: Path | None, home: Path | None) -> int:
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        **(
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            if os.name == "nt"
+            else {"start_new_session": True}
+        ),
     )
     pid_path(base).write_text(f"{proc.pid}\n", encoding="utf-8")
     return proc.pid

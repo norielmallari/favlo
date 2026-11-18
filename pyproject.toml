@@ -62,7 +62,7 @@ package = true
 # Sync from the checkout root: `uv sync --extra dev`.
 # Each pipelines/<id>/<runtime>/pyproject.toml declares that runtime's deps.
 # Those packages are not uv workspace members yet (imports stay via
-# `pythonpath = pipelines`). A cuda tree is omitted on Darwin until one exists.
+# `pythonpath = pipelines`). CUDA packages live at `pipelines/<model>/cuda/`.
 
 [tool.ruff]
 target-version = "py312"

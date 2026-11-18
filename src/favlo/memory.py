@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -27,8 +28,20 @@ _READ = 1
 _WRITE = 2
 
 
+def _page_bytes() -> int:
+    if sys.platform == "win32":
+        from favlo.host import page_bytes
+
+        return page_bytes()
+    return int(os.sysconf("SC_PAGE_SIZE"))
+
+
 def reclaimable_bytes() -> int:
-    """Free, inactive, and speculative pages."""
+    """Free, inactive, and speculative pages. On Windows, available physical memory."""
+    if sys.platform == "win32":
+        from favlo.host import available_bytes
+
+        return available_bytes()
     libc = ctypes.CDLL("/usr/lib/libSystem.dylib", use_errno=True)
 
     class Stats(ctypes.Structure):
@@ -58,7 +71,7 @@ def reclaimable_bytes() -> int:
         ctypes.byref(stats),
         ctypes.byref(count),
     )
-    page = int(os.sysconf("SC_PAGE_SIZE"))
+    page = _page_bytes()
     if kern != 0:
         return page * int(os.sysconf("SC_PHYS_PAGES"))
     reclaimable = stats.free_count + stats.inactive_count + stats.speculative_count
@@ -625,7 +638,7 @@ class Memory:
         span = self._lookup(handle)
         if span is None or span.released or span.advised:
             return
-        page = int(os.sysconf("SC_PAGE_SIZE"))
+        page = _page_bytes()
         aligned = span.requested - (span.requested % page)
         if aligned < page or span.storage != "shared":
             return
@@ -645,7 +658,7 @@ class Memory:
             self.discard(handle)
         elif int(state) == _NONVOLATILE:
             span = self._require(handle)
-            page = int(os.sysconf("SC_PAGE_SIZE"))
+            page = _page_bytes()
             aligned = span.requested - (span.requested % page)
             if aligned >= page and span.storage == "shared":
                 self.commit_span(handle, 0, aligned)
