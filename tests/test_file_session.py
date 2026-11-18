@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from harness.file_session import (
     RequestRate,
+    closed_without_decode,
     extensions_hold,
     log_since,
     model_stem,
@@ -139,13 +140,36 @@ def test_parse_requests_and_prefix_extension() -> None:
     assert not extensions_hold(missed)
     short = parse_requests(_LOG.replace("cache hit 120", "cache hit 100"))
     assert not extensions_hold(short)
+    boundary = _LOG.replace("prefix load 120 tokens\n", "prefix load 90 tokens\n").replace(
+        "cache hit 120", "cache hit 90"
+    )
+    assert extensions_hold(parse_requests(boundary))
+    assert not extensions_hold(parse_requests(boundary), preserve_thinking=True)
     memory = parse_requests(_LOG.replace("prefix load 120 tokens\n", ""))
     assert not extensions_hold(memory)
     later = _LOG.replace(
         "prompt tokens 300\ncache hit 184",
         "prefix load 184 tokens\nprompt tokens 300\ncache hit 184",
     )
-    assert not extensions_hold(parse_requests(later))
+    assert extensions_hold(parse_requests(later))
+    drifted = _LOG.replace(
+        "prompt tokens 300\ncache hit 184",
+        "prefix load 50 tokens\nprompt tokens 300\ncache hit 40",
+    )
+    assert not extensions_hold(parse_requests(drifted))
+    longer = """\
+prompt tokens 357
+prefix load 353 tokens
+cache hit 353
+prefill 1.00 tok/s (4 tok in 0.02s)
+decode 1.00 tok/s (25 tok in 0.85s)
+prompt tokens 13921
+prefix load 13917 tokens
+cache hit 13917
+prefill 1.00 tok/s (4 tok in 0.19s)
+decode 1.00 tok/s (87 tok in 3.37s)
+"""
+    assert extensions_hold(parse_requests(longer))
     after_prompt = """\
 prompt tokens 10
 cache miss
@@ -220,6 +244,27 @@ def test_prefix_was_hit_requires_a_loaded_prefix() -> None:
     assert preserved_reloaded(previous, applied) is True
     assert preserved_reloaded(previous, suffix) is True
     assert preserved_reloaded(previous, short) is False
+
+
+def test_closed_without_decode_ignores_a_finished_request() -> None:
+    finished = (
+        "request open qwen35_4b:instruct\n"
+        "prompt tokens 100\n"
+        "cache miss\n"
+        "prefill 50.00 tok/s (100 tok in 2.00s)\n"
+        "request closed qwen35_4b:instruct\n"
+        "decode 10.00 tok/s (4 tok in 0.40s)\n"
+    )
+    aborted = (
+        "request open qwen35_4b:instruct\n"
+        "prompt tokens 46554\n"
+        "prefix load 37461 tokens\n"
+        "cache hit 37461\n"
+        "request closed qwen35_4b:instruct\n"
+    )
+    assert closed_without_decode(finished, "qwen35_4b") is False
+    assert closed_without_decode(aborted, "qwen35_4b") is True
+    assert closed_without_decode(aborted + finished, "qwen35_4b") is False
 
 
 def test_log_since_keeps_only_the_lines_after_the_mark() -> None:

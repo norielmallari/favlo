@@ -371,36 +371,63 @@ def preserved_reloaded(previous: RequestRate, replay: RequestRate) -> bool:
     return previous.prompt_tokens - hit in (2, 4)
 
 
-def prefix_so_far(requests: list[RequestRate]) -> bool:
+def _disk_prefix_holds(
+    previous: RequestRate, current: RequestRate, *, preserve_thinking: bool
+) -> bool:
+    """True when a disk load is still this conversation's prefix.
+
+    A generation prompt ends in ``<think>`` (two tokens) or a closed empty
+    think (four tokens). The next encode does not repeat that suffix. With
+    ``preserve_thinking`` off, a new user message drops historical think
+    blocks, and the hit may be an earlier stored prefix of the previous prompt.
+    """
+    hit = current.prefix_hit
+    if hit is None or hit <= 0 or hit >= current.prompt_tokens:
+        return False
+    if hit in {_applied(previous), previous.prompt_tokens}:
+        return True
+    if previous.prompt_tokens - hit in (2, 4):
+        return True
+    if hit > previous.prompt_tokens:
+        return True
+    return not preserve_thinking and hit < previous.prompt_tokens
+
+
+def prefix_so_far(
+    requests: list[RequestRate], *, preserve_thinking: bool = False
+) -> bool:
     """True while these requests can still finish as one restart load and in-memory extensions.
 
-    The first request misses, or loads a prefix that was already on disk. A tool
-    follow-up on that same server extends it in memory. After the server restarts,
-    one request loads the applied prefix from disk. Every other later request
-    extends the previous one in memory.
+    The first request misses, or loads a prefix that was already on disk. A later
+    request extends that prefix in memory, or loads it again when the resident
+    model was released. A disk load holds when it is the applied length, the
+    prompt boundary, the generation suffix, or, with ``preserve_thinking`` off,
+    an earlier stored prefix of the previous prompt.
     """
     if not requests:
         return False
     first = requests[0]
     if not (_cold_start(first) or _stored_load(first)):
         return False
-    loaded = False
     for previous, current in zip(requests, requests[1:], strict=False):
         if current.prefix_load is not None:
-            if loaded or not _stored_load(current) or current.prefix_hit != _applied(previous):
+            if not _stored_load(current) or not _disk_prefix_holds(
+                previous, current, preserve_thinking=preserve_thinking
+            ):
                 return False
-            loaded = True
             continue
         if not _extends(previous, current):
             return False
     return True
 
 
-def extensions_hold(requests: list[RequestRate]) -> bool:
+def extensions_hold(
+    requests: list[RequestRate], *, preserve_thinking: bool = False
+) -> bool:
     """True when one later request loaded the prefix from disk and the others extended it."""
     return (
         len(requests) >= 2
-        and prefix_so_far(requests)
+        and prefix_so_far(requests, preserve_thinking=preserve_thinking)
         and any(request.prefix_load is not None for request in requests[1:])
     )
 
@@ -540,6 +567,40 @@ def _model_requests(log: Log, model: str) -> list[RequestRate]:
     return parse_requests(pipeline_log(text, model_stem(model)))
 
 
+def closed_without_decode(text: str, model: str) -> bool:
+    """True when ``model``'s latest request closed and no decode line followed.
+
+    The console thread can write the decode line after ``request closed``.
+    A later decode line clears this. A later ``request open`` starts a new request.
+    """
+    stem = model.split(":", 1)[0]
+    owner = ""
+    saw_prompt = False
+    saw_decode = False
+    closed = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("request open"):
+            owner = line.removeprefix("request open").strip()
+            saw_prompt = False
+            saw_decode = False
+            closed = False
+            continue
+        if owner != stem and not owner.startswith(stem + ":"):
+            continue
+        if line.startswith("request closed"):
+            closed = True
+            continue
+        if line.startswith("prompt tokens "):
+            saw_prompt = True
+            saw_decode = False
+            closed = False
+            continue
+        if line.startswith("decode "):
+            saw_decode = True
+    return closed and saw_prompt and not saw_decode
+
+
 def _wait_requests(
     log: Log, previous: int, server: Server, *, model: str
 ) -> list[RequestRate]:
@@ -547,12 +608,14 @@ def _wait_requests(
 
     deadline = time.monotonic() + 1800
     stable_at: float | None = None
+    closed_at: float | None = None
     last = previous
     while time.monotonic() < deadline:
         if server.pid > 0 and not alive(server.pid):
             message = "server exited\n" + log.text()[-4000:]
             raise RuntimeError(message)
-        requests = _model_requests(log, model)
+        text = log_since(_disk_log(), log.mark)
+        requests = parse_requests(pipeline_log(text, model_stem(model)))
         count = len(requests)
         complete = count > previous and requests[-1].decode != ""
         if count != last:
@@ -560,6 +623,14 @@ def _wait_requests(
             stable_at = time.monotonic()
         elif complete and stable_at is not None and time.monotonic() - stable_at >= 0.3:
             return requests
+        if closed_without_decode(text, model):
+            if closed_at is None:
+                closed_at = time.monotonic()
+            elif time.monotonic() - closed_at >= 2.0:
+                message = "request closed before decode\n" + text[-2000:]
+                raise RuntimeError(message)
+        else:
+            closed_at = None
         time.sleep(0.05)
     requests = _model_requests(log, model)
     if len(requests) > previous and requests[-1].decode != "":
@@ -711,7 +782,7 @@ async def run_file_agent(
             for row, request in enumerate(requests[seen:], start=seen + 1):
                 print(format_request(row, request), flush=True)
             seen = len(requests)
-            if not prefix_so_far(requests):
+            if not prefix_so_far(requests, preserve_thinking=preserve_thinking):
                 note = "prefix did not extend\n" + _completions(log)
                 return RunResult(requests, False, False, note)
             print(f"read {SHARED_PACKAGE.as_posix()}/{rel}", flush=True)
@@ -719,7 +790,7 @@ async def run_file_agent(
             if turn == 1 and index + 1 < len(files):
                 _restart(server, log)
         if evict:
-            if not requests or not prefix_so_far(requests):
+            if not requests or not prefix_so_far(requests, preserve_thinking=preserve_thinking):
                 note = "prefix did not extend\n" + _completions(log)
                 return RunResult(requests, False, False, note)
             if preserve_thinking:
@@ -757,7 +828,7 @@ async def run_file_agent(
             await close_chat_client(chat)
     context = requests[-1].prompt_tokens if requests else 0
     reached = context >= target
-    extended = extensions_hold(requests)
+    extended = extensions_hold(requests, preserve_thinking=preserve_thinking)
     if not reached:
         note = f"shared package files ended at {context} tokens"
     elif not extended:

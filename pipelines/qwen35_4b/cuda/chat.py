@@ -51,33 +51,42 @@ def load_tokenizer(root: Path) -> Tokenizer:
     return found
 
 
-def _preserve_flag(value: Any) -> bool:
+def _preserve_flag(value: Any) -> bool | None:
+    if value is None:
+        return None
     if isinstance(value, bool):
         return value
     message = "preserve_thinking must be true or false"
     raise RuntimeError(message)
 
 
-def preserve_thinking(body: dict[str, Any], settings: dict[str, Any] | None = None) -> bool:
+def _chat_preserve(body: dict[str, Any]) -> bool | None:
+    """``chat_template_kwargs.preserve_thinking``, or None when that key is absent."""
+    kwargs = body.get("chat_template_kwargs")
+    if not isinstance(kwargs, dict) or "preserve_thinking" not in kwargs:
+        return None
+    return _preserve_flag(kwargs.get("preserve_thinking"))
+
+
+def preserve_thinking(body: dict[str, Any], registry: bool | None = None) -> bool:
     """Whether historical reasoning stays in the prompt.
 
     A top-level ``preserve_thinking`` wins over ``chat_template_kwargs``.
-    Either wins over ``settings.json``. Omitted is on, so a later prompt
-    extends the stored prefix.
+    Either wins over this pipeline's registry row. An omitted row is off.
+    A string is an error. ``settings.json`` is not read.
     """
-    if "preserve_thinking" in body:
-        return _preserve_flag(body.get("preserve_thinking"))
-    kwargs = body.get("chat_template_kwargs")
-    if isinstance(kwargs, dict) and "preserve_thinking" in kwargs:
-        return _preserve_flag(kwargs.get("preserve_thinking"))
-    if settings is None:
-        from favlo.logs import favlo_home, load_settings
-
-        settings = load_settings(favlo_home())
-    value = settings.get("preserve_thinking")
-    if value is None:
-        return True
-    return bool(value)
+    requested = (
+        _preserve_flag(body.get("preserve_thinking"))
+        if "preserve_thinking" in body
+        else None
+    )
+    if requested is None:
+        requested = _chat_preserve(body)
+    if requested is not None:
+        return requested
+    if registry is None:
+        return False
+    return bool(registry)
 
 
 def _bridge_omitted_assistant(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -228,6 +237,58 @@ def _template_tool_call(call: dict[str, Any]) -> dict[str, Any]:
 
 def encode_text(root: Path, text: str) -> list[int]:
     return list(load_tokenizer(root).encode(text, add_special_tokens=False).ids)
+
+
+_GENERATION_SUFFIX: dict[Path, tuple[list[int], list[int]]] = {}
+
+
+def user_turn_cut(
+    root: Path,
+    messages: list[dict[str, Any]],
+    tools: Any,
+    thinking: bool,
+) -> int | None:
+    """Tokens through the latest user message, before the generation suffix.
+
+    Historical thinking is omitted on the next user message. The file that
+    stops here is the one that message still shares. A prompt that already
+    ends on the user message uses ``generation_cut``.
+    """
+    last = None
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            last = index
+    if last is None or last + 1 == len(messages):
+        return None
+    head = encode_chat(
+        root,
+        messages[: last + 1],
+        tools,
+        thinking,
+        preserve_thinking=False,
+    )
+    return generation_cut(root, head)
+
+
+def generation_cut(root: Path, prompt: list[int]) -> int | None:
+    """Index where the generation suffix starts, when this prompt ends with one.
+
+    Thinking leaves ``<think>\\n``. Instruct leaves the closed empty block.
+    A later prompt that omits historical thinking does not repeat that suffix,
+    so the tokens before it are the prefix the follow-up still shares.
+    """
+    pair = _GENERATION_SUFFIX.get(root)
+    if pair is None:
+        pair = (
+            encode_text(root, "<think>\n\n</think>\n\n"),
+            encode_text(root, "<think>\n"),
+        )
+        _GENERATION_SUFFIX[root] = pair
+    for suffix in pair:
+        count = len(suffix)
+        if count and len(prompt) > count and prompt[-count:] == suffix:
+            return len(prompt) - count
+    return None
 
 
 def tool_close_id(root: Path) -> int:
@@ -538,7 +599,8 @@ def _respond(
         # Keep tools in the prompt under tool_choice none so a later turn that
         # re-enables tools still matches the stored prefix (35B same rule).
         tools = function_tools(prepared.get("tools"))
-        keep_thinking = preserve_thinking(prepared)
+        row = getattr(selection, "preserve_thinking", None)
+        keep_thinking = preserve_thinking(prepared, row if isinstance(row, bool) else None)
         prompt = encode_chat(
             runtime.root,
             messages,
@@ -547,6 +609,13 @@ def _respond(
             preserve_thinking=keep_thinking,
         )
         prompt = prepare_prompt(runtime, messages, prompt)
+        text_cut = (
+            None
+            if keep_thinking
+            else user_turn_cut(runtime.root, messages, tools or None, thinking)
+        )
+        runtime._stable_cut = text_cut
+        _prefix_run(runtime, prepared)
     except (RequestError, RuntimeError, TemplateError, OSError, ValueError) as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
@@ -620,6 +689,20 @@ def _respond(
         hit_limit,
     )
     reply.json(200, payload)
+
+
+def _prefix_run(runtime: Any, prepared: dict[str, Any]) -> None:
+    """Copy a scratch prefix budget onto the runtime for this request.
+
+    Absent fields clear a previous scratch run so the next chat uses the home
+    partition again.
+    """
+    budget = prepared.get("favlo:prefix_budget")
+    scratch = prepared.get("favlo:prefix_scratch")
+    runtime._prefix_budget = (
+        budget if isinstance(budget, int) and not isinstance(budget, bool) and budget > 0 else None
+    )
+    runtime._prefix_scratch = scratch if isinstance(scratch, str) and scratch else None
 
 
 def _stop_strings(body: dict[str, Any]) -> list[str]:

@@ -201,6 +201,13 @@ class Qwen35Runtime:
         self.refresh_budget()
         self._output_ids = []
         console = self.console
+        from favlo.prefix import aim_session
+
+        aim_session(
+            self.prefix,
+            budget=getattr(self, "_prefix_budget", None),
+            scratch=getattr(self, "_prefix_scratch", None),
+        )
         progress.note(console, "prompt", tokens=len(prompt))
         hit = self.prefix.align(prompt)
         if self.prefix.loaded:
@@ -225,11 +232,50 @@ class Qwen35Runtime:
         close_call = int(tool_close) if tool_close is not None and pending else None
         try:
             done = 0
-            while done < uncached:
-                count = min(_TILE, uncached - done)
-                self._prefill_tile(suffix[done : done + count], logits=done + count == uncached)
-                done += count
-                progress.note_prefill(prefill_row, done)
+            from qwen35_4b.cuda.chat import generation_cut
+
+            cuts: list[int] = []
+            stable = getattr(self, "_stable_cut", None)
+            self._stable_cut = None
+            if isinstance(stable, int) and 0 < stable < len(prompt):
+                cuts.append(stable)
+            gen = generation_cut(self.root, prompt)
+            if isinstance(gen, int) and gen not in cuts:
+                cuts.append(gen)
+            cuts.sort()
+            # The user-turn cut is the file a later user message still shares.
+            # A prompt that already ends on that user message uses the
+            # generation suffix instead. Pin it. A tool-step generation cut
+            # is stored and not pinned.
+            held = stable if isinstance(stable, int) and stable in cuts else gen
+            for cut in cuts:
+                if hit >= cut:
+                    if cut == held:
+                        self._keep_boundary(prompt[:cut])
+                    continue
+                span = prompt[hit:cut]
+                walked = 0
+                while walked < len(span):
+                    piece = span[walked : walked + _TILE]
+                    walked += len(piece)
+                    done += len(piece)
+                    self._prefill_tile([int(token) for token in piece], logits=False)
+                    progress.note_prefill(prefill_row, done)
+                self.prefix.note(prompt[:cut])
+                self._store_prefix(note=False)
+                if cut == held:
+                    self._keep_boundary(prompt[:cut])
+                hit = cut
+                suffix = prompt[hit:]
+            tail = 0
+            while tail < len(suffix):
+                piece = suffix[tail : tail + _TILE]
+                tail += len(piece)
+                self._prefill_tile(
+                    [int(token) for token in piece],
+                    logits=tail >= len(suffix),
+                )
+                progress.note_prefill(prefill_row, done + tail)
             while produced < max_tokens:
                 self._check()
                 forced_token = False
@@ -328,13 +374,24 @@ class Qwen35Runtime:
                 progress.end_phase(console, decode_row, "")
         return list(self._output_ids)
 
-    def _store_prefix(self) -> None:
+    def _keep_boundary(self, tokens: list[int]) -> None:
+        """Pin the stored file for these tokens so eviction leaves it in place."""
+        from favlo.prefix import object_name
+
+        store = self.prefix.store
+        name = object_name(store.model, store.digest, store.tag, tokens)
+        path = store.directory / f"{name}.bin"
+        if path.is_file():
+            store.pin(path)
+
+    def _store_prefix(self, *, note: bool = True) -> None:
         try:
-            self.prefix.flush()
+            path = self.prefix.flush()
         except OSError as exc:
             progress.note(self.console, "prefix_store_failed", error=exc)
             return
-        progress.note(self.console, "prefix_store", tokens=len(self.prefix.tokens))
+        if path is not None and note:
+            progress.note(self.console, "prefix_store", tokens=len(self.prefix.tokens))
 
     def _prefill_tile(self, tokens: list[int], *, logits: bool) -> None:
         count = len(tokens)
