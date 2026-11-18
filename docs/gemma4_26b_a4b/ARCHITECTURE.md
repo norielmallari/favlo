@@ -126,7 +126,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - Routed experts stay in `experts/<layer>.bin`.
 - A layer file is 128 expert images in expert-index order.
 - An image is that expert's gate-up data, its E8M0 scales, the down data, and its scales.
-- Opening the record reads `widths.bin`, places each image on a 128-byte boundary, and checks the file length.
+- Opening the record reads `widths.bin` into the expert-widths span, places each image on a 128-byte boundary, and checks the file length.
 - It shows that read while it runs.
 - A token indexes eight experts in the layer file.
 - Resident matrices and the Metal half vectors are `resident.bin` with `resident.json`.
@@ -134,6 +134,9 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - The router, the norms, `router.scale`, `per_expert_scale`, `layer_scalar`, and the vision vectors stay Metal half.
 - The drafter is not in this record.
 - The vision tower stays in that file and is loaded on the first image.
+- Each fp8 row and each half vector is read into the shared span the kernel binds.
+- A half vector is expanded on device from that span.
+- Each image reads its position rows from their file offsets into a shared span the same way.
 - A text-only open does not read it.
 - This pipeline overrides `has_vision`, so a request that carries a still reaches the tower.
 - Soft rows for a PNG are stored by `favlo.vision_cache` under `~/.favlo/vision-cache/gemma4_26b_a4b/`.

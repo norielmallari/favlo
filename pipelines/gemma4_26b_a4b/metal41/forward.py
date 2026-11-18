@@ -1948,11 +1948,15 @@ class Gemma4Runtime:
             )
             self.layers.append(item)
         widths_path = path / "experts" / "widths.bin"
-        raw = np.fromfile(widths_path, dtype=np.uint8)
-        if raw.size != LAYERS * EXPERTS:
+        expected = LAYERS * EXPERTS
+        if widths_path.stat().st_size != expected:
             message = "expert widths are missing"
             raise RuntimeError(message)
-        widths = raw.reshape(LAYERS, EXPERTS)
+        self.expert_widths = device_buffer(self._owner, expected)
+        _read_span(self.expert_widths, widths_path)
+        widths = np.frombuffer(
+            memory.load(self.expert_widths, 0, expected), dtype=np.uint8
+        ).reshape(LAYERS, EXPERTS)
         offsets = np.zeros((LAYERS, EXPERTS), dtype=np.uint64)
         sizes: list[int] = []
         for layer in range(LAYERS):
@@ -1967,7 +1971,6 @@ class Gemma4Runtime:
                 raise RuntimeError(message)
             sizes.append(cursor)
         self._layer_sizes = sizes
-        self.expert_widths = self.session.upload(np.ascontiguousarray(widths))
         self.expert_offsets = self.session.upload(np.ascontiguousarray(offsets))
 
     def _scale_vector(self, handle: object, factor: float) -> None:

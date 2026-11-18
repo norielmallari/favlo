@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from favlo.memory import memory
+from favlo.memory import device_buffer, memory
 from gemma4_26b_a4b.metal41.geometry import (
     BOI_TOKEN,
     EOI_TOKEN,
@@ -330,25 +330,28 @@ class VisionTower:
                 if name.endswith("position_embedding_table"):
                     self._pos_offset = offset
                     continue
-                raw.seek(offset)
-                packed = raw.read(nbytes)
-                if len(packed) != nbytes:
+                try:
+                    if plane == "half" and len(shape) == 1:
+                        found[name] = self._expand(raw, offset, nbytes)
+                    elif plane == FP8 and len(shape) == 2:
+                        handle = device_buffer(self.owner, nbytes)
+                        try:
+                            self._read_into(raw, handle, offset, nbytes)
+                        except EOFError:
+                            memory.release(handle)
+                            raise
+                        rows, k = int(shape[0]), int(shape[1])
+                        stored = int(row.get("padded_rows") or rows)
+                        data, _scale = fp8_parts(stored, k)
+                        found[name] = _Matrix(
+                            handle, handle, rows, k, align_k(k, FP8), data, stored
+                        )
+                    else:
+                        message = f"{name} is not a vision matrix"
+                        raise RuntimeError(message)
+                except EOFError as exc:
                     message = f"{name} is short"
-                    raise RuntimeError(message)
-                if plane == "half" and len(shape) == 1:
-                    found[name] = self._expand(packed)
-                elif plane == FP8 and len(shape) == 2:
-                    handle = self.session.zeros(nbytes)
-                    memory.store(handle, 0, packed)
-                    rows, k = int(shape[0]), int(shape[1])
-                    stored = int(row.get("padded_rows") or rows)
-                    data, _scale = fp8_parts(stored, k)
-                    found[name] = _Matrix(
-                        handle, handle, rows, k, align_k(k, FP8), data, stored
-                    )
-                else:
-                    message = f"{name} is not a vision matrix"
-                    raise RuntimeError(message)
+                    raise RuntimeError(message) from exc
         finally:
             raw.close()
         self.input_proj = _need(found, "model.vision_tower.patch_embedder.input_proj.weight")
@@ -400,18 +403,26 @@ class VisionTower:
         memory.store(self.head_unit, 0, struct.pack("<f", 1.0) * VISION_HEAD)
         self._ready = True
 
-    def _expand(self, packed: bytes) -> object:
-        count = len(packed) // 2
-        source = self.session.zeros(len(packed))
-        memory.store(source, 0, packed)
-        dest = self.session.zeros(count * 4)
-        self.session.dispatch(
-            "expand_half",
-            [source, dest],
-            [self.session._u32(count)],
-            *_blocks(count),
-        )
-        memory.release(source)
+    def _read_into(self, raw: object, handle: object, offset: int, nbytes: int) -> None:
+        from gemma4_26b_a4b.metal41.forward import _fill
+
+        raw.seek(offset)
+        _fill(raw, memory.map(handle, 0, nbytes), offset)
+
+    def _expand(self, raw: object, offset: int, nbytes: int) -> object:
+        count = nbytes // 2
+        source = device_buffer(self.owner, nbytes)
+        try:
+            self._read_into(raw, source, offset, nbytes)
+            dest = self.session.zeros(count * 4)
+            self.session.dispatch(
+                "expand_half",
+                [source, dest],
+                [self.session._u32(count)],
+                *_blocks(count),
+            )
+        finally:
+            memory.release(source)
         return dest
 
     def _positions(self, grid_h: int, grid_w: int) -> None:
@@ -422,17 +433,18 @@ class VisionTower:
         raw = open(self.root / "resident.bin", "rb", buffering=0)
         try:
             # Axis 0 is x (column), axis 1 is y (row).
-            raw.seek(self._pos_offset)
-            xs = raw.read(grid_w * row_bytes)
-            raw.seek(self._pos_offset + _POS_ROWS * row_bytes)
-            ys = raw.read(grid_h * row_bytes)
+            self._expand_into(raw, self._pos_offset, grid_w * row_bytes, self.pos_x)
+            self._expand_into(
+                raw,
+                self._pos_offset + _POS_ROWS * row_bytes,
+                grid_h * row_bytes,
+                self.pos_y,
+            )
+        except EOFError as exc:
+            message = "position table is short"
+            raise RuntimeError(message) from exc
         finally:
             raw.close()
-        if len(xs) != grid_w * row_bytes or len(ys) != grid_h * row_bytes:
-            message = "position table is short"
-            raise RuntimeError(message)
-        self._expand_into(xs, self.pos_x)
-        self._expand_into(ys, self.pos_y)
         count = grid_h * grid_w
         self.session.encode(
             "vision_positions",
@@ -445,17 +457,19 @@ class VisionTower:
             *_grid2(VISION_WIDTH, count),
         )
 
-    def _expand_into(self, packed: bytes, dest: object) -> None:
-        count = len(packed) // 2
-        source = self.session.zeros(len(packed))
-        memory.store(source, 0, packed)
-        self.session.dispatch(
-            "expand_half",
-            [source, dest],
-            [self.session._u32(count)],
-            *_blocks(count),
-        )
-        memory.release(source)
+    def _expand_into(self, raw: object, offset: int, nbytes: int, dest: object) -> None:
+        count = nbytes // 2
+        source = device_buffer(self.owner, nbytes)
+        try:
+            self._read_into(raw, source, offset, nbytes)
+            self.session.dispatch(
+                "expand_half",
+                [source, dest],
+                [self.session._u32(count)],
+                *_blocks(count),
+            )
+        finally:
+            memory.release(source)
 
     def _scale_pooled(self, soft: int) -> None:
         self.session.encode(

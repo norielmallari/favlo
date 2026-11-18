@@ -243,3 +243,326 @@ def test_vision_disk_cache_uses_the_shared_helper(tmp_path: Path, monkeypatch) -
     path = vision_cache.cache_path("gemma4_26b_a4b", str(root), digest, 0, 0)
     assert path.is_file()
     assert vision_cache.cache_path("gemma4_26b_a4b", str(root), digest, 1, 2) != path
+
+
+def _spans() -> tuple[dict[int, bytearray], object, object]:
+    spans: dict[int, bytearray] = {}
+    issued = 0
+
+    def allocate(owner: str, nbytes: int, *, zero: bool = False) -> int:
+        nonlocal issued
+        del owner, zero
+        issued += 1
+        spans[issued] = bytearray(nbytes)
+        return issued
+
+    def map_span(handle: int, offset: int, nbytes: int) -> memoryview:
+        return memoryview(spans[handle])[offset : offset + nbytes]
+
+    return spans, allocate, map_span
+
+
+def test_vision_rows_fill_the_bound_span(tmp_path: Path, monkeypatch) -> None:
+    from gemma4_26b_a4b.metal41 import forward, vision
+    from gemma4_26b_a4b.metal41.geometry import VISION_HEAD, VISION_LAYERS, VISION_WIDTH
+
+    specs: list[tuple[str, str, list[int], int]] = [
+        ("model.vision_tower.patch_embedder.input_proj.weight", "fp8", [1, 128], 32),
+        ("model.embed_vision.embedding_projection.weight", "fp8", [1, 128], 32),
+        ("model.vision_tower.std_scale", "half", [4], 8),
+        ("model.vision_tower.std_bias", "half", [4], 8),
+    ]
+    for layer in range(VISION_LAYERS):
+        base = f"model.vision_tower.encoder.layers.{layer}"
+        for name in (
+            "input_layernorm.weight",
+            "post_attention_layernorm.weight",
+            "pre_feedforward_layernorm.weight",
+            "post_feedforward_layernorm.weight",
+            "self_attn.q_norm.weight",
+            "self_attn.k_norm.weight",
+        ):
+            specs.append((f"{base}.{name}", "half", [4], 8))
+        for name in (
+            "self_attn.q_proj.linear.weight",
+            "self_attn.k_proj.linear.weight",
+            "self_attn.v_proj.linear.weight",
+            "self_attn.o_proj.linear.weight",
+            "mlp.gate_proj.linear.weight",
+            "mlp.up_proj.linear.weight",
+            "mlp.down_proj.linear.weight",
+        ):
+            specs.append((f"{base}.{name}", "fp8", [1, 128], 32))
+    rows: list[dict[str, object]] = []
+    blob = bytearray()
+    for name, plane, shape, nbytes in specs:
+        rows.append(
+            {
+                "name": name,
+                "plane": plane,
+                "shape": shape,
+                "nbytes": nbytes,
+                "offset": len(blob),
+            }
+        )
+        blob.extend(bytes((len(blob) + index) % 251 for index in range(nbytes)))
+    pos_offset = len(blob)
+    rows.append(
+        {
+            "name": "model.vision_tower.patch_embedder.position_embedding_table",
+            "plane": "half",
+            "shape": [2, vision._POS_ROWS, 4],
+            "nbytes": 8,
+            "offset": pos_offset,
+        }
+    )
+    (tmp_path / "resident.json").write_text(json.dumps(rows), encoding="utf-8")
+    (tmp_path / "resident.bin").write_bytes(blob)
+    spans, allocate, map_span = _spans()
+    released: dict[int, bytes] = {}
+    stored: list[bytes] = []
+    starts: list[int] = []
+    real_fill = forward._fill
+
+    def spy(raw: object, view: memoryview, start: int) -> None:
+        starts.append(start)
+        real_fill(raw, view, start)
+
+    def release(handle: int) -> None:
+        released[handle] = bytes(spans.pop(handle))
+
+    class _Session:
+        def __init__(self) -> None:
+            self.dispatches: list[tuple[object, object]] = []
+            self.encoded: list[str] = []
+
+        def zeros(self, nbytes: int) -> tuple[str, int]:
+            return ("scratch", nbytes)
+
+        def dispatch(
+            self,
+            name: str,
+            handles: list[object],
+            constants: list[bytes],
+            groups: tuple[int, int, int],
+            threads: tuple[int, int, int],
+        ) -> None:
+            del name, constants, groups, threads
+            self.dispatches.append((handles[0], handles[1]))
+
+        def encode(
+            self,
+            name: str,
+            handles: list[object],
+            constants: list[bytes],
+            groups: tuple[int, int, int],
+            threads: tuple[int, int, int],
+        ) -> None:
+            del handles, constants, groups, threads
+            self.encoded.append(name)
+
+        def _u32(self, value: int) -> bytes:
+            return struct.pack("<I", value)
+
+    def remember(_handle: object, _offset: int, data: bytes) -> None:
+        stored.append(bytes(data))
+
+    monkeypatch.setattr(vision, "device_buffer", allocate)
+    monkeypatch.setattr(vision.memory, "map", map_span)
+    monkeypatch.setattr(vision.memory, "store", remember)
+    monkeypatch.setattr(vision.memory, "release", release)
+    monkeypatch.setattr(forward, "_fill", spy)
+    session = _Session()
+    tower = vision.VisionTower(session, tmp_path, "gemma4:test")
+    tower._open()
+    assert tower._ready is True
+    assert tower._pos_offset == pos_offset
+    assert pos_offset not in starts
+    assert bytes(spans[tower.input_proj.data]) == bytes(blob[:32])
+    sources = [handle for handle, _dest in session.dispatches]
+    assert sources
+    assert all(isinstance(handle, int) and handle in released for handle in sources)
+    ones = struct.pack("<f", 1.0)
+    assert stored == [ones * VISION_WIDTH, ones * VISION_HEAD]
+    row_bytes = VISION_WIDTH * 2
+    y_at = pos_offset + vision._POS_ROWS * row_bytes
+    path = tmp_path / "resident.bin"
+    with path.open("r+b") as handle:
+        handle.seek(y_at + row_bytes - 1)
+        handle.write(b"\x00")
+        handle.seek(pos_offset)
+        handle.write(b"\x11" * row_bytes)
+        handle.seek(y_at)
+        handle.write(b"\x22" * row_bytes)
+    before = len(session.dispatches)
+    tower._positions(1, 1)
+    assert starts[-2:] == [pos_offset, y_at]
+    assert session.encoded == ["vision_positions"]
+    assert session.dispatches[before][1] is tower.pos_x
+    assert session.dispatches[before + 1][1] is tower.pos_y
+    assert released[session.dispatches[before][0]] == b"\x11" * row_bytes
+    assert released[session.dispatches[before + 1][0]] == b"\x22" * row_bytes
+
+
+def test_a_short_vision_row_stays_named(tmp_path: Path, monkeypatch) -> None:
+    from gemma4_26b_a4b.metal41 import vision
+
+    rows = [
+        {
+            "name": "model.vision_tower.std_scale",
+            "plane": "half",
+            "shape": [4],
+            "nbytes": 8,
+            "offset": 0,
+        }
+    ]
+    (tmp_path / "resident.json").write_text(json.dumps(rows), encoding="utf-8")
+    (tmp_path / "resident.bin").write_bytes(b"\x00\x00")
+    spans, allocate, map_span = _spans()
+    monkeypatch.setattr(vision, "device_buffer", allocate)
+    monkeypatch.setattr(vision.memory, "map", map_span)
+    monkeypatch.setattr(vision.memory, "release", lambda handle: spans.pop(handle, None))
+    tower = vision.VisionTower(object(), tmp_path, "gemma4:test")
+    try:
+        tower._open()
+    except RuntimeError as exc:
+        assert str(exc) == "model.vision_tower.std_scale is short"
+    else:
+        raise AssertionError("a short vision row must fail")
+    assert spans == {}
+
+
+def test_a_text_open_skips_vision_rows(tmp_path: Path, monkeypatch) -> None:
+    from gemma4_26b_a4b.metal41 import forward
+    from gemma4_26b_a4b.metal41.forward import Gemma4Runtime
+
+    index = [
+        {
+            "name": "model.vision_tower.std_bias",
+            "nbytes": 32,
+            "offset": 0,
+            "shape": [16],
+            "plane": "half",
+        },
+        {
+            "name": "model.embed_vision.embedding_projection.weight",
+            "nbytes": 32,
+            "offset": 32,
+            "shape": [1, 128],
+            "plane": "fp8",
+        },
+        {
+            "name": "model.language_model.embed_tokens.weight",
+            "nbytes": 16,
+            "offset": 64,
+            "shape": [1, 128],
+            "plane": "fp8",
+        },
+    ]
+    (tmp_path / "resident.json").write_text(json.dumps(index), encoding="utf-8")
+    (tmp_path / "resident.bin").write_bytes(b"\xab" * 32 + b"\xcd" * 32 + b"\xef" * 16)
+    spans, allocate, map_span = _spans()
+    starts: list[int] = []
+    real_fill = forward._fill
+
+    def spy(raw: object, view: memoryview, start: int) -> None:
+        starts.append(start)
+        real_fill(raw, view, start)
+
+    monkeypatch.setattr(forward, "device_buffer", allocate)
+    monkeypatch.setattr(forward.memory, "map", map_span)
+    monkeypatch.setattr(forward, "_fill", spy)
+
+    class _Host:
+        _owner = "gemma4:1"
+
+        def _note_load(self, nbytes: int) -> None:
+            del nbytes
+
+    try:
+        Gemma4Runtime._load(_Host(), tmp_path)
+    except KeyError as exc:
+        assert exc.args[0] == "model.language_model.norm.weight"
+    else:
+        raise AssertionError("the text map must stop before a full record")
+    assert starts == [64]
+    assert list(spans.values()) == [bytearray(b"\xef" * 16)]
+
+
+def test_expert_widths_fill_the_span(tmp_path: Path, monkeypatch) -> None:
+    from gemma4_26b_a4b.metal41 import forward
+    from gemma4_26b_a4b.metal41.forward import Gemma4Runtime
+    from gemma4_26b_a4b.metal41.geometry import EXPERTS, HALF, LAYERS, RESIDENT, expected
+
+    rows = []
+    for name, (role, shape) in expected().items():
+        if role not in {RESIDENT, HALF}:
+            continue
+        vision = "vision_tower" in name or "embed_vision" in name
+        rows.append(
+            {
+                "name": name,
+                "plane": "half" if role == HALF else "fp8",
+                "shape": list(shape),
+                "nbytes": 64 if vision else 0,
+                "offset": 0,
+            }
+        )
+    (tmp_path / "resident.json").write_text(json.dumps(rows), encoding="utf-8")
+    (tmp_path / "resident.bin").write_bytes(b"\x00")
+    experts = tmp_path / "experts"
+    experts.mkdir()
+    width_bytes = LAYERS * EXPERTS
+    (experts / "widths.bin").write_bytes(bytes([4]) * width_bytes)
+    for layer in range(LAYERS):
+        (experts / f"{layer}.bin").write_bytes(b"\x00" * (EXPERTS * 8))
+    spans, allocate, map_span = _spans()
+    sizes: list[int] = []
+
+    def allocate_sized(owner: str, nbytes: int, *, zero: bool = False) -> int:
+        sizes.append(nbytes)
+        return allocate(owner, nbytes, zero=zero)
+
+    class _Session:
+        def __init__(self) -> None:
+            self.uploads: list[object] = []
+
+        def zeros(self, nbytes: int) -> object:
+            del nbytes
+            return object()
+
+        def dispatch(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def _u32(self, value: int) -> bytes:
+            del value
+            return b""
+
+        def upload(self, data: object) -> int:
+            self.uploads.append(data)
+            return len(self.uploads)
+
+    def load(handle: object, offset: int, nbytes: int) -> bytes:
+        if isinstance(handle, int):
+            return bytes(spans[handle][offset : offset + nbytes])
+        return struct.pack("<f", 1.0) * (nbytes // 4)
+
+    monkeypatch.setattr(forward, "expert_bytes", lambda width: 8 if int(width) == 4 else 16)
+    monkeypatch.setattr(forward, "device_buffer", allocate_sized)
+    monkeypatch.setattr(forward.memory, "map", map_span)
+    monkeypatch.setattr(forward.memory, "load", load)
+    monkeypatch.setattr(forward.memory, "store", lambda _handle, _offset, _data: None)
+    monkeypatch.setattr(forward.memory, "release", lambda _handle: None)
+    session = _Session()
+    host = Gemma4Runtime.__new__(Gemma4Runtime)
+    host._owner = "gemma4:1"
+    host.session = session
+    host._note_load = lambda _nbytes: None
+    host._load(tmp_path)
+    assert 64 not in sizes
+    assert bytes(spans[host.expert_widths]) == bytes([4]) * width_bytes
+    assert len(session.uploads) == 1
+    offsets = session.uploads[0]
+    assert int(offsets[0, 0]) == 0
+    assert int(offsets[0, 1]) == 8
+    assert int(offsets[LAYERS - 1, EXPERTS - 1]) == (EXPERTS - 1) * 8
