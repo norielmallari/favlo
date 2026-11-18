@@ -9,6 +9,7 @@ read into one stage, from the last index downward.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from qwen38_27b.metal41.attn import scratch_bytes
@@ -31,6 +32,11 @@ from qwen38_27b.metal41.layout import (
 
 _MTP_LOGITS_BYTES = 3 * VOCAB * 4
 from qwen38_27b.metal41.prefill import workspace_bytes
+
+# Manifest ``layout``. A missing value, and every value other than 2, keeps
+# the shard-order file and the seek-and-scatter fill. 2 is the dense prefix.
+LAYOUT_SCATTER = 1
+LAYOUT_PREFIX = 2
 
 _ARGMAX_GROUPS = (VOCAB + 255) // 256
 SAMPLE_KEEP = 32
@@ -123,9 +129,24 @@ def tensor_span(entry: dict) -> int:
     return count * 2
 
 
+def layout_version(manifest: dict | None) -> int:
+    """``2`` when ``manifest`` stores the dense prefix. Every other record stays the scatter fill."""
+    if not isinstance(manifest, dict):
+        return LAYOUT_SCATTER
+    raw = manifest.get("layout")
+    if type(raw) is int and raw == LAYOUT_PREFIX:
+        return LAYOUT_PREFIX
+    return LAYOUT_SCATTER
+
+
+def is_vision(name: str) -> bool:
+    """True when ``name`` is a vision-tower tensor."""
+    return name.startswith("visual.") or ".visual." in f".{name}."
+
+
 def language_ffn_layer(name: str) -> int | None:
     """The language feed-forward layer of ``name``, or None."""
-    if name.startswith("mtp.") or ".visual." in f".{name}." or name.startswith("visual."):
+    if name.startswith("mtp.") or is_vision(name):
         return None
     if not any(name.endswith(part) for part in _FFN_PARTS):
         return None
@@ -151,7 +172,7 @@ def group_tensors(tensors: dict[str, dict], layers: int = LAYERS) -> Group:
         if name.startswith("mtp."):
             mtp.append(item)
             continue
-        if ".visual." in f".{name}." or name.startswith("visual."):
+        if is_vision(name):
             continue
         layer = language_ffn_layer(name)
         if layer is None:
@@ -168,6 +189,82 @@ def group_tensors(tensors: dict[str, dict], layers: int = LAYERS) -> Group:
         tuple(mtp),
         tuple(tuple(sorted(items)) for items in per),
     )
+
+
+def resident_names(names: Iterable[str], layers: int = LAYERS) -> list[str]:
+    """Layout 2 file order: name-sorted text, name-sorted MTP, gate then up then down, vision last."""
+    text: list[str] = []
+    mtp: list[str] = []
+    per: list[list[str]] = [[] for _ in range(layers)]
+    vision: list[str] = []
+    for name in names:
+        if name.startswith("mtp."):
+            mtp.append(name)
+            continue
+        if is_vision(name):
+            vision.append(name)
+            continue
+        layer = language_ffn_layer(name)
+        if layer is None:
+            text.append(name)
+            continue
+        if layer < 0 or layer >= layers:
+            message = f"{name} is outside {layers} layers"
+            raise RuntimeError(message)
+        per[layer].append(name)
+    ordered = sorted(text)
+    ordered.extend(sorted(mtp))
+    for layer, items in enumerate(per):
+        if items:
+            ordered.extend(_layer_names(layer, items))
+    ordered.extend(sorted(vision))
+    return ordered
+
+
+def vision_suffix(tensors: dict[str, dict]) -> tuple[int, int]:
+    """File offset and length of the dense vision suffix."""
+    rows: list[tuple[int, int, str]] = []
+    others: list[tuple[int, int, str]] = []
+    for name, entry in tensors.items():
+        item = (int(entry["offset"]), tensor_span(entry), name)
+        if is_vision(name):
+            rows.append(item)
+        else:
+            others.append(item)
+    if not rows:
+        message = "this record has no vision tower"
+        raise RuntimeError(message)
+    rows.sort()
+    start = rows[0][0]
+    cursor = start
+    for offset, span, name in rows:
+        if offset != cursor:
+            message = f"{name} is not in the vision suffix"
+            raise RuntimeError(message)
+        cursor += span
+    end = cursor
+    for offset, span, name in others:
+        if offset < end and offset + span > start:
+            message = f"{name} sits in the vision suffix"
+            raise RuntimeError(message)
+        if offset >= end:
+            message = f"{name} is past the vision suffix"
+            raise RuntimeError(message)
+    return start, end - start
+
+
+def _layer_names(layer: int, names: list[str]) -> list[str]:
+    found: dict[str, str] = {}
+    for name in names:
+        for part in _FFN_PARTS:
+            if name.endswith(part):
+                found[part] = name
+                break
+    missing = [part for part in _FFN_PARTS if part not in found]
+    if missing:
+        message = f"layer {layer} is missing {missing[0]}"
+        raise RuntimeError(message)
+    return [found[part] for part in _FFN_PARTS]
 
 
 def layout_copies(

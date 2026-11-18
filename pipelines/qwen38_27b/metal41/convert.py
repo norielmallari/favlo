@@ -4,7 +4,9 @@ Every matrix is fp4 E2M1 with an E8M0 scale every 32 along K, except language
 feed-forward layers selected by ``--ffn-fp8``. Those three matrices are fp8
 E4M3. One-dimensional parameters and the depthwise convolution stay Metal ``half``.
 MTP matrices are Metal ``half`` with rows and K padded to 64. ``repack_mtp_half``
-rewrites a record that still stores MTP matrices as fp4 or fp8.
+rewrites a record that still stores MTP matrices as fp4 or fp8. A new quantize
+writes ``layout`` 2: name-sorted text, name-sorted MTP, layers as gate, up, down,
+then the vision tensors, back to back. An older manifest stays in shard order.
 """
 
 from __future__ import annotations
@@ -12,16 +14,26 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
 
+from qwen38_27b.metal41.budget import (
+    LAYOUT_PREFIX,
+    LAYOUT_SCATTER,
+    language_ffn_layer,
+    layout_version,
+    resident_names,
+    tensor_span,
+)
 from qwen38_27b.metal41.formats import (
     ffn_promote_count,
     pack_fp4_matrix,
     pack_fp8_matrix,
     promoted_layer_ids,
     relative_error,
+    stored_k,
     stored_rows,
 )
 
@@ -298,6 +310,205 @@ def _promoted(
     return chosen
 
 
+def _numel(shape: list[int]) -> int:
+    count = 1
+    for dim in shape:
+        count *= int(dim)
+    return count
+
+
+def _matrix_dims(shape: list[int]) -> tuple[int, int]:
+    if len(shape) == 1:
+        return 1, int(shape[0])
+    cols = 1
+    for dim in shape[1:]:
+        cols *= int(dim)
+    return int(shape[0]), cols
+
+
+def _keep_half_shape(name: str, shape: list[int]) -> bool:
+    if name.endswith("conv1d.weight") or name.endswith("A_log") or name.endswith("dt_bias"):
+        return True
+    if name.endswith(".bias") or len(shape) == 1:
+        return True
+    return False
+
+
+def _planned_span(name: str, shape: list[int], *, fp8: bool) -> int:
+    """Bytes ``_pack_array`` will write, including the intra-tensor scale pad."""
+    if _keep_half_shape(name, shape):
+        return _numel(shape) * 2
+    if name.startswith("mtp."):
+        if len(shape) == 1:
+            return int(shape[0]) * 2
+        rows, cols = _matrix_dims(shape)
+        return stored_rows(rows) * (((cols + 63) // 64) * 64) * 2
+    rows, cols = _matrix_dims(shape)
+    stored_r = stored_rows(rows)
+    stored_c = stored_k(cols)
+    data = stored_r * stored_c if fp8 else stored_r * (stored_c // 2)
+    scales = stored_r * (stored_c // 32)
+    return data + (_align(data) - data) + scales
+
+
+def _pack_array(name: str, array: np.ndarray, chosen: set[int]) -> tuple[bytes, dict]:
+    found = _language_ffn(name)
+    if _keep_half(name, array):
+        flat = array
+        if name.endswith("conv1d.weight") and array.ndim >= 2:
+            flat = array.reshape(array.shape[0], -1)
+        return _half_entry(flat)
+    if name.startswith("mtp."):
+        return _half_matrix_entry(array)
+    if found is not None and found[0] in chosen:
+        return _fp8_entry(array)
+    return _fp4_entry(array)
+
+
+def _promoted_fp8(name: str, chosen: set[int]) -> bool:
+    found = _language_ffn(name)
+    return found is not None and found[0] in chosen
+
+
+def _resume_matches(name: str, entry: dict, chosen: set[int]) -> None:
+    if _language_ffn(name) is not None:
+        expected = "fp8" if _promoted_fp8(name, chosen) else "fp4"
+        if entry.get("dtype") != expected:
+            message = f"{name} is stored as {entry.get('dtype')}"
+            raise RuntimeError(message)
+    if (
+        name.startswith("mtp.")
+        and len(entry.get("stored_shape") or ()) == 2
+        and entry.get("dtype") not in {"half", "f16"}
+    ):
+        message = f"{name} is stored as {entry.get('dtype')}"
+        raise RuntimeError(message)
+
+
+def _save_progress(path: Path, done: dict[str, dict], layout: int) -> None:
+    body: dict[str, object] = {"tensors": done}
+    if layout == LAYOUT_PREFIX:
+        body["layout"] = LAYOUT_PREFIX
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(body))
+    os.replace(temporary, path)
+
+
+def _tensor_shapes(src: Path, weight_map: dict[str, str]) -> dict[str, list[int]]:
+    shapes: dict[str, list[int]] = {}
+    for shard, names in _groups(weight_map).items():
+        header, _base = _header(src / shard)
+        for name in names:
+            info = header[name]
+            shapes[name] = [int(value) for value in info["shape"]]
+    return shapes
+
+
+def _record_layers(manifest: dict, names: Iterable[str]) -> int:
+    stored = manifest.get("layers")
+    if type(stored) is int and stored > 0:
+        return stored
+    highest = 0
+    for name in names:
+        layer = language_ffn_layer(str(name))
+        if layer is not None and layer + 1 > highest:
+            highest = layer + 1
+    return highest or 1
+
+
+def _quantize_scatter(
+    src: Path,
+    resident: Path,
+    weight_map: dict[str, str],
+    done: dict[str, dict],
+    chosen: set[int],
+    progress_path: Path,
+) -> dict[str, dict]:
+    """Append in safetensors shard order. Each tensor starts on a 128-byte boundary."""
+    for shard, names in sorted(_groups(weight_map).items()):
+        path = src / shard
+        header, base = _header(path)
+        print(f"shard {shard}", flush=True)
+        for name in names:
+            if name in done:
+                _resume_matches(name, done[name], chosen)
+                continue
+            array = _load(path, header, base, name)
+            print(f"  {name}", flush=True)
+            blob, body = _pack_array(name, array, chosen)
+            offset = _append(resident, blob)
+            done[name] = {**body, "file": "resident.bin", "offset": offset}
+            del array
+            _save_progress(progress_path, done, LAYOUT_SCATTER)
+    return done
+
+
+def _quantize_prefix(
+    src: Path,
+    resident: Path,
+    weight_map: dict[str, str],
+    done: dict[str, dict],
+    chosen: set[int],
+    layers: int,
+    progress_path: Path,
+) -> dict[str, dict]:
+    """Write ``resident.bin`` in layout 2 order with no gap between tensors."""
+    shapes = _tensor_shapes(src, weight_map)
+    order = resident_names(shapes, layers)
+    if set(order) != set(shapes):
+        message = "layout 2 dropped a tensor"
+        raise RuntimeError(message)
+    offsets: dict[str, int] = {}
+    spans: dict[str, int] = {}
+    cursor = 0
+    for name in order:
+        span = _planned_span(name, shapes[name], fp8=_promoted_fp8(name, chosen))
+        offsets[name] = cursor
+        spans[name] = span
+        cursor += span
+    if not done or not resident.is_file():
+        resident.write_bytes(b"")
+    with resident.open("r+b") as handle:
+        for shard, names in sorted(_groups(weight_map).items()):
+            path = src / shard
+            header, base = _header(path)
+            print(f"shard {shard}", flush=True)
+            for name in names:
+                if name in done:
+                    _resume_matches(name, done[name], chosen)
+                    if int(done[name]["offset"]) != offsets[name]:
+                        message = f"{name} offset does not match layout 2"
+                        raise RuntimeError(message)
+                    if resident.stat().st_size >= offsets[name] + spans[name]:
+                        continue
+                array = _load(path, header, base, name)
+                print(f"  {name}", flush=True)
+                blob, body = _pack_array(name, array, chosen)
+                if len(blob) != spans[name]:
+                    message = f"{name} packed {len(blob)} bytes and the layout planned {spans[name]}"
+                    raise RuntimeError(message)
+                handle.seek(offsets[name])
+                handle.write(blob)
+                done[name] = {**body, "file": "resident.bin", "offset": offsets[name]}
+                del array
+                _save_progress(progress_path, done, LAYOUT_PREFIX)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if resident.stat().st_size != cursor:
+        message = "resident length does not match layout 2"
+        raise RuntimeError(message)
+    placed = 0
+    for name in order:
+        if int(done[name]["offset"]) != placed:
+            message = f"{name} is not at byte {placed}"
+            raise RuntimeError(message)
+        placed += tensor_span(done[name])
+    if placed != cursor:
+        message = "layout 2 spans do not cover the resident file"
+        raise RuntimeError(message)
+    return done
+
+
 def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = None) -> Path:
     """Pack ``src``. A finished manifest with the same percentage is left in place."""
     src = src.expanduser().resolve()
@@ -325,48 +536,16 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
     chosen = set(promoted)
     progress_path = output / "quantize_progress.json"
     done: dict[str, dict] = {}
+    layout = LAYOUT_PREFIX
     if progress_path.is_file():
-        done = json.loads(progress_path.read_text()).get("tensors", {})
+        loaded = json.loads(progress_path.read_text())
+        done = loaded.get("tensors", {})
+        layout = layout_version(loaded)
     resident = output / "resident.bin"
-    for shard, names in sorted(_groups(weight_map).items()):
-        path = src / shard
-        header, base = _header(path)
-        print(f"shard {shard}", flush=True)
-        for name in names:
-            found = _language_ffn(name)
-            if name in done:
-                if found is not None:
-                    expected = "fp8" if found[0] in chosen else "fp4"
-                    if done[name].get("dtype") != expected:
-                        message = f"{name} is stored as {done[name].get('dtype')}"
-                        raise RuntimeError(message)
-                if (
-                    name.startswith("mtp.")
-                    and len(done[name].get("stored_shape") or ()) == 2
-                    and done[name].get("dtype") not in {"half", "f16"}
-                ):
-                    message = f"{name} is stored as {done[name].get('dtype')}"
-                    raise RuntimeError(message)
-                continue
-            array = _load(path, header, base, name)
-            print(f"  {name}", flush=True)
-            if _keep_half(name, array):
-                flat = array
-                if name.endswith("conv1d.weight") and array.ndim >= 2:
-                    flat = array.reshape(array.shape[0], -1)
-                blob, body = _half_entry(flat)
-            elif name.startswith("mtp."):
-                blob, body = _half_matrix_entry(array)
-            elif found is not None and found[0] in chosen:
-                blob, body = _fp8_entry(array)
-            else:
-                blob, body = _fp4_entry(array)
-            offset = _append(resident, blob)
-            done[name] = {**body, "file": "resident.bin", "offset": offset}
-            del array
-            temporary = progress_path.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps({"tensors": done}))
-            os.replace(temporary, progress_path)
+    if layout == LAYOUT_PREFIX:
+        done = _quantize_prefix(src, resident, weight_map, done, chosen, layers, progress_path)
+    else:
+        done = _quantize_scatter(src, resident, weight_map, done, chosen, progress_path)
     if count == 0:
         feed = "fp4"
     elif count == layers:
@@ -394,6 +573,8 @@ def quantize(src: Path, output: Path | None = None, *, ffn_fp8: float | None = N
         for name, body in done.items()
     ):
         manifest["mtp_weight"] = "half"
+    if layout == LAYOUT_PREFIX:
+        manifest["layout"] = LAYOUT_PREFIX
     temporary = manifest_path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(manifest))
     os.replace(temporary, manifest_path)
@@ -421,8 +602,6 @@ def repack_mtp_half(record: Path, source: Path) -> Path:
     drops the quantized bytes. Each new span is what the loader copies into memory.
     A record whose MTP matrices are already half is left in place.
     """
-    from qwen38_27b.metal41.budget import tensor_span
-
     record = record.expanduser().resolve()
     source = source.expanduser().resolve()
     manifest_path = record / "manifest.json"
@@ -462,7 +641,14 @@ def repack_mtp_half(record: Path, source: Path) -> Path:
     old_mtp = sum(tensor_span(tensors[name]) for name in pending)
     new_mtp = sum(len(blob) for blob, _body in packed.values())
     need = resident.stat().st_size - old_mtp + new_mtp + 4096
-    ordered = sorted(tensors, key=lambda name: int(tensors[name]["offset"]))
+    prefix = layout_version(manifest) == LAYOUT_PREFIX
+    if prefix:
+        ordered = resident_names(tensors, _record_layers(manifest, tensors))
+        if set(ordered) != set(tensors):
+            message = "layout 2 rewrite dropped a tensor"
+            raise RuntimeError(message)
+    else:
+        ordered = sorted(tensors, key=lambda name: int(tensors[name]["offset"]))
     fresh = record / "resident.bin.new"
     if free < need:
         # The temporary resident may sit on the BF16 volume when the record disk is full.
@@ -481,10 +667,11 @@ def repack_mtp_half(record: Path, source: Path) -> Path:
     cursor = 0
     with resident.open("rb") as src, fresh.open("wb") as dst:
         for name in ordered:
-            pad = _align(cursor) - cursor
-            if pad:
-                dst.write(b"\x00" * pad)
-                cursor += pad
+            if not prefix:
+                pad = _align(cursor) - cursor
+                if pad:
+                    dst.write(b"\x00" * pad)
+                    cursor += pad
             if name in packed:
                 blob, body = packed[name]
                 updated[name] = {**body, "file": "resident.bin", "offset": cursor}

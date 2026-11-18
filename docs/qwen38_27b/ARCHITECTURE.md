@@ -122,11 +122,21 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - The layer count is the largest whole number that does not exceed that percentage, so `20` is 12 layers. Those layers are the highest BF16-to-fp4 relative errors. Gate, up, and down move together.
 - `quantize` stores MTP matrices as Metal `half`, with rows and K padded to 64. One-dimensional MTP parameters stay Metal `half`.
 - `mtp-half` rewrites a record whose MTP matrices are still fp4 or fp8, then deletes those quantized bytes.
+- A new `quantize` sets `layout` to 2.
+- That `resident.bin` is name-sorted text, name-sorted MTP, layers 0 through the last as gate, up, then down, and the vision tensors as a dense suffix.
+- Those tensors sit back to back. The 128-byte gap between tensors is not written.
+- Each tensor is still its data, then `scale_pad`, then its scales. `scale_offset` is that pad.
+- `mtp-half` on `layout` 2 rewrites that same order and does not put the gap back.
+- A manifest with no `layout`, or a `layout` other than 2, keeps shard order and the 128-byte gap. `mtp-half` on that manifest still rewrites in file-offset order with the gap.
+- The loader for `layout` 2 reads the wired prefix in 8 MiB pieces. When MTP is resident that prefix is one read from the start of the file through the last wired layer. When MTP stays in the file, the text block is one read and the wired layer prefix is the next, and the MTP bytes are not read.
+- Unwired layers and the vision suffix stay out of that read.
+- An unwired layer is one read of its gate, up, and down into the stage.
+- A vision request reads the dense suffix into a second buffer.
+- An older manifest still seeks to each file offset and writes the span at its device offset.
 - The registry row written by `quantize` or `models add` sets `mtp` true and `mtp_depth` 3 when that row does not already store `mtp`.
-- The loader copies each new span from `resident.bin` into the device image.
 - The pack is a first rounding of the BF16 head, on the thesis that this raises the accept rate. That rate is not measured.
 - A partial percentage writes `ffn_error.json` before packing.
-- A finished directory has `manifest.json` with `complete: true`. Running quantize again on that directory returns it when the percentage matches. An unfinished directory resumes from `quantize_progress.json`.
+- A finished directory has `manifest.json` with `complete: true`. Running quantize again on that directory returns it when the percentage matches. An unfinished directory resumes from `quantize_progress.json`. A progress file with `layout` 2 resumes the dense writer. A progress file without it resumes the shard-order writer.
 - The format bound is [research/ffn-fp8-budget.md](research/ffn-fp8-budget.md).
 - Prefill restores each feed-forward matrix from that packed fp4 or fp8 record into one int8 stage.
 - Decode reads gate, up, and down with `gemv_fp4_x4` or `gemv_fp8_x4`.
@@ -156,7 +166,7 @@ A checkout outside `models/` stays. A `:instruct` or `:thinking` suffix deletes 
 
 Console and timing:
 
-- `serve` draws a load row while the wired tensors are read in file order, then the cache and the scratch are copied, then a prefill row that counts tokens as each chunk finishes.
+- `serve` draws a load row while the wired tensors are read, then the cache and the scratch are copied, then a prefill row that counts tokens as each chunk finishes. `layout` 2 reads the wired prefix. An older manifest reads each span in file order.
 - The decode row counts kept tokens and does not draw a bar.
 - Each count posts onto `favlo.host_progress`. That host thread builds the fact for the console queue, and the CLI thread paints it.
 - A row opens with `console.begin`, advances through `publish_count`, and closes with `format_rate`.
@@ -214,7 +224,9 @@ Context length and fit:
 Vision:
 
 - Vision tensors stay in the record file until a message contains an image.
-- That request copies the tower, runs its 27 blocks, and replaces the image placeholder with one token per 2×2 patch block.
+- `layout` 2 stores them as a dense suffix. That request reads the suffix.
+- An older manifest reads from the first vision offset through the last. That range can include bytes that are not vision tensors.
+- That request runs the tower's 27 blocks and replaces the image placeholder with one token per 2×2 patch block.
 - The tower resizes a still so both sides are multiples of 32 and the pixel count stays inside the checkpoint processor, 65536 through 16777216.
 - A chat image is an `image_url` part: an `http` or `https` URL, a `data:` URL, or base64. PNG, JPEG, GIF, and WebP decode to RGB.
 - `detail` `low` uses the 65536-pixel budget. `auto`, `high`, and `original` use the full range.

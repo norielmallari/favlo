@@ -36,6 +36,7 @@ from qwen38_27b.metal41.budget import (
     SAMPLE_KEEP,
     choose_wire,
     group_tensors,
+    layout_version,
     same_weight_image,
     startup_bytes,
 )
@@ -212,6 +213,7 @@ class Qwen38Runtime:
             message = f"{self.root.name} is not a finished record"
             raise RuntimeError(message)
         self.tensors: dict[str, dict] = self.manifest["tensors"]
+        self._layout = layout_version(self.manifest)
         self._record_mtp = "mtp.fc.weight" in self.tensors
         self._mtp_wanted = bool(mtp) and self._record_mtp
         self._group = group_tensors(self.tensors)
@@ -546,6 +548,7 @@ class Qwen38Runtime:
             self._group,
             plan,
             self.session._load_note,
+            layout=self._layout,
         )
         self.weights = image
         self.resident = image.buffer

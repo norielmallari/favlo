@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from qwen38_27b.metal41.budget import tensor_span
+from qwen38_27b.metal41.budget import LAYOUT_PREFIX, layout_version, tensor_span, vision_suffix
 from qwen38_27b.metal41.vision import IMAGE_PAD, MAX_PIXELS, MIN_PIXELS, prepare_image
 
 _HIDDEN = 1152
@@ -630,14 +630,18 @@ def _record(runtime: Any) -> dict[str, tuple[Any, int, dict]]:
     if not names:
         message = "this record has no vision tower"
         raise RuntimeError(message)
-    spans = []
-    for name in names:
-        entry = tensors[name]
-        start = int(entry["offset"])
-        spans.append((start, start + tensor_span(entry)))
-    origin = min(start for start, _end in spans)
-    end = max(stop for _start, stop in spans)
-    blob = runtime.weights.load_span(runtime.session, origin, end - origin)
+    manifest = getattr(runtime, "manifest", None) or {}
+    if layout_version(manifest) == LAYOUT_PREFIX:
+        origin, nbytes = vision_suffix(tensors)
+    else:
+        spans = []
+        for name in names:
+            entry = tensors[name]
+            start = int(entry["offset"])
+            spans.append((start, start + tensor_span(entry)))
+        origin = min(start for start, _end in spans)
+        nbytes = max(stop for _start, stop in spans) - origin
+    blob = runtime.weights.load_span(runtime.session, origin, nbytes)
     table = {
         name: (blob, int(tensors[name]["offset"]) - origin, tensors[name])
         for name in names
