@@ -11,10 +11,13 @@ from typing import Any
 
 import numpy as np
 
+from favlo.memory import device_buffer, memory
 from z_image.metal41.formats import as_float32, pack_fp4, pack_int8, relative_error, restore_int8
 from z_image.metal41.metal import Gpu
 
 _PAD = {"cap_pad_token", "x_pad_token"}
+_CHUNK = 8 << 20
+_PLANES = {"fp4", "int8", "f16"}
 
 
 class Plane:
@@ -175,30 +178,21 @@ def load(
     planes: dict[str, Plane] = {}
     items = _manifest(path)["tensors"]
     for index, (name, entry) in enumerate(items.items()):
-        raw = (path / entry["file"]).read_bytes()
+        plane = entry["plane"]
+        if plane not in _PLANES:
+            message = f"unknown plane {plane} on {name}"
+            raise RuntimeError(message)
+        data, data_bytes = _read_plane(gpu, path / entry["file"])
         scale = None
         scale_bytes = 0
+        if plane in {"fp4", "int8"}:
+            scale, scale_bytes = _read_plane(gpu, path / entry["scale"])
         stored = int(entry.get("stored_k") or 0)
         logical = int(entry.get("logical_k") or 0)
         padded = int(entry.get("padded_n") or 0)
-        if entry["plane"] == "fp4":
-            scale_raw = (path / entry["scale"]).read_bytes()
-            scale_bytes = len(scale_raw)
-            data = gpu.keep(gpu.upload(np.frombuffer(raw, dtype=np.uint8)))
-            scale = gpu.keep(gpu.upload(np.frombuffer(scale_raw, dtype=np.uint8)))
-        elif entry["plane"] == "int8":
-            scale_raw = (path / entry["scale"]).read_bytes()
-            scale_bytes = len(scale_raw)
-            data = gpu.keep(gpu.upload(np.frombuffer(raw, dtype=np.int8)))
-            scale = gpu.keep(gpu.upload(np.frombuffer(scale_raw, dtype=np.float32)))
-        elif entry["plane"] == "f16":
-            data = gpu.keep(gpu.upload(np.frombuffer(raw, dtype=np.float16)))
-        else:
-            message = f"unknown plane {entry['plane']} on {name}"
-            raise RuntimeError(message)
         planes[name] = Plane(
             name,
-            entry["plane"],
+            plane,
             tuple(int(dim) for dim in entry["shape"]),
             logical,
             stored,
@@ -207,12 +201,35 @@ def load(
             padded,
         )
         if on_bytes is not None:
-            on_bytes(len(raw) + scale_bytes)
+            on_bytes(data_bytes + scale_bytes)
         elif index % 100 == 0:
             print(f"load {index}/{len(items)}", flush=True)
     if on_bytes is None:
         print(f"load {len(items)} tensors", flush=True)
     return planes
+
+
+def _read_plane(gpu: Gpu, path: Path) -> tuple[Any, int]:
+    """Read one packed file into the shared span ``Gpu.upload`` allocates.
+
+    The span is at least 16 bytes. Only the file's real size is read, in
+    pieces of 8 MiB. The bytes stay packed.
+    """
+    nbytes = path.stat().st_size
+    buf = device_buffer(gpu._owner, nbytes, zero=False)
+    gpu._owned.append(buf)
+    if nbytes:
+        view = memory.map(buf, 0, nbytes)
+        with path.open("rb", buffering=0) as source:
+            offset = 0
+            while offset < nbytes:
+                step = min(_CHUNK, nbytes - offset)
+                wrote = source.readinto(view[offset : offset + step])
+                if not wrote:
+                    message = f"{path.name} ended before {nbytes} bytes"
+                    raise RuntimeError(message)
+                offset += wrote
+    return gpu.keep(buf), nbytes
 
 
 def _manifest(path: Path) -> dict[str, Any]:

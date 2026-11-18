@@ -35,6 +35,11 @@ Served pipelines import this package. `z_image_turbo` re-exports many modules un
 - Biases, norms, and the two pad tokens stay float16.
 - The caller supplies `format_id` and `source_repo`. When those are omitted, the pack defaults match the Turbo line.
 
+## Load
+
+- `load` reads each `weights/{key}.fp4`, `.i8`, or `.f16` file into its own shared span. A sibling `.scale` is a second span.
+- The read is the file's real size, in pieces of 8 MiB. The span is at least 16 bytes. Serve does not dequant those bytes.
+
 ## Schedule
 
 - The scheduler is FlowMatchEulerDiscreteScheduler.

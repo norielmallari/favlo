@@ -1124,7 +1124,7 @@ def test_int8_quantize_fills_an_empty_image_default(
     assert registry["media"]["image"] == "Z-Image-Turbo-int8"
 
 
-def test_load_counts_bytes_and_skips_the_print(tmp_path, capsys) -> None:
+def test_load_counts_bytes_and_skips_the_print(tmp_path, capsys, monkeypatch) -> None:
     weights = tmp_path / "weights"
     weights.mkdir()
     (weights / "a.f16").write_bytes(b"\x00\x01")
@@ -1146,10 +1146,30 @@ def test_load_counts_bytes_and_skips_the_print(tmp_path, capsys) -> None:
     }
     (tmp_path / "manifest.json").write_text(json.dumps(body), encoding="utf-8")
     assert weight_bytes(tmp_path) == 5
+
+    def allocate(owner: str, nbytes: int, *, zero: bool = False) -> bytearray:
+        del owner, zero
+        return bytearray(max(int(nbytes), 16))
+
+    def mapped(handle: bytearray, offset: int, nbytes: int) -> memoryview:
+        return memoryview(handle)[int(offset) : int(offset) + int(nbytes)]
+
+    from z_image_turbo.metal41 import record as packed
+
+    assert packed._CHUNK == 8 << 20
+    monkeypatch.setattr("z_image_turbo.metal41.record.device_buffer", allocate)
+    monkeypatch.setattr("z_image_turbo.metal41.record.memory.map", mapped)
+    monkeypatch.setattr("z_image_turbo.metal41.record._CHUNK", 1)
     seen: list[int] = []
     planes = load(tmp_path, _Upload(), on_bytes=seen.append)
     assert seen == [2, 3]
     assert set(planes) == {"a", "b"}
+    assert bytes(planes["a"].data[:2]) == b"\x00\x01"
+    assert bytes(planes["a"].data[2:]) == bytes(14)
+    assert bytes(planes["b"].data[:1]) == b"\xab"
+    assert bytes(planes["b"].data[1:]) == bytes(15)
+    assert bytes(planes["b"].scale[:2]) == b"\xcd\xce"
+    assert planes["b"].data is not planes["b"].scale
     assert capsys.readouterr().out == ""
     load(tmp_path, _Upload())
     assert capsys.readouterr().out == "load 0/2\nload 2 tensors\n"
@@ -1200,10 +1220,11 @@ class _Plain:
 
 
 class _Upload:
-    def keep(self, value):
-        return value
+    def __init__(self) -> None:
+        self._owner = "z-image:test"
+        self._owned: list[bytearray] = []
 
-    def upload(self, value):
+    def keep(self, value):
         return value
 
 
