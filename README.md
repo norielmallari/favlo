@@ -19,13 +19,12 @@ Favlo is a runtime for language models, embeddings, and media.
 
 ## Requirements
 
-- Apple Silicon
-- Metal 4.1
+- Apple Silicon with Metal 4.1, or Windows with an NVIDIA graphics driver
 - 16 GB of memory
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
 
-Shaders compile at Metal 4.1. A machine that cannot compile that version cannot run a pipeline. 8 GB is not enough to run a model capable of real-world agentic workflows.
+Apple Silicon compiles shaders at Metal 4.1. A machine that cannot compile that version cannot run a Metal pipeline. Windows loads `engine.dll` from the checkout. The NVIDIA driver supplies the CUDA runtime. The CUDA Toolkit and Visual Studio are only for rebuilding that DLL. 8 GB is not enough to run a model capable of real-world agentic workflows.
 
 ## Install
 

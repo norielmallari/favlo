@@ -50,6 +50,10 @@ Adding a model adds `pipelines/<model>/metal41/`, the runtime package, a `docs/<
 
 The listener runs one request. A language-model package does not fuse a whole layer. An image, video, music, or voice package may place several kernels of one generation in one command buffer and may fuse those kernels. The Neural Engine may run a module. A missing Metal kernel stays missing. It is not replaced by a host GEMV, a CPU matmul, or any other stand-in forward.
 
+## Windows
+
+Windows loads the `engine.dll` that ships in the checkout. Open and serve do not compile it. The NVIDIA driver supplies `nvcuda.dll` and `nvcudart_hybrid64.dll`. An agent does not install the NVIDIA CUDA Toolkit, `nvcc`, or Visual Studio to open a pipeline or serve a model. Rebuilding `engine.dll` is a separate step, and that step is the one that uses the toolkit.
+
 ## Open items
 
 When listing decisions still open for the operator, number each item uniquely in that reply (`1.`, `2.`, …). Do not reuse a number for a different item in the same list. For every numbered item, list the **options** first, then mark which of those options is the **recommendation**. An item with a single viable path still lists that path as the only option and marks it as recommended.

@@ -440,3 +440,57 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - A request effort still wins and does not swap the sampling card.
 - The precise-coding preset (temperature 0.6, top-p 0.95, top-k 20, presence penalty 0) stays in `sampling.py`.
 - The registry has no third variant name, so registration does not store it.
+
+## CUDA
+
+As-built note for the CUDA runtime of `qwen36_35b_a3b`. The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (Apache License 2.0). Windows open loads `engine.dll` from this package. That file ships in the checkout. The NVIDIA driver supplies `nvcuda.dll` and `nvcudart_hybrid64.dll`. Rebuilding `engine.dll`, and `kernels`, uses the NVIDIA CUDA Toolkit. A pip wheel is not the toolkit.
+
+`favlo --qwen36_35b_a3b` on Windows loads `qwen36_35b_a3b.cuda`. Apple Silicon loads the Metal entry of the same stem. The package does not import the Metal package.
+
+```text
+uv run favlo --qwen36_35b_a3b --help
+uv run favlo --qwen36_35b_a3b setup
+uv run favlo --qwen36_35b_a3b kernels
+```
+
+`kernels` compiles for compute capability 8.6 and later. The cubins are sm_86, sm_89, and sm_120, plus sm_120 PTX. A device below 8.6 is refused. The check dispatches one `mma.sync.aligned.m16n8k32` `s8 * s8 + s32` tile, one int4 nibble dot, and one pinned host-to-device copy.
+
+## Weights
+
+The activation planes, the Gated DeltaNet state, and the key/value record use the same sizes as the Metal runtime. The weight planes do not. Dense language matrices are int8 with one fp32 scale per output row. Both operands of an integer GEMM use that integer type. The epilogue multiplies the int32 dot by the row scale and by the activation scale.
+
+Routed experts use an int8 budget of 10%. The pool is 10,240 experts (40 layers, 256 each). The count is the largest whole number that does not exceed 10%, which is 1,024. Those experts are int8. The other 9,216 are int4, low nibble first, one fp32 scale per output row. Rank is the max of the int4 relative RMS of the gate-up plane and the down plane. An equal score keeps the lower index. Gate-up is `[1024, 2048]` and down is `[2048, 512]`. They move together.
+
+| Image | Bytes |
+|---|---:|
+| int8 expert | 3,158,016 |
+| int4 expert | 1,585,152 |
+| Atlas, 1,024 int8 and 9,216 int4 | 17,842,569,216 |
+| Resident int8 experts | 3,233,808,384 |
+| Device stage, 8 int4 images | 12,681,216 |
+
+Norms, the router, the shared-expert coefficient, convolution taps, `A_log`, and `dt_bias` stay fp16. The shared expert, the token embedding, and `lm_head` are int8. MTP weights are not packed. An image part is refused. Vision tensors are packed into `vision.bin` and are not uploaded.
+
+The record directory is `models/Qwen3.6-35B-A3B-int8-e10`. `--expert-int8 0` writes `models/Qwen3.6-35B-A3B-int4` and stores every routed expert as int4.
+
+## Cache and state
+
+The key/value cache is int8. One head at one position is 256 codes plus one E8M0 scale byte per 32 channels, 264 bytes. Ten full-attention layers and two key/value heads, key and value, are 10,560 bytes per token. The attend kernel reads this plane. It does not keep a second fp16 copy. Gated DeltaNet state is fp32, 30 layers of 32 heads of `128×128`, 62,914,560 bytes. Convolution history is fp16, three taps of the 8192-wide mixed vector, 1,474,560 bytes.
+
+RMSNorm multiplies the normalized row by one plus the weight. Gated DeltaNet scales the normalized query by `1/sqrt(128)` and leaves the key at unit length. Activation scratch holds one 512-token prefill tile. Gated DeltaNet state, convolution history, and the logits stay one token. Prefill projects that tile with `mma.m16n8k32`. Two int8 products of one activation share a quantize. Prefill attention scores the int8 cache with the same tile and mixes values with `mma.m16n8k16`. Decode int8 products are one warp per row. The dense half of each layer is captured once and replayed. The router and the eight expert products stay outside that graph, because the expert ids change every token. The cache opens at 2048 tokens, the floor, and stops at 131072. A longer prompt grows it by 2048 and releases int4 cache slots to pay for the new planes. The opening fit check is the live free memory from the driver, minus a 256 MiB hold-back. The registry key `device_budget` lowers that budget. The int4 cache reads free memory from the engine runtime, because a second runtime does not see this context's allocations.
+
+## Atlas
+
+The 1,024 int8 expert images are uploaded once and stay in VRAM for the open. The 9,216 int4 images stay in host RAM. That host span is registered read-only after it is written, and the open refuses when the driver will not lock it. The hot path does not read the layer files again.
+
+The language weights, the resident int8 experts, the floor key/value cache, and the activation scratch take their opening first. The int8 images are a fixed cost. The bytes the engine still reports free, minus a 32 MiB margin, hold int4 images. A repeat reads that copy. A miss streams the image from the locked host span into a free slot, or into the least recently used slot once the pool is full. Growing the context frees whole int4 slots and discards the copies they held. The eight-slot stage is the path when that cache cannot be allocated. An int8 image uses an int8 activation. An int4 image uses an int4 activation. The shared expert stays in the resident int8 record on the device.
+
+The router, the top 8, and the mix weights stay on the device. Prefill reads every id in the tile back once per layer. Each distinct expert is copied once. The gate products of that tile launch together, then the down products, and each product is reused for every token that selected the expert. An int8 id uses the resident device pointer and does not copy. Decode still reads eight ids for the one token. The prefill loop publishes the completed token count once per tile. The decode token loop does not.
+
+## Forward
+
+Gated DeltaNet decays the state by \(\alpha\), then adds \(\beta(v - Sk)k^\top\), and reads with the query. \(\alpha = \exp(-\exp(A_{\log})\mathrm{softplus}(a + \mathrm{dt\_bias}))\) and \(\beta = \mathrm{sigmoid}(b)\). The mixed projection is a causal depthwise convolution of width 4, then SiLU. Query and key are L2-normalized. Sixteen key heads repeat onto thirty-two value heads. The output norm multiplies the stored weight, and the output gate is SiLU.
+
+Full attention is every fourth layer, starting at layer 3. Each head's 512 `q_proj` rows split into 256 query rows and 256 gate rows. Partial RoPE covers the first 64 channels. Channel \(i\) rotates with channel \(i+32\). The frequency base is \(10^7\). The attend kernel is online softmax over the int8 cache. The query is scaled by \(1/\sqrt{256}\). The gate is a sigmoid. Temperature 0 is argmax on the device after the presence penalty. A positive temperature draws from a top list of at most 64 on the device. The draft model is off.
+
+The text coding agent on this int8 opening, MTP off, vision off, and thinking on, is recorded in [research/coding-text-cuda.md](research/coding-text-cuda.md). The same agent with thinking off is recorded in [research/coding-instruct-cuda.md](research/coding-instruct-cuda.md).

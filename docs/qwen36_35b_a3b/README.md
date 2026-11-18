@@ -4,14 +4,15 @@ Summary for the `qwen36_35b_a3b` language pipeline. Kernels, the packed record, 
 
 - `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
 - After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
-- `kernels`, `quantize`, `mtp-fp8`, `bf16`, `complete`, and `models` require `favlo --qwen36_35b_a3b`, which loads `qwen36_35b_a3b.metal41`.
+- `kernels`, `quantize`, `mtp-fp8`, `bf16`, `complete`, and `models` require `favlo --qwen36_35b_a3b`. Apple Silicon loads `qwen36_35b_a3b.metal41`. Windows loads `qwen36_35b_a3b.cuda`.
 
 - The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B).
 - Those weights are under the Apache License, Version 2.0.
 - Registration sets `default_variant` to `thinking` and `mtp_depth` to 3 unless the request overrides them.
 - The served context window is 131072 tokens.
 - The key/value plane is half. `fp8_e4m3`, `e2m1`, and `f32` are the other widths.
-- The default packed record is `Qwen3.6-35B-A3B-fp8-e20`.
+- The default packed record on Apple Silicon is `Qwen3.6-35B-A3B-fp8-e20`.
+- On Windows the packed record is `Qwen3.6-35B-A3B-int8-e10`.
 
 After changing an open-time registry field, unload the resident model:
 
@@ -25,8 +26,9 @@ How to download, pack, and talk to `qwen36_35b_a3b`. The kernel contract is [ARC
 
 ### What you need
 
-- Apple Silicon
-- Metal 4.1
+- Apple Silicon, or Windows with an NVIDIA graphics driver
+- Metal 4.1 on Apple Silicon
+- Windows loads `engine.dll` from the checkout. The NVIDIA driver supplies the CUDA runtime.
 - 16 GB of memory
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
