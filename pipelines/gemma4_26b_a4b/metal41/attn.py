@@ -335,6 +335,7 @@ def _gather_half(
             _u32(runtime, cols_pad),
             _u32(runtime, length),
             _u32(runtime, transposed),
+            _u32(runtime, runtime.capacity),
         ],
         (cols_pad, heads, 1),
         (32, 1, 1),

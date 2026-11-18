@@ -25,8 +25,8 @@ from gemma4_26b_a4b.metal41.prefix import (
     global_nbytes,
     local_nbytes,
     pack_global,
+    pack_head_major,
     pack_local,
-    pack_token_major,
 )
 from gemma4_26b_a4b.metal41.promote import promotion_count, select_promoted
 
@@ -173,7 +173,7 @@ def test_bf16_reader_slices_one_expert(tmp_path: Path) -> None:
     assert abs(float(loaded[0, 0]) - 3.0) < 0.05
 
 
-def test_token_major_pack_matches_the_host_planes() -> None:
+def test_head_major_pack_matches_the_host_planes() -> None:
     count = 4
     rng = np.random.default_rng(0)
     local_k = rng.standard_normal((25, 8, count, 256)).astype(np.float16)
@@ -190,8 +190,8 @@ def _packed_layers(plane: np.ndarray) -> bytes:
     layers, heads, count, dim = plane.shape
     parts: list[bytes] = []
     for layer in range(layers):
-        token_major = np.ascontiguousarray(np.transpose(plane[layer], (1, 0, 2)))
-        parts.append(pack_token_major(token_major.tobytes(), heads, dim, count))
+        packed = np.ascontiguousarray(plane[layer]).tobytes()
+        parts.append(pack_head_major(packed, heads, dim, count))
     return b"".join(parts)
 
 

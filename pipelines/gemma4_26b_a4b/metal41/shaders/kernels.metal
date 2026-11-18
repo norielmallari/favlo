@@ -1404,7 +1404,7 @@ kernel void attend(
 
 // Every query in the chunk. One simd owns one query head and walks that
 // head's keys. The score is the raw dot. A query at position pos0 + token
-// attends keys [start, pos0 + token].
+// attends keys [start, pos0 + token]. The half cache is [head, capacity, dim].
 kernel void attend_span(
     device const float* queries [[buffer(0)]],
     device const half* keys [[buffer(1)]],
@@ -1417,6 +1417,7 @@ kernel void attend_span(
     constant uint& pos0 [[buffer(8)]],
     constant uint& count [[buffer(9)]],
     constant uint& window [[buffer(10)]],
+    constant uint& capacity [[buffer(11)]],
     uint lane [[thread_index_in_simdgroup]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
@@ -1443,9 +1444,8 @@ kernel void attend_span(
     for (uint i = 0u; i < 16u; ++i) {
         outv[i] = 0.0f;
     }
-    uint kv_span = key_heads * dim;
     for (uint key = start; key < length; ++key) {
-        uint base = (key * key_heads + key_head) * dim + lane * width;
+        uint base = (key_head * capacity + key) * dim + lane * width;
         float partial = 0.0f;
         for (uint i = 0u; i < width; i += 4u) {
             half4 packed = *(device const half4*)(keys + base + i);
@@ -1477,6 +1477,7 @@ kernel void attend_span(
 }
 
 // Decode attention. Simdgroups split the key range and merge one online softmax.
+// The half cache is [head, capacity, dim].
 kernel void attend_decode(
     device const float* queries [[buffer(0)]],
     device const half* keys [[buffer(1)]],
@@ -1489,6 +1490,7 @@ kernel void attend_decode(
     constant uint& pos0 [[buffer(8)]],
     constant uint& count [[buffer(9)]],
     constant uint& window [[buffer(10)]],
+    constant uint& capacity [[buffer(11)]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]],
     uint simds [[simdgroups_per_threadgroup]],
@@ -1531,7 +1533,7 @@ kernel void attend_decode(
         key1 = length;
     }
     for (uint key = key0; key < key1; ++key) {
-        uint base = (key * key_heads + key_head) * dim + lane * width;
+        uint base = (key_head * capacity + key) * dim + lane * width;
         float partial = 0.0f;
         for (uint i = 0u; i < width; i += 4u) {
             half4 packed = *(device const half4*)(keys + base + i);
@@ -1593,6 +1595,7 @@ kernel void attend_decode(
 }
 
 // Four consecutive queries share each key load. Head dim is 256.
+// The half cache is [head, capacity, dim].
 kernel void attend_span4(
     device const float* queries [[buffer(0)]],
     device const half* keys [[buffer(1)]],
@@ -1605,6 +1608,7 @@ kernel void attend_span4(
     constant uint& pos0 [[buffer(8)]],
     constant uint& count [[buffer(9)]],
     constant uint& window [[buffer(10)]],
+    constant uint& capacity [[buffer(11)]],
     uint lane [[thread_index_in_simdgroup]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
@@ -1651,7 +1655,7 @@ kernel void attend_span4(
         float partial1 = 0.0f;
         float partial2 = 0.0f;
         float partial3 = 0.0f;
-        uint base = (key * key_heads + key_head) * dim + lane * width;
+        uint base = (key_head * capacity + key) * dim + lane * width;
         for (uint i = 0u; i < width && i < 8u; i += 4u) {
             half4 packed = *(device const half4*)(keys + base + i);
             partial0 += qreg[0][i] * float(packed.x);
@@ -2223,6 +2227,7 @@ kernel void kv_gather_half(
     constant uint& cols_pad [[buffer(6)]],
     constant uint& length [[buffer(7)]],
     constant uint& transposed [[buffer(8)]],
+    constant uint& capacity [[buffer(9)]],
     uint2 tgid [[threadgroup_position_in_grid]],
     uint2 local [[thread_position_in_threadgroup]])
 {
@@ -2235,7 +2240,7 @@ kernel void kv_gather_half(
     uint blocks = dim >> 5;
     uint kpos = key0 + key;
     bool live = key < cols && kpos < length;
-    device const half* rec = cache + ((ulong)kpos * heads + head) * dim;
+    device const half* rec = cache + ((ulong)head * capacity + kpos) * dim;
     ulong plane = transposed == 0u ? (ulong)cols_pad * dim : (ulong)dim * cols_pad;
     device half* dest = destination + (ulong)head * plane;
     for (uint block = 0u; block < blocks; ++block) {
@@ -2432,13 +2437,16 @@ kernel void store_kv(
     constant uint& heads [[buffer(2)]],
     constant uint& dim [[buffer(3)]],
     constant uint& token [[buffer(4)]],
+    constant uint& capacity [[buffer(5)]],
     uint index [[thread_position_in_grid]])
 {
     uint count = heads * dim;
     if (index >= count) {
         return;
     }
-    cache[token * count + index] = half(source[index]);
+    uint head = index / dim;
+    uint channel = index - head * dim;
+    cache[((ulong)head * capacity + token) * dim + channel] = half(source[index]);
 }
 
 kernel void store_kv_rows(
@@ -2448,6 +2456,7 @@ kernel void store_kv_rows(
     constant uint& dim [[buffer(3)]],
     constant uint& token0 [[buffer(4)]],
     constant uint& tokens [[buffer(5)]],
+    constant uint& capacity [[buffer(6)]],
     uint index [[thread_position_in_grid]])
 {
     uint count = heads * dim;
@@ -2456,7 +2465,9 @@ kernel void store_kv_rows(
     }
     uint token = index / count;
     uint local = index - token * count;
-    cache[(token0 + token) * count + local] = half(source[index]);
+    uint head = local / dim;
+    uint channel = local - head * dim;
+    cache[((ulong)head * capacity + (token0 + token)) * dim + channel] = half(source[index]);
 }
 
 // Block-peak E8M0 and nearest E4M3. A tie keeps the even magnitude code.

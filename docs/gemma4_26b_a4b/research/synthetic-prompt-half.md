@@ -114,3 +114,14 @@ The banner was `kv half mtp off depth 3 thinking off decode 128`, and every meas
 | 10000 | 884.93 tok/s (10000 tok in 11.30 s) | 27.38 tok/s (128 tok in 4.68 s) | 633.79 tok/s (10128 tok in 15.98 s) |
 
 The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "935.02 OR 938.28 OR 1046.11 OR 884.93 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.
+
+19 November 2026. `half` keys and values are `[head, capacity, dim]`. The same protocol run, nonce `f19a7c20`, recorded:
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 860.83 tok/s (512 tok in 0.59 s) | 33.75 tok/s (128 tok in 3.79 s) | 146.12 tok/s (640 tok in 4.38 s) |
+| 1024 | 898.65 tok/s (1024 tok in 1.14 s) | 33.92 tok/s (128 tok in 3.77 s) | 234.62 tok/s (1152 tok in 4.91 s) |
+| 4096 | 956.07 tok/s (4096 tok in 4.28 s) | 33.27 tok/s (128 tok in 3.85 s) | 519.56 tok/s (4224 tok in 8.13 s) |
+| 10000 | 902.08 tok/s (10000 tok in 11.09 s) | 29.28 tok/s (128 tok in 4.37 s) | 655.11 tok/s (10128 tok in 15.46 s) |
+
+The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "860.83 OR 898.65 OR 956.07 OR 902.08 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.

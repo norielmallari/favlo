@@ -151,7 +151,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - The eight routed experts of a token launch from the ids the router wrote on device, one `gemv_fp4_at` and one `gemv_fp8_at` per projection, and the token does not read those ids back.
 - A prefill chunk is 1024 tokens on `fp8_e4m3` and 640 tokens on `half`. It submits every ten layers, so the prefill count advances while the device runs.
 - On `fp8_e4m3`, prefill scores every key head of a tile with `matmul_half_64_batch` and decode scores them with `matmul_half_batch`.
-- On `half`, a 640-token prefill span gathers the token-major cache and scores it with `matmul_half_64_batch`. Any other span stays on `attend_span4` or `attend_span`. One token stays on `attend_span4` or `attend_decode`.
+- On `half`, a 640-token prefill span gathers one head's contiguous keys and scores them with `matmul_half_64_batch`. Any other span stays on `attend_span4` or `attend_span`. One token stays on `attend_span` or `attend_decode`.
 - Expert prefill groups the routed rows on device.
 - The slot tables and the matmul grid stay there, so the host does not read the ids.
 - Expert prefill reads the stored image.
@@ -256,12 +256,13 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - The value mix is the same product.
 - A prefill chunk commits the command buffer every 1024 keys so the window server can run.
 - A decode step keeps those dispatches in the layer buffer.
-- `half` stores Metal halves in the same token-major layout.
+- `half` stores Metal halves as `[head, capacity, dim]`. One head's tokens are contiguous.
+- The prefix tag for that plane is `half-head`. The file stores the filled slice `[head, count, dim]`.
 - A 640-token span gathers that plane with `kv_gather_half` and scores it with `matmul_half_64_batch`.
 - Any other `half` span stays on `attend_span4` or `attend_span`.
 - The cache starts at 256 tokens and doubles.
-- Growth waits for the open prefill chunk, then copies the live tokens into the new buffer.
-- The prefix file stores local keys and values, and global keys and values, in the live cache layout for the loaded plane.
+- Growth waits for the open prefill chunk. `fp8_e4m3` copies the filled prefix. `half` copies each head's filled tokens onto the new stride.
+- The prefix file stores local keys and values, and global keys and values, for the loaded plane. `half` is the filled `[head, count, dim]` slice. `fp8_e4m3` is the filled token-major prefix.
 - Those planes are copied on the shared blit queue. The copy drains its autorelease pool before it returns.
 - Capture copies the filled tokens from the device buffers, and install writes those bytes back.
 - An exact-length file is not sampled.

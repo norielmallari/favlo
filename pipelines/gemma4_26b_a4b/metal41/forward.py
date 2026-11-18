@@ -315,7 +315,7 @@ class Gemma4Runtime:
                     default_prefix_dir(),
                     model="gemma4_26b_a4b",
                     digest=checkpoint_digest(path),
-                    tag=self.kv_cache,
+                    tag="half-head" if self._plain_kv else self.kv_cache,
                     budget=DEFAULT_BUDGET,
                 ),
                 RuntimeAdapter(self),
@@ -591,9 +591,14 @@ class Gemma4Runtime:
 
     def _read_cache(self, handle: object, heads: int, dim: int, count: int) -> np.ndarray:
         if self._plain_kv:
-            raw = memory.load(handle, 0, count * heads * dim * 2)
-            values = np.frombuffer(raw, dtype=np.float16).astype(np.float32)
-            return values.reshape(count, heads, dim).transpose(1, 0, 2)
+            out = np.zeros((heads, count, dim), dtype=np.float32)
+            row = count * dim * 2
+            stride = self.capacity * dim * 2
+            for head in range(heads):
+                raw = memory.load(handle, head * stride, row)
+                piece = np.frombuffer(raw, dtype=np.float16).astype(np.float32)
+                out[head] = piece.reshape(count, dim)
+            return out
         record = kv_record_bytes(dim, self.kv_cache)
         raw = memory.load(handle, 0, count * heads * record)
         packed = np.frombuffer(raw, dtype=np.uint8).reshape(count, heads, record)
@@ -615,11 +620,14 @@ class Gemma4Runtime:
 
     def _write_cache(self, handle: object, plane: np.ndarray, heads: int, dim: int) -> None:
         # plane is [heads, count, dim]
-        ordered = np.ascontiguousarray(plane.transpose(1, 0, 2).astype(np.float32))
-        count = int(ordered.shape[0])
+        count = int(plane.shape[1])
         if self._plain_kv:
-            memory.store(handle, 0, ordered.astype(np.float16).tobytes())
+            half = np.ascontiguousarray(plane.astype(np.float16))
+            stride = self.capacity * dim * 2
+            for head in range(heads):
+                memory.store(handle, head * stride, np.ascontiguousarray(half[head]).tobytes())
             return
+        ordered = np.ascontiguousarray(plane.transpose(1, 0, 2).astype(np.float32))
         staging = self.session.zeros(count * heads * dim * 4)
         memory.store(staging, 0, ordered.tobytes())
         self.session.encode(
@@ -858,6 +866,7 @@ class Gemma4Runtime:
                         self.session._u32(self.filled),
                         self.session._u32(count),
                         self.session._u32(window),
+                        self.session._u32(self.capacity),
                     ],
                     groups,
                     (32, 1, 1),
@@ -874,6 +883,7 @@ class Gemma4Runtime:
                         self.session._u32(self.filled),
                         self.session._u32(count),
                         self.session._u32(window),
+                        self.session._u32(self.capacity),
                     ],
                     (count, Q_HEADS, 1),
                     (32, 1, 1),
@@ -1087,6 +1097,7 @@ class Gemma4Runtime:
                     self.session._u32(heads),
                     self.session._u32(dim),
                     self.session._u32(self.filled),
+                    self.session._u32(self.capacity),
                 ],
                 *self._grid(heads * dim),
             )
@@ -1113,6 +1124,7 @@ class Gemma4Runtime:
                     self.session._u32(dim),
                     self.session._u32(self.filled),
                     self.session._u32(count),
+                    self.session._u32(self.capacity),
                 ],
                 *self._grid(count * heads * dim),
             )
@@ -1402,6 +1414,7 @@ class Gemma4Runtime:
                     self.session._u32(self.filled),
                     self.session._u32(1),
                     self.session._u32(window),
+                    self.session._u32(self.capacity),
                 ],
                 (1, Q_HEADS, 1),
                 (32 * simds, 1, 1),
@@ -1798,7 +1811,13 @@ class Gemma4Runtime:
             return None
         record = kv_record_bytes(dim, self.kv_cache)
         fresh = self.session.zeros(capacity * heads * record)
-        if self.filled > 0:
+        if self.filled > 0 and self._plain_kv:
+            row = self.filled * dim * 2
+            old_stride = self.capacity * dim * 2
+            new_stride = capacity * dim * 2
+            for head in range(heads):
+                memory.copy(handle, head * old_stride, fresh, head * new_stride, row)
+        elif self.filled > 0:
             memory.copy(handle, 0, fresh, 0, self.filled * heads * record)
         memory.release(handle)
         return fresh

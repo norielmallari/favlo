@@ -772,14 +772,14 @@ def _check_i8_prefill(session: Session) -> None:
 
 
 def _check_prefix_pack(session: Session) -> None:
-    from gemma4_26b_a4b.metal41.prefix import half_plane_nbytes, pack_token_major
+    from gemma4_26b_a4b.metal41.prefix import half_plane_nbytes, pack_head_major
 
     rng = np.random.default_rng(0)
     cases = ((17, 8, 256), (4, 8, 256), (130, 2, 512), (64, 2, 512))
     for count, heads, dim in cases:
-        raw = np.ascontiguousarray(rng.standard_normal((count, heads, dim)).astype(np.float16))
+        raw = np.ascontiguousarray(rng.standard_normal((heads, count, dim)).astype(np.float16))
         raw.reshape(-1)[0] = np.float16(0)
-        expect = pack_token_major(raw.tobytes(), heads, dim, count)
+        expect = pack_head_major(raw.tobytes(), heads, dim, count)
         nbytes = half_plane_nbytes(count, heads, dim)
         source = session.upload(raw)
         packed = session.zeros(nbytes)

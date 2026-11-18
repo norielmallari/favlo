@@ -1,19 +1,18 @@
 """Key and value prefix for Gemma 4.
 
 Local and global regions each store keys and values. The filled length is
-``count`` tokens. The live cache is Metal ``half`` or ``fp8_e4m3``, and the
-prefix file stores that same device layout for positions ``0 .. count-1``.
-``half`` keys and values are token-major ``[count, heads, dim]``. ``fp8_e4m3``
-stores one E4M3 record per head per token (``dim`` codes plus ``dim/32`` E8M0
-scales) in the same token-major order. An exact-length prefix is not a sample:
-the next token still has to be stepped.
+``count`` tokens. ``half`` lives on device as ``[head, capacity, dim]``. The
+file stores the filled slice ``[head, count, dim]``. ``fp8_e4m3`` stores one
+E4M3 record per head per token (``dim`` codes plus ``dim/32`` E8M0 scales) in
+token-major order. An exact-length prefix is not a sample: the next token
+still has to be stepped.
 """
 
 from __future__ import annotations
 
 from favlo.memory import device_buffer, memory
 from favlo.prefix import PrefixHeader, Region, read_regions
-from gemma4_26b_a4b.metal41.atlas import kv_mode, plane_bytes
+from gemma4_26b_a4b.metal41.atlas import kv_mode, plain_cache, plane_bytes
 from gemma4_26b_a4b.metal41.geometry import (
     GLOBAL_DIM,
     GLOBAL_HEADS,
@@ -55,14 +54,13 @@ def global_nbytes(count: int, mode: str | None = "half") -> int:
 
 
 def _plane_host(plane: object, layers: int, heads: int, count: int, dim: int) -> bytes:
-    """One plane in the live device order: each layer is ``[count, heads, dim]``."""
+    """One plane as ``[head, count, dim]`` for each layer."""
     import numpy as np
 
     values = _as_half(plane, (layers, heads, count, dim))
     parts: list[bytes] = []
     for layer in range(layers):
-        token_major = np.ascontiguousarray(np.transpose(values[layer], (1, 0, 2)))
-        parts.append(token_major.tobytes())
+        parts.append(np.ascontiguousarray(values[layer]).tobytes())
     return b"".join(parts)
 
 
@@ -80,13 +78,13 @@ def pack_global(keys: object, values: object, count: int) -> bytes:
     )
 
 
-def pack_token_major(raw: object, heads: int, dim: int, count: int) -> bytes:
-    """Pack one ``[count, heads, dim]`` Metal half plane in device order."""
+def pack_head_major(raw: object, heads: int, dim: int, count: int) -> bytes:
+    """Pack one ``[heads, count, dim]`` Metal half plane."""
     if count <= 0 or heads <= 0:
         return b""
     import numpy as np
 
-    plane = np.ndarray((count, heads, dim), dtype=np.float16, buffer=raw)
+    plane = np.ndarray((heads, count, dim), dtype=np.float16, buffer=raw)
     return np.ascontiguousarray(plane).tobytes()
 
 
@@ -122,6 +120,7 @@ class RuntimeAdapter:
             LOCAL_HEADS,
             LOCAL_DIM,
             mode,
+            self.runtime.capacity,
         )
         cursor = _copy_handles_out(
             scratch,
@@ -131,6 +130,7 @@ class RuntimeAdapter:
             LOCAL_HEADS,
             LOCAL_DIM,
             mode,
+            self.runtime.capacity,
         )
         cursor = _copy_handles_out(
             scratch,
@@ -140,6 +140,7 @@ class RuntimeAdapter:
             GLOBAL_HEADS,
             GLOBAL_DIM,
             mode,
+            self.runtime.capacity,
         )
         _copy_handles_out(
             scratch,
@@ -149,6 +150,7 @@ class RuntimeAdapter:
             GLOBAL_HEADS,
             GLOBAL_DIM,
             mode,
+            self.runtime.capacity,
         )
         return [
             Region(LOCAL, memory.load(scratch, 0, local_n)),
@@ -176,6 +178,7 @@ class RuntimeAdapter:
             LOCAL_HEADS,
             LOCAL_DIM,
             mode,
+            self.runtime.capacity,
         )
         cursor = _copy_handles_in(
             packed,
@@ -185,6 +188,7 @@ class RuntimeAdapter:
             LOCAL_HEADS,
             LOCAL_DIM,
             mode,
+            self.runtime.capacity,
         )
         cursor = _copy_handles_in(
             packed,
@@ -194,6 +198,7 @@ class RuntimeAdapter:
             GLOBAL_HEADS,
             GLOBAL_DIM,
             mode,
+            self.runtime.capacity,
         )
         _copy_handles_in(
             packed,
@@ -203,6 +208,7 @@ class RuntimeAdapter:
             GLOBAL_HEADS,
             GLOBAL_DIM,
             mode,
+            self.runtime.capacity,
         )
         self.runtime.filled = count
         return True
@@ -318,12 +324,21 @@ def _copy_handles_out(
     heads: int,
     dim: int,
     mode: str | None = "half",
+    capacity: int = 0,
 ) -> int:
     nbytes = plane_bytes(count, heads, dim, mode)
+    stride_tokens = capacity if capacity > count else count
     for handle in handles:
         if handle is None:
             continue
-        if nbytes:
+        if nbytes and plain_cache(mode) and stride_tokens != count:
+            row = count * dim * 2
+            stride = stride_tokens * dim * 2
+            cursor = offset
+            for head in range(heads):
+                memory.copy(handle, head * stride, dest, cursor, row)
+                cursor += row
+        elif nbytes:
             memory.copy(handle, 0, dest, offset, nbytes)
         offset += nbytes
     return offset
@@ -337,12 +352,21 @@ def _copy_handles_in(
     heads: int,
     dim: int,
     mode: str | None = "half",
+    capacity: int = 0,
 ) -> int:
     nbytes = plane_bytes(count, heads, dim, mode)
+    stride_tokens = capacity if capacity > count else count
     for handle in handles:
         if handle is None:
             continue
-        if nbytes:
+        if nbytes and plain_cache(mode) and stride_tokens != count:
+            row = count * dim * 2
+            stride = stride_tokens * dim * 2
+            cursor = offset
+            for head in range(heads):
+                memory.copy(source, cursor, handle, head * stride, row)
+                cursor += row
+        elif nbytes:
             memory.copy(source, offset, handle, 0, nbytes)
         offset += nbytes
     return offset
@@ -357,8 +381,7 @@ def _unpack_plane(
     out = np.zeros((layers, heads, count, dim), dtype=np.float16)
     for layer in range(layers):
         piece = np.frombuffer(blob[layer * one : (layer + 1) * one], dtype=np.float16)
-        token_major = piece.reshape(count, heads, dim)
-        out[layer] = np.transpose(token_major, (1, 0, 2))
+        out[layer] = piece.reshape(heads, count, dim)
     return out.copy()
 
 

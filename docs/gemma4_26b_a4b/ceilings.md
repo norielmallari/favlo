@@ -18,7 +18,7 @@ The divisor is the 2 GiB streaming read on an M5 Pro with 48 GB: 7093.5 µs, 302
 - Dense projections and the tied embedding are fp8.
 - Decode reads them in `gemv_fp8` and `embed_fp8`.
 - The router is one Metal half `matmul_half` of 8 by 128 by 2816.
-- The default cache is `half`. A 640-token prefill span gathers that cache and scores it with `matmul_half_64_batch` on tiles of 256 keys. Any other prefill span stays on `attend_span4` or `attend_span`. Decode stays `attend_decode`.
+- The default cache is `half`. Keys and values are `[head, capacity, dim]`. A 640-token prefill span gathers one head's contiguous keys and scores them with `matmul_half_64_batch` on tiles of 256 keys. Any other prefill span stays on `attend_span4` or `attend_span`. Decode stays `attend_decode`.
 - `fp8_e4m3` dequantizes every key head with `kv_dequant_heads` before those same matmuls.
 - A value is an RMSNorm with no scale.
 - A global value is that norm of the key projection and is stored apart from the keys.
