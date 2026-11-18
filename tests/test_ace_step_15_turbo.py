@@ -597,3 +597,155 @@ def test_delete_removes_the_packed_model_when_the_checkout_is_gone(
     assert gone == 0
     assert not kept.exists()
     assert outside.is_dir()
+
+
+class _Span:
+    def __init__(self, nbytes: int) -> None:
+        self.storage = bytearray(nbytes)
+
+    def contents(self) -> _Span:
+        return self
+
+    def as_buffer(self, count: int) -> memoryview:
+        return memoryview(self.storage)[:count]
+
+
+class _HostGpu:
+    def __init__(self) -> None:
+        self.uploads: list[object] = []
+
+    def buffer(self, nbytes: int) -> _Span:
+        return _Span(int(nbytes))
+
+    def resident(self, buf: _Span) -> _Span:
+        return buf
+
+    def upload(self, array: object) -> object:
+        self.uploads.append(array)
+        return array
+
+
+def test_a_short_weight_read_names_the_file(tmp_path: Path) -> None:
+    from ace_step_15_turbo.metal41.record import _read_file
+
+    path = tmp_path / "00000.fp8"
+    path.write_bytes(b"abc")
+    with pytest.raises(OSError, match="00000.fp8 stopped at 3 of 8"):
+        _read_file(_Span(8), path, 8)
+
+
+def test_load_reads_each_weight_file_into_its_span(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from ace_step_15_turbo.metal41 import record
+
+    assert record._CHUNK == 8 * 1024 * 1024
+    monkeypatch.setattr(record, "_CHUNK", 8)
+    codes = bytes((index * 3) % 251 for index in range(20))
+    scales = b"\x7f\x80\x81"
+    fp8 = bytes((index * 5) % 251 for index in range(10))
+    fp8_scale = b"\x01"
+    bias = bytes(range(16))
+    folder = tmp_path / "pack"
+    weights = folder / "weights"
+    weights.mkdir(parents=True)
+    (weights / "00000.fp4").write_bytes(codes)
+    (weights / "00000.e8m0").write_bytes(scales)
+    (weights / "00001.fp8").write_bytes(fp8)
+    (weights / "00001.e8m0").write_bytes(fp8_scale)
+    (weights / "00002.f32").write_bytes(bias)
+    index = {
+        "tensors": {
+            "decoder.conv1.weight": {
+                "kind": "fp4",
+                "rows": 2,
+                "cols": 4,
+                "padded_rows": 2,
+                "padded_cols": 256,
+                "transpose": True,
+                "file": "weights/00000.fp4",
+                "scale": "weights/00000.e8m0",
+            },
+            "dit.layers.0.mlp.gate_proj.weight": {
+                "kind": "fp8",
+                "rows": 4,
+                "cols": 8,
+                "padded_rows": 4,
+                "padded_cols": 256,
+                "transpose": False,
+                "file": "weights/00001.fp8",
+                "scale": "weights/00001.e8m0",
+            },
+            "dit.layers.0.mlp.gate_proj.bias": {
+                "kind": "f32",
+                "rows": 4,
+                "cols": 1,
+                "padded_rows": 4,
+                "padded_cols": 1,
+                "shape": [4],
+                "file": "weights/00002.f32",
+            },
+        }
+    }
+    (folder / "index.json").write_text(json.dumps(index), encoding="utf-8")
+    reads: list[tuple[str, int]] = []
+    original = Path.open
+
+    def open_spy(self: Path, mode: str = "r", *args: object, **kwargs: object):
+        handle = original(self, mode, *args, **kwargs)
+        if "b" not in mode:
+            return handle
+
+        class _Count:
+            def readinto(self, window: memoryview) -> int:
+                got = handle.readinto(window)
+                reads.append((name, int(got or 0)))
+                return int(got or 0)
+
+            def read(self, count: int) -> bytes:
+                data = handle.read(count)
+                reads.append((name, len(data)))
+                return data
+
+            def __enter__(self) -> _Count:
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                handle.close()
+                return False
+
+        name = self.name
+        return _Count()
+
+    monkeypatch.setattr(Path, "open", open_spy)
+    gpu = _HostGpu()
+    planes = record.load(gpu, folder)
+    conv = planes["decoder.conv1.weight"]
+    gate = planes["dit.layers.0.mlp.gate_proj.weight"]
+    gate_bias = planes["dit.layers.0.mlp.gate_proj.bias"]
+    assert bytes(conv.data.storage) == codes
+    assert bytes(conv.scale.storage) == scales
+    assert conv.data is not conv.scale
+    assert conv.kind == "fp4"
+    assert conv.rows == 2
+    assert conv.cols == 4
+    assert conv.inner == 256
+    assert conv.bias is None
+    assert bytes(gate.data.storage) == fp8
+    assert bytes(gate.scale.storage) == fp8_scale
+    assert gate.kind == "fp8"
+    assert gate.bias is gate_bias.data
+    assert bytes(gate_bias.data.storage) == bias
+    assert gate_bias.scale is None
+    assert gate_bias.kind == "f32"
+    assert gpu.uploads == []
+    expected = len(codes) + len(scales) + len(fp8) + len(fp8_scale) + len(bias)
+    assert record.weight_bytes(folder) == expected
+    stored = json.loads((folder / "index.json").read_text(encoding="utf-8"))
+    assert stored["tensors"]["decoder.conv1.weight"]["transpose"] is True
+    fp4_reads = [size for file_name, size in reads if file_name == "00000.fp4"]
+    assert sum(fp4_reads) == len(codes)
+    assert max(fp4_reads) <= 8
+    assert len(fp4_reads) >= 3

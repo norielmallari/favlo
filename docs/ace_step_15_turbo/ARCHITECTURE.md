@@ -29,6 +29,12 @@ DiT MLP packing:
 - The chosen layers are `mlp_error.json`, and the manifest records `mlp_fp8_percent` and `mlp_fp8_layers`.
 - The scores are [research/dit-mlp-fp4-error.md](research/dit-mlp-fp4-error.md).
 
+`load` reads each packed weight file into the shared span its kernel binds.
+
+- The read is sequential, in pieces of 8 MiB.
+- Codes, float32 vectors, and E8M0 scales each have their own span.
+- `index.json` stores `transpose`. Load leaves that field unread.
+
 Dtypes:
 
 - Norms, biases, AdaLN tables, Snake parameters, and the silence latent stay float32 on device.

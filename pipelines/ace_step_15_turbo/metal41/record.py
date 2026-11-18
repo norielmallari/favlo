@@ -283,8 +283,42 @@ def _write_json(path: Path, body: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+_CHUNK = 8 * 1024 * 1024
+
+
+def _read_file(buf: Any, path: Path, nbytes: int) -> None:
+    """Read ``path`` into a shared span, in pieces of 8 MiB."""
+    view = memoryview(buf.contents().as_buffer(nbytes))
+    with path.open("rb", buffering=0) as src:
+        offset = 0
+        while offset < nbytes:
+            piece = min(_CHUNK, nbytes - offset)
+            window = view[offset : offset + piece]
+            try:
+                got = src.readinto(window)
+            except (TypeError, BufferError):
+                data = src.read(piece)
+                if not data:
+                    got = 0
+                else:
+                    window[: len(data)] = data
+                    got = len(data)
+            if not got:
+                message = f"{path.name} stopped at {offset} of {nbytes}"
+                raise OSError(message)
+            offset += got
+
+
+def _resident_file(gpu: Any, path: Path) -> Any:
+    nbytes = path.stat().st_size
+    buf = gpu.buffer(nbytes)
+    if nbytes:
+        _read_file(buf, path, nbytes)
+    return gpu.resident(buf)
+
+
 def weight_bytes(folder: Path) -> int:
-    """Bytes ``load`` uploads from a packed record."""
+    """Bytes ``load`` reads from a packed record."""
     index = json.loads((folder / "index.json").read_text(encoding="utf-8"))
     total = 0
     seen: set[str] = set()
@@ -299,22 +333,22 @@ def weight_bytes(folder: Path) -> int:
 
 
 def load(gpu: Any, folder: Path) -> dict[str, Plane]:
-    """Upload the packed record. Weights stay resident."""
+    """Read each weight file into the shared span its kernel binds.
+
+    Codes, float32 vectors, and E8M0 scales each land in their own span.
+    ``index.json`` may store ``transpose``. This function does not read it.
+    """
     index = json.loads((folder / "index.json").read_text(encoding="utf-8"))
     planes: dict[str, Plane] = {}
     for key, meta in index["tensors"].items():
         kind = meta["kind"]
+        data = _resident_file(gpu, folder / meta["file"])
         if kind in ("fp4", "fp8"):
-            packed = np.fromfile(folder / meta["file"], dtype=np.uint8)
-            scales = np.fromfile(folder / meta["scale"], dtype=np.uint8)
-            data = gpu.resident(gpu.upload(packed))
-            scale = gpu.resident(gpu.upload(scales))
+            scale = _resident_file(gpu, folder / meta["scale"])
             planes[key] = Plane(
                 data, scale, int(meta["rows"]), int(meta["cols"]), int(meta["padded_cols"]), kind
             )
         else:
-            values = np.fromfile(folder / meta["file"], dtype=np.float32)
-            data = gpu.resident(gpu.upload(values))
             planes[key] = Plane(data, None, int(meta["rows"]), 1, 1, "f32")
     for key, plane in list(planes.items()):
         if not key.endswith(".weight"):
