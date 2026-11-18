@@ -33,6 +33,7 @@ uv run favlo --wan22_i2v umt5 quantize --format wan
 ```
 
 - Writes `models/google/umt5-xxl-int8`.
+- Writes `weights.bin` and `planes.json` beside the `.npy` and `.npz` files.
 - Copies every tokenizer file into that directory.
 - Removes the BF16 checkout.
 - A clip never opens the BF16 file.

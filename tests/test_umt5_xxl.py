@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from umt5_xxl.metal41.formats import pack_int8, relative_error, restore_int8
-from umt5_xxl.metal41.quantize import _copy_tokenizer, _drop_source
+from umt5_xxl.metal41.quantize import _copy_tokenizer, _drop_source, _write_planes, quantize
 from umt5_xxl.metal41.source import ENCODER_FILE, TOKENIZER_FILE, pack_dir, source_dir
 from umt5_xxl.metal41.weights import hf_key, open_weights
 
@@ -193,6 +193,142 @@ def test_commands_quantize_writes_the_pack(
     assert seen["src"] == tmp_path / "enc.safetensors"
     assert seen["tokenizer"] == tmp_path / "tok"
     assert seen["drop"] is False
+
+
+def test_quantize_writes_aligned_planes_beside_the_npz(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from umt5_xxl.metal41 import quantize as quantize_mod
+
+    source = tmp_path / "src"
+    pack = tmp_path / "pack"
+    source.mkdir()
+    encoder = source / "encoder.safetensors"
+    _write_bf16_safetensors(encoder, _tiny_encoder())
+    (source / TOKENIZER_FILE).write_text("{}", encoding="utf-8")
+    quantize(
+        src=encoder,
+        dest=pack,
+        encoder_format="hf",
+        tokenizer_src=source,
+        drop_source=False,
+    )
+    planes = json.loads((pack / "planes.json").read_text(encoding="utf-8"))
+    blob = (pack / "weights.bin").read_bytes()
+    assert [plane["name"] for plane in planes] == _plane_names()
+    assert not blob.startswith(b"\x93NUMPY")
+    assert not blob.startswith(b"PK")
+    cursor = 0
+    for plane in planes:
+        assert list(plane) == ["name", "dtype", "offset", "nbytes", "shape"]
+        offset = int(plane["offset"])
+        nbytes = int(plane["nbytes"])
+        assert offset % 128 == 0
+        assert offset >= cursor
+        assert blob[cursor:offset] == b"\x00" * (offset - cursor)
+        assert blob[offset : offset + nbytes] == _stored_plane(pack, str(plane["name"]))
+        assert nbytes == len(_stored_plane(pack, str(plane["name"])))
+        cursor = offset + nbytes
+    assert cursor == len(blob)
+    assert (pack / "blocks.0.attn.o.weight.npz").is_file()
+    assert (pack / "blocks.0.attn.q.weight.npz").is_file()
+    assert (pack / TOKENIZER_FILE).is_file()
+    assert (pack / "manifest.json").is_file()
+    with np.load(pack / "blocks.0.attn.q.weight.npz") as stored:
+        assert "perm" in stored.files
+    by_name = {str(plane["name"]): plane for plane in planes}
+    assert by_name["embed"]["dtype"] == "float16"
+    assert by_name["blocks.0.norm1"]["dtype"] == "float16"
+    assert by_name["blocks.0.attn.q.weight.packed"]["dtype"] == "int8"
+    assert by_name["blocks.0.attn.q.weight.scales"]["dtype"] == "float32"
+    assert by_name["blocks.0.attn.q.weight.bias"]["dtype"] == "float16"
+    assert by_name["blocks.0.pos"]["dtype"] == "float16"
+    assert by_name["blocks.0.norm2"]["dtype"] == "float16"
+    assert by_name["norm"]["dtype"] == "float16"
+    pos = np.load(pack / "blocks.0.pos.npy")
+    assert pos.dtype == np.float16
+    assert by_name["blocks.0.pos"]["nbytes"] == int(pos.nbytes)
+    assert by_name["blocks.0.pos"]["shape"] == [int(dim) for dim in pos.shape]
+    first_blob = blob
+    first_planes = (pack / "planes.json").read_text(encoding="utf-8")
+
+    def fail_pack(*_args, **_kwargs):
+        raise AssertionError("codes were recomputed")
+
+    monkeypatch.setattr(quantize_mod, "pack_int8", fail_pack)
+    quantize(
+        src=encoder,
+        dest=pack,
+        encoder_format="hf",
+        tokenizer_src=source,
+        drop_source=False,
+    )
+    assert (pack / "weights.bin").read_bytes() == first_blob
+    assert (pack / "planes.json").read_text(encoding="utf-8") == first_planes
+
+
+def test_raw_planes_leave_no_blob_when_a_file_is_missing(tmp_path: Path) -> None:
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    np.save(pack / "embed.npy", np.zeros((2, 2), dtype=np.float16))
+    with pytest.raises(FileNotFoundError, match="norm1"):
+        _write_planes(pack)
+    assert {path.name for path in pack.iterdir()} == {"embed.npy"}
+
+
+def _plane_names() -> list[str]:
+    names = ["embed"]
+    fields = ("packed", "scales", "bias")
+    for layer in range(24):
+        prefix = f"blocks.{layer}"
+        names.append(f"{prefix}.norm1")
+        for stem in ("attn.q", "attn.k", "attn.v", "attn.o"):
+            names.extend(f"{prefix}.{stem}.weight.{field}" for field in fields)
+        names.append(f"{prefix}.pos")
+        names.append(f"{prefix}.norm2")
+        for stem in ("ffn.gate.0", "ffn.fc1", "ffn.fc2"):
+            names.extend(f"{prefix}.{stem}.weight.{field}" for field in fields)
+    names.append("norm")
+    return names
+
+
+def _stored_plane(pack: Path, name: str) -> bytes:
+    for field in ("packed", "scales", "bias"):
+        suffix = f".{field}"
+        if name.endswith(suffix):
+            stem = name[: -len(suffix)]
+            with np.load(pack / f"{stem}.npz") as loaded:
+                return np.ascontiguousarray(loaded[field]).tobytes()
+    array = np.load(pack / f"{name}.npy", mmap_mode="r")
+    try:
+        return np.ascontiguousarray(array).tobytes()
+    finally:
+        del array
+
+
+def _tiny_encoder() -> dict[str, np.ndarray]:
+    tensors = {
+        "token_embedding.weight": np.arange(9, dtype=np.float32).reshape(3, 3),
+        "norm.weight": np.linspace(0.1, 0.8, 8, dtype=np.float32),
+    }
+    for layer in range(24):
+        prefix = f"blocks.{layer}"
+        tensors[f"{prefix}.norm1.weight"] = np.full(8, 0.1 * (layer + 1), dtype=np.float32)
+        tensors[f"{prefix}.norm2.weight"] = np.full(8, -0.05 * (layer + 1), dtype=np.float32)
+        pos = np.arange(8, dtype=np.float32).reshape(2, 4) + layer
+        tensors[f"{prefix}.pos_embedding.embedding.weight"] = pos
+        for suffix in (
+            "attn.q",
+            "attn.k",
+            "attn.v",
+            "attn.o",
+            "ffn.gate.0",
+            "ffn.fc1",
+            "ffn.fc2",
+        ):
+            matrix = np.linspace(-1.0, 1.0, 15, dtype=np.float32).reshape(3, 5)
+            tensors[f"{prefix}.{suffix}.weight"] = matrix + layer
+    return {hf_key(name): value for name, value in tensors.items()}
 
 
 def _write_bf16_safetensors(path: Path, tensors: dict[str, np.ndarray]) -> None:

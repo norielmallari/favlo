@@ -29,9 +29,41 @@ uv run favlo --wan22_i2v umt5 quantize --format wan
 - Output rows pad to 128. K pads to 256.
 - Each linear is one `.npz` with codes, scales, bias, and extents.
 - The token embedding (`embed.npy`), RMSNorm weights, and relative position buckets stay float16.
+- `weights.bin` and `planes.json` are written beside those files. The contract is [below](#weightsbin).
 - Tokenizer files are copied into the pack directory.
 - `manifest.json` records weight kind and the worst relative RMS name and value.
 - A clip never opens the BF16 file.
+
+## weights.bin
+
+`quantize` writes `weights.bin` and `planes.json` in the pack directory. The `.npy` files and the `.npz` files stay.
+
+- `weights.bin` is raw array bytes. It has no zip header and no `.npy` header.
+- `planes.json` is a JSON list in file order. That list is the only index.
+- Each object has `name`, `dtype`, `offset`, `nbytes`, and `shape`, in that key order.
+- `offset` is a multiple of 128. The first plane starts at 0.
+- Bytes between planes are `0`. Those pad bytes are not included in `nbytes`.
+- `nbytes` is the array size in bytes. `shape` is that array's shape.
+- `dtype` is the NumPy dtype name: `float16`, `int8`, or `float32`.
+- The embedding, layer norms, position tables, and the final norm are the `.npy` payloads.
+- The position table is the float16 array in `blocks.{layer}.pos.npy`. It is not cast to float32.
+- A linear contributes `packed` (int8), `scales` (float32), and `bias` (float16).
+- `perm` is not copied. `kind` and the extent fields stay in the `.npz`.
+- Tokenizer files and `manifest.json` are not in the blob.
+
+Plane order:
+
+- `embed`
+- For layer 0, then 1, through 23:
+  - `blocks.{layer}.norm1`
+  - `blocks.{layer}.attn.q.weight.packed`, `.scales`, `.bias`
+  - the same three names for `attn.k`, `attn.v`, and `attn.o`
+  - `blocks.{layer}.pos`
+  - `blocks.{layer}.norm2`
+  - the same three names for `ffn.gate.0`, `ffn.fc1`, and `ffn.fc2`
+- `norm`
+
+`blocks.0.attn.q.weight.packed` is `packed` in `blocks.0.attn.q.weight.npz`. `blocks.0.pos` is the payload of `blocks.0.pos.npy`. `embed` is the payload of `embed.npy`. `norm` is the payload of `norm.npy`.
 
 ## Registry
 
