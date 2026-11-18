@@ -55,6 +55,7 @@ from wan22_i2v.metal41.vae import (
     encode_peak_bytes,
     vae_device_bytes,
     vae_path,
+    vae_present,
 )
 from wan22_i2v.metal41.video import write_avi
 
@@ -106,7 +107,7 @@ class Runtime:
         )
         peaks = [dit]
         path = vae_path()
-        if path.is_file():
+        if vae_present():
             device = vae_device_bytes(str(path.resolve()))
             peaks.append(device + encode_peak_bytes(height, width, lat_t, lat_h, lat_w))
             window = _pixel_bytes(min(4, frames), height, width)
@@ -165,7 +166,7 @@ class Runtime:
         text_layers = _LAYERS if _text_encoder(int(self.config["text_dim"]), self.umt5) else 0
         if cfg and text_layers:
             text_layers *= 2
-        vae_file = vae_path().is_file()
+        vae_file = vae_present()
         own = progress is None
         if progress is None:
             progress = ClipProgress(
@@ -248,7 +249,7 @@ class Runtime:
                         ),
                     )
                 weights = vae_path()
-                vae = WanVAE(weights) if weights.is_file() else None
+                vae = WanVAE(weights) if vae_present() else None
                 if hold is not None and hold.noise is not None:
                     if hold.cond is None or hold.mask is None:
                         message = "the paused encode is missing a latent"
@@ -522,7 +523,7 @@ class Runtime:
         """Require each stage of this clip fits before the first device commit."""
         self._fit_dit_step(frames, width, height, lat_t, lat_h, lat_w, tokens)
         path = vae_path()
-        if path.is_file():
+        if vae_present():
             self._fit_vae_encode(frames, width, height, lat_t, lat_h, lat_w, path)
             self._fit_vae_decode(frames, width, height, lat_t, lat_h, lat_w)
 
@@ -574,7 +575,7 @@ class Runtime:
         room = self._ledger_room()
         resident_latent_frames(room, frames, height, width, lat_t)
         path = vae_path()
-        if not path.is_file():
+        if not vae_present():
             return
         need = vae_device_bytes(str(path.resolve())) + decode_peak_bytes(
             frames, height, width, lat_t, lat_h, lat_w, room
@@ -722,7 +723,11 @@ def expert_bytes(path: Path, *, high: Path | None = None, low: Path | None = Non
     for folder in folders:
         if not folder.is_dir():
             continue
-        total = sum(item.stat().st_size for item in folder.iterdir() if item.is_file())
+        blob = folder / "weights.bin"
+        if blob.is_file() and (folder / "planes.json").is_file():
+            total = blob.stat().st_size
+        else:
+            total = sum(item.stat().st_size for item in folder.iterdir() if item.is_file())
         largest = max(largest, total)
     return largest
 

@@ -54,9 +54,11 @@ On the packed int8 record that sum is:
 - It raises again at each stage boundary when the ledger no longer covers that stage.
 
 - The VAE drops its device weights after encode and after decode.
-- Host checkpoint bytes load only for encode and decode.
-- Each expert matrix is read, copied to the device, and dropped before the next file.
-- The host copy is one matrix.
+- Host checkpoint bytes load only for encode and decode when the raw VAE pack is absent.
+- When `high/weights.bin` and `high/planes.json` are both present, serve reads that file into one shared span in 8 MiB steps and binds each plane at its offset. The low expert uses the same pair in `low/`.
+- Codes are the packed bytes. Scales, the bias, and the permutation are separate planes. Plane starts are 128-byte aligned. `nbytes` is the plane and does not include the pad.
+- One expert stays resident until `drop_expert`. The other expert is not loaded to build or read that file.
+- When either file is missing, each matrix is still read from its `.npz` or `.npy`, copied to the device, and the host array is dropped before the next file.
 - The device spans of that expert stay resident.
 - The ledger room for decode is read after the device finishes in-flight work.
 - An inflated `pending` count does not force one latent frame when the full volume fits.
@@ -99,6 +101,7 @@ The shared umT5 pack is [../umt5_xxl/README.md](../umt5_xxl/README.md).
 - That name is the registry id.
 - The row stores that directory and points `parts.umt5` at `models/google/umt5-xxl-int8`.
 - `--high-dir` and `--low-dir` store the quantized expert directories.
+- Each expert directory also receives `weights.bin` and `planes.json`, copied from those per-file planes in bind order.
 
 It scores every block by the maximum fp4 relative error of its eight attention matrices and its two feed-forward matrices, after one K permutation per matrix.
 
@@ -161,6 +164,12 @@ Both edges are multiples of 16.
 
 `Wan2.1_VAE.pth` is the causal encoder and decoder.
 
+- `vae.weights.bin` and `vae.planes.json` beside that file are the float tensors in the order encode and decode upload them, after the reshape the convolution uses.
+- Serve reads that file into one shared span when both are present and does not unpickle the checkpoint.
+- The span is released with the other VAE device weights.
+- When either file is missing, the loader unpickles `Wan2.1_VAE.pth`.
+- `quantize` writes the pair when the checkpoint is already on disk.
+
 - Base width 96, multipliers 1, 2, 4, 4, two residual blocks, temporal downsample on the last two stages, latent width 16.
 - Spatial stride is 8 and temporal stride is 4.
 - The first frame changes in space only.
@@ -178,10 +187,13 @@ Both edges are multiples of 16.
 - A clip encodes with that pack and reads `tokenizer.json` from it.
 - `favlo --wan22_i2v umt5 quantize` writes that directory.
 - That BF16 file is not opened during a clip.
+- When that directory also has `weights.bin` and `planes.json`, the encoder reads the file into one shared span and binds each plane at its offset.
+- The span stays for the encode and is released at the end of the encode. A view is not a separate allocation, so dropping it leaves the span in place.
+- When either file is missing, each `.npz` and `.npy` is loaded and uploaded for that linear, then dropped.
 - Every linear is symmetric int8.
 - The token embedding, the RMSNorm weights, and the relative buckets stay float16.
 - `matmul2d` consumes the linears.
-- The token rows are gathered from `embed.npy`.
+- The token rows are gathered on the host from `embed`, whether that plane is `embed.npy` or a slice of the span.
 - The real tokens, including the end token, are padded with zeros to 512.
 - Without that pack or the tokenizer, the prompt bytes index the embedding table.
 - The DiT text MLP still runs.
@@ -270,7 +282,7 @@ uv run favlo media --pipeline wan22_i2v --model Wan2.2-I2V-A14B-int8 --out pack.
 
 `favlo serve` publishes `wan22_i2v__generate_video` on `POST /mcp`.
 
-`handle_video` is a `MediaPipeline`.
+`handle_video` is a `BulkMediaPipeline`.
 
 The DiT, the checkpoint fields, and the stage list stay in this package.
 

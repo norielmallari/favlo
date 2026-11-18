@@ -18,19 +18,22 @@ import time
 import zipfile
 from functools import lru_cache
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from wan22_i2v.metal41.metal import Gpu
+from wan22_i2v.metal41.blob import blob_ready, fill_span, load_index, plane_array, write_blob
+from wan22_i2v.metal41.metal import BufferView, Gpu
 from wan22_i2v.metal41.schedule import LATENT_MEAN, LATENT_STD, geometry
 from wan22_i2v.metal41.source import VAE_FILE, vae_dir
 
 _EPS = np.float32(1e-12)
 ENCODER_BLOCKS = 16
 DECODER_BLOCKS = 20
+VAE_BLOB = "vae.weights.bin"
+VAE_INDEX = "vae.planes.json"
 
 
 class _FloatStorage:
@@ -44,8 +47,12 @@ def vae_path(root: Path | None = None) -> Path:
 @lru_cache(maxsize=2)
 def vae_device_bytes(path: str) -> int:
     """Float32 bytes if every checkpoint tensor and the latent affine are on device."""
-    weights = load_vae(Path(path))
-    total = sum(int(array.nbytes) for array in weights.values())
+    folder = vae_pack_dir(Path(path))
+    if folder is not None:
+        total = (folder / VAE_BLOB).stat().st_size
+    else:
+        weights = _unpickle_vae(Path(path))
+        total = sum(int(array.nbytes) for array in weights.values())
     total += int(LATENT_MEAN.nbytes) + int(LATENT_STD.nbytes)
     return total
 
@@ -57,7 +64,197 @@ def encode_peak_bytes(height: int, width: int, lat_t: int, lat_h: int, lat_w: in
     return latent + chunk
 
 
+def vae_present(root: Path | None = None) -> bool:
+    """True when the pickle or the raw pack beside it is on disk."""
+    path = vae_path(root)
+    return path.is_file() or vae_pack_dir(path) is not None
+
+
+def vae_pack_dir(path: Path) -> Path | None:
+    """Directory of ``vae.weights.bin`` beside ``path``, when both index files exist."""
+    candidate = Path(path)
+    if candidate.is_file() and candidate.name == VAE_BLOB:
+        folder = candidate.parent
+    elif candidate.is_dir():
+        folder = candidate
+    else:
+        folder = candidate.parent
+    if blob_ready(folder, blob_name=VAE_BLOB, index_name=VAE_INDEX):
+        return folder
+    return None
+
+
 def load_vae(path: Path) -> dict[str, np.ndarray]:
+    """Read the float checkpoint. A raw pack skips the pickle."""
+    folder = vae_pack_dir(path)
+    if folder is not None:
+        return _vae_from_blob(folder)
+    return _unpickle_vae(path)
+
+
+def write_vae_pack(weights: Mapping[str, np.ndarray], dest: Path) -> Path:
+    """Write upload-order planes. ``dest`` is the directory beside the checkpoint."""
+    meta: dict[str, dict[str, Any]] = {}
+
+    def planes() -> Any:
+        for key, array, source in iter_vae_planes(weights):
+            if source is not None:
+                meta[key] = {"source_shape": [int(value) for value in source]}
+            yield key, array
+
+    write_blob(dest, planes(), blob_name=VAE_BLOB, index_name=VAE_INDEX, meta=meta)
+    return Path(dest) / VAE_BLOB
+
+
+def write_vae_checkpoint(path: Path, dest: Path | None = None) -> Path:
+    """Unpickle once and write the raw pack. This is the quantize path."""
+    weights = _unpickle_vae(path)
+    try:
+        return write_vae_pack(weights, dest or Path(path).parent)
+    finally:
+        weights.clear()
+
+
+def iter_vae_planes(
+    weights: Mapping[str, np.ndarray],
+) -> list[tuple[str, np.ndarray, tuple[int, ...] | None]]:
+    """Planes in the order a two-chunk encode and a two-frame decode first upload them."""
+    seen: set[str] = set()
+    cache: set[str] = set()
+    planes: list[tuple[str, np.ndarray, tuple[int, ...] | None]] = []
+
+    def kernel(name: str, *, time: bool = False) -> None:
+        if name not in weights:
+            raise KeyError(name)
+        key = f"{name}#t" if time else name
+        if key in seen:
+            return
+        seen.add(key)
+        source = np.asarray(weights[name])
+        planes.append(
+            (key, kernel_array(source, time=time), tuple(int(value) for value in source.shape))
+        )
+
+    def vector(name: str) -> None:
+        if name not in weights:
+            raise KeyError(name)
+        if name in seen:
+            return
+        seen.add(name)
+        planes.append((name, vector_array(weights[name]), None))
+
+    def conv(name: str, *, time: bool = False) -> None:
+        kernel(f"{name}.weight", time=time)
+        vector(f"{name}.bias")
+
+    def residual(prefix: str) -> None:
+        shortcut = f"{prefix}.shortcut.weight"
+        if shortcut in weights:
+            kernel(shortcut)
+            vector(f"{prefix}.shortcut.bias")
+        vector(f"{prefix}.residual.0.gamma")
+        conv(f"{prefix}.residual.2")
+        vector(f"{prefix}.residual.3.gamma")
+        conv(f"{prefix}.residual.6")
+
+    def attend(prefix: str) -> None:
+        vector(f"{prefix}.norm.gamma")
+        kernel(f"{prefix}.to_qkv.weight")
+        vector(f"{prefix}.to_qkv.bias")
+        kernel(f"{prefix}.proj.weight")
+        vector(f"{prefix}.proj.bias")
+
+    def head(prefix: str) -> None:
+        vector(f"{prefix}.0.gamma")
+        conv(f"{prefix}.2")
+
+    def down3d(prefix: str) -> None:
+        conv(f"{prefix}.resample.1", time=True)
+        name = f"{prefix}.time_conv"
+        if name not in cache:
+            cache.add(name)
+            return
+        conv(name)
+
+    def up3d(prefix: str) -> None:
+        name = f"{prefix}.time_conv"
+        if name not in cache:
+            cache.add(name)
+            conv(f"{prefix}.resample.1", time=True)
+            return
+        conv(name)
+        conv(f"{prefix}.resample.1", time=True)
+
+    def encoder() -> None:
+        conv("encoder.conv1")
+        residual("encoder.downsamples.0")
+        residual("encoder.downsamples.1")
+        conv("encoder.downsamples.2.resample.1", time=True)
+        residual("encoder.downsamples.3")
+        residual("encoder.downsamples.4")
+        down3d("encoder.downsamples.5")
+        residual("encoder.downsamples.6")
+        residual("encoder.downsamples.7")
+        down3d("encoder.downsamples.8")
+        residual("encoder.downsamples.9")
+        residual("encoder.downsamples.10")
+        residual("encoder.middle.0")
+        attend("encoder.middle.1")
+        residual("encoder.middle.2")
+        head("encoder.head")
+
+    def decoder() -> None:
+        conv("decoder.conv1")
+        residual("decoder.middle.0")
+        attend("decoder.middle.1")
+        residual("decoder.middle.2")
+        for index in range(3):
+            residual(f"decoder.upsamples.{index}")
+        up3d("decoder.upsamples.3")
+        for index in range(4, 7):
+            residual(f"decoder.upsamples.{index}")
+        up3d("decoder.upsamples.7")
+        for index in range(8, 11):
+            residual(f"decoder.upsamples.{index}")
+        conv("decoder.upsamples.11.resample.1", time=True)
+        for index in range(12, 15):
+            residual(f"decoder.upsamples.{index}")
+        head("decoder.head")
+
+    encoder()
+    encoder()
+    decoder()
+    decoder()
+    return planes
+
+
+def kernel_array(array: np.ndarray, *, time: bool) -> np.ndarray:
+    """The float32 kernel ``_kernel`` uploads, including the time axis it inserts."""
+    out = np.ascontiguousarray(array, dtype=np.float32)
+    if time:
+        out = out[:, :, None]
+    if out.ndim == 2:
+        out = out.reshape(out.shape[0], out.shape[1], 1, 1, 1)
+    elif out.ndim == 4:
+        out = out.reshape(out.shape[0], out.shape[1], 1, out.shape[2], out.shape[3])
+    return np.ascontiguousarray(out)
+
+
+def vector_array(array: np.ndarray) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(array, dtype=np.float32).reshape(-1))
+
+
+def _vae_from_blob(folder: Path) -> dict[str, np.ndarray]:
+    index = load_index(folder, blob_name=VAE_BLOB, index_name=VAE_INDEX)
+    if index is None:
+        message = "VAE blob disappeared"
+        raise RuntimeError(message)
+    return {
+        name: plane_array(folder, plane, blob_name=VAE_BLOB) for name, plane in index.items()
+    }
+
+
+def _unpickle_vae(path: Path) -> dict[str, np.ndarray]:
     """Read the float checkpoint. The unpickler accepts only tensor rebuilds."""
     archive = zipfile.ZipFile(path)
     storages: dict[str, np.ndarray] = {}
@@ -137,14 +334,44 @@ class WanVAE:
         self._mean: Any = None
         self._std: Any = None
         self._own = False
+        self._span: Any = None
+        self._index: dict[str, Any] | None = None
 
     def _weights(self) -> dict[str, np.ndarray]:
+        self._ensure_device()
         if self.weights is None:
+            message = "VAE blob has no host checkpoint"
+            raise RuntimeError(message)
+        return self.weights
+
+    def _ensure_device(self) -> None:
+        if self._index is not None or self.weights is not None:
+            return
+        folder = vae_pack_dir(self.path)
+        if folder is not None:
             started = time.perf_counter()
-            self.weights = load_vae(self.path)
+            index = load_index(folder, blob_name=VAE_BLOB, index_name=VAE_INDEX)
+            if index is None:
+                message = "VAE blob disappeared"
+                raise RuntimeError(message)
+            blob = folder / VAE_BLOB
+            gpu = self._gpu()
+            buf = gpu.keep(gpu.span(blob.stat().st_size))
+            try:
+                fill_span(buf, blob)
+            except Exception:
+                gpu.unkeep(buf)
+                gpu.drop(buf)
+                raise
+            self._span = buf
+            self._index = index
             elapsed = time.perf_counter() - started
             print(f"vae load {elapsed:.2f}s", flush=True)
-        return self.weights
+            return
+        started = time.perf_counter()
+        self.weights = _unpickle_vae(self.path)
+        elapsed = time.perf_counter() - started
+        print(f"vae load {elapsed:.2f}s", flush=True)
 
     def encode(
         self,
@@ -245,9 +472,16 @@ class WanVAE:
         gpu = self.gpu
         if gpu is None:
             return
-        for buf, _ in list(self._params.values()):
-            gpu.drop(buf)
-        self._params.clear()
+        span = getattr(self, "_span", None)
+        if span is not None:
+            self._params.clear()
+            gpu.drop(span)
+            self._span = None
+            self._index = None
+        else:
+            for buf, _ in list(self._params.values()):
+                gpu.drop(buf)
+            self._params.clear()
         if self._mean is not None:
             gpu.drop(self._mean)
             self._mean = None
@@ -285,6 +519,8 @@ class WanVAE:
         if self._own and self.gpu is not None:
             self.gpu.close()
             self._params.clear()
+            self._span = None
+            self._index = None
             self._mean = None
             self._std = None
         self.gpu = None
@@ -362,7 +598,7 @@ class WanVAE:
     def _residual(self, x: _Vol, prefix: str) -> _Vol:
         shortcut = f"{prefix}.shortcut.weight"
         skip = None
-        if shortcut in self._weights():
+        if self._has_weight(shortcut):
             skip = self._project(x, shortcut, f"{prefix}.shortcut.bias")
         hidden = self._rms(x, f"{prefix}.residual.0.gamma")
         hidden = self._causal(f"{prefix}.residual.2", self._take(hidden, self._silu(hidden)))
@@ -458,7 +694,7 @@ class WanVAE:
         return self._up_spatial(stacked, prefix)
 
     def _causal(self, name: str, x: _Vol) -> _Vol:
-        kt = int(self._weights()[f"{name}.weight"].shape[2])
+        kt = self._kernel_extent(name)
         previous = self.cache.get(name)
         cached = previous if isinstance(previous, _Vol) else None
         if kt > 1:
@@ -621,6 +857,22 @@ class WanVAE:
             self._free(old)
         return new
 
+    def _has_weight(self, name: str) -> bool:
+        self._ensure_device()
+        if self._index is not None:
+            return name in self._index
+        return name in self._weights()
+
+    def _kernel_extent(self, name: str) -> int:
+        """Causal kernel width from the checkpoint shape, before the upload reshape."""
+        self._ensure_device()
+        weight = f"{name}.weight"
+        if self._index is not None:
+            plane = self._index[weight]
+            source = plane.source_shape if plane.source_shape is not None else plane.shape
+            return int(source[2])
+        return int(self._weights()[weight].shape[2])
+
     def _kernel(
         self, name: str, *, time: bool = False
     ) -> tuple[Any, tuple[int, int, int, int, int]]:
@@ -629,6 +881,17 @@ class WanVAE:
         if found is not None:
             buf, shape = found
             return buf, (shape[0], shape[1], shape[2], shape[3], shape[4])
+        self._ensure_device()
+        if self._index is not None:
+            plane = self._index[key]
+            shape = tuple(int(value) for value in plane.shape)
+            if len(shape) != 5:
+                message = f"{key} rank is {len(shape)}"
+                raise RuntimeError(message)
+            view = BufferView(self._span, plane.offset)
+            typed = (shape[0], shape[1], shape[2], shape[3], shape[4])
+            self._params[key] = (view, typed)
+            return view, typed
         array = np.ascontiguousarray(self._weights()[name], dtype=np.float32)
         if time:
             array = array[:, :, None]
@@ -648,6 +911,12 @@ class WanVAE:
         found = self._params.get(name)
         if found is not None:
             return found[0]
+        self._ensure_device()
+        if self._index is not None:
+            plane = self._index[name]
+            view = BufferView(self._span, plane.offset)
+            self._params[name] = (view, tuple(int(value) for value in plane.shape))
+            return view
         flat = np.ascontiguousarray(self._weights()[name].reshape(-1), dtype=np.float32)
         buf = self._gpu().keep(self._gpu().upload(flat))
         self._params[name] = (buf, tuple(int(v) for v in flat.shape))

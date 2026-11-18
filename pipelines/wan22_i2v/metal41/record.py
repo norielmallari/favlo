@@ -12,7 +12,9 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save_file
 
+from wan22_i2v.metal41.blob import load_index, plane_array, write_blob
 from wan22_i2v.metal41.dit import Expert, Resident, upload_half, upload_linear
+from wan22_i2v.metal41.metal import BufferView
 from wan22_i2v.metal41.formats import (
     BLOCK_MATRICES,
     LinearPack,
@@ -156,6 +158,7 @@ def pack_int8_expert(path: Path, dest: Path, config: dict[str, Any]) -> float:
                 worst = error
                 worst_name = name
         _write_halves(handle, keys, dest, config, layers)
+    _write_expert_blob(dest, layers)
     print(f"int8 worst {path.name} {worst_name} {worst:.6f}", flush=True)
     return worst
 
@@ -168,25 +171,36 @@ def load_embed(path: Path) -> np.ndarray:
     return np.load(path / "embed.npy")
 
 
-def load_linear(path: Path, name: str) -> LinearPack:
-    """Load one packed matrix and close the file before the caller uploads it."""
-    with np.load(path / f"{name}.npz") as blob:
-        pack = LinearPack(
-            kind=str(blob["kind"].item()),
-            packed=np.array(blob["packed"], copy=True),
-            scales=np.array(blob["scales"], copy=True),
-            bias=np.array(blob["bias"], copy=True),
-            perm=np.array(blob["perm"], copy=True),
-            logical_n=int(blob["logical_n"]),
-            logical_k=int(blob["logical_k"]),
-            padded_n=int(blob["padded_n"]),
-            stored_k=int(blob["stored_k"]),
-        )
-    return pack
+def load_linear(
+    path: Path, name: str, *, bound: Any = None, index: dict[str, Any] | None = None
+) -> LinearPack:
+    """Load one packed matrix and close the file before the caller uploads it.
+
+    When ``weights.bin`` and ``planes.json`` are present, the bytes come from
+    that blob. ``bound`` is the span that already holds the file, so this
+    returns the matmul fields and does not copy the planes again.
+    """
+    planes = index if index is not None else load_index(path)
+    if planes is not None:
+        pack = _linear_meta(planes, name)
+        if bound is not None:
+            return pack
+        return _linear_arrays(path, planes, name, pack)
+    return _load_npz(path, name)
 
 
-def load_half(path: Path, name: str) -> np.ndarray:
-    """Load one float16 weight into an array the caller can drop after upload."""
+def load_half(
+    path: Path, name: str, *, bound: Any = None, index: dict[str, Any] | None = None
+) -> np.ndarray:
+    """Load one float16 weight into an array the caller can drop after upload.
+
+    ``bound`` means the half already lives in the expert span.
+    """
+    planes = index if index is not None else load_index(path)
+    if planes is not None:
+        if bound is not None:
+            return np.empty(0, dtype=np.float16)
+        return plane_array(path, planes[name])
     return np.array(_half_array(path, name), copy=True)
 
 
@@ -212,6 +226,16 @@ def stream_expert(
     layers: int,
     on_file: Callable[[], None] | None = None,
 ) -> Resident:
+    """Upload one expert. A raw blob is one span. Otherwise one file at a time."""
+    index = load_index(path)
+    if index is not None:
+        return _stream_blob(gpu, path, layers, index, on_file)
+    return _stream_files(gpu, path, layers, on_file)
+
+
+def _stream_files(
+    gpu: Any, path: Path, layers: int, on_file: Callable[[], None] | None
+) -> Resident:
     """Upload one matrix at a time so the host copy is never the whole expert."""
     packs: dict[str, LinearPack] = {}
     weights: dict[str, dict[str, Any]] = {}
@@ -235,6 +259,128 @@ def stream_expert(
         if on_file is not None:
             on_file()
     return Resident(packs=packs, weights=weights, halves=halves, host={}, owned=owned)
+
+
+def _stream_blob(
+    gpu: Any,
+    path: Path,
+    layers: int,
+    index: dict[str, Any],
+    on_file: Callable[[], None] | None,
+) -> Resident:
+    """One expert span. Plane views stay until ``drop_expert`` releases it."""
+    from wan22_i2v.metal41.blob import fill_span
+
+    blob = path / "weights.bin"
+    buf = gpu.keep(gpu.span(blob.stat().st_size))
+    try:
+        fill_span(buf, blob)
+        packs: dict[str, LinearPack] = {}
+        weights: dict[str, dict[str, Any]] = {}
+        for name in linear_names(layers):
+            pack = load_linear(path, name, bound=buf, index=index)
+            views = {
+                "packed": BufferView(buf, index[f"{name}.packed"].offset),
+                "scales": BufferView(buf, index[f"{name}.scales"].offset),
+                "bias": BufferView(buf, index[f"{name}.bias"].offset),
+                "perm": BufferView(buf, index[f"{name}.perm"].offset),
+            }
+            slim, buffers = upload_linear(gpu, pack, views=views)
+            packs[name] = slim
+            weights[name] = buffers
+            if on_file is not None:
+                on_file()
+        halves: dict[str, Any] = {}
+        for name in half_names(layers):
+            array = load_half(path, name, bound=buf, index=index)
+            halves[name] = upload_half(gpu, array, view=BufferView(buf, index[name].offset))
+            if on_file is not None:
+                on_file()
+    except Exception:
+        gpu.unkeep(buf)
+        gpu.drop(buf)
+        raise
+    return Resident(packs=packs, weights=weights, halves=halves, host={}, owned=[buf])
+
+
+def _load_npz(path: Path, name: str) -> LinearPack:
+    with np.load(path / f"{name}.npz") as blob:
+        pack = LinearPack(
+            kind=str(blob["kind"].item()),
+            packed=np.array(blob["packed"], copy=True),
+            scales=np.array(blob["scales"], copy=True),
+            bias=np.array(blob["bias"], copy=True),
+            perm=np.array(blob["perm"], copy=True),
+            logical_n=int(blob["logical_n"]),
+            logical_k=int(blob["logical_k"]),
+            padded_n=int(blob["padded_n"]),
+            stored_k=int(blob["stored_k"]),
+        )
+    return pack
+
+
+def _linear_meta(index: dict[str, Any], name: str) -> LinearPack:
+    packed = index[f"{name}.packed"]
+    if packed.kind is None or packed.logical_n is None or packed.logical_k is None:
+        message = f"{name} is missing kind or logical shape"
+        raise ValueError(message)
+    if packed.padded_n is None or packed.stored_k is None:
+        message = f"{name} is missing padded shape"
+        raise ValueError(message)
+    return LinearPack(
+        kind=packed.kind,
+        packed=np.empty(0, dtype=np.uint8),
+        scales=np.empty(0, dtype=np.uint8),
+        bias=np.empty(0, dtype=np.float16),
+        perm=np.empty(0, dtype=np.uint32),
+        logical_n=int(packed.logical_n),
+        logical_k=int(packed.logical_k),
+        padded_n=int(packed.padded_n),
+        stored_k=int(packed.stored_k),
+    )
+
+
+def _linear_arrays(path: Path, index: dict[str, Any], name: str, pack: LinearPack) -> LinearPack:
+    return LinearPack(
+        kind=pack.kind,
+        packed=plane_array(path, index[f"{name}.packed"]),
+        scales=plane_array(path, index[f"{name}.scales"]),
+        bias=plane_array(path, index[f"{name}.bias"]),
+        perm=plane_array(path, index[f"{name}.perm"]),
+        logical_n=pack.logical_n,
+        logical_k=pack.logical_k,
+        padded_n=pack.padded_n,
+        stored_k=pack.stored_k,
+    )
+
+
+def _write_expert_blob(dest: Path, layers: int) -> None:
+    """One raw file for this expert, in the order ``stream_expert`` binds.
+
+    Planes are copied from the ``.npz`` and ``.npy`` files one matrix at a time.
+    The other expert is not opened.
+    """
+    meta: dict[str, dict[str, Any]] = {}
+
+    def planes() -> Any:
+        for name in linear_names(layers):
+            pack = _load_npz(dest, name)
+            meta[f"{name}.packed"] = {
+                "kind": pack.kind,
+                "logical_n": pack.logical_n,
+                "logical_k": pack.logical_k,
+                "padded_n": pack.padded_n,
+                "stored_k": pack.stored_k,
+            }
+            yield f"{name}.packed", pack.packed
+            yield f"{name}.scales", pack.scales
+            yield f"{name}.bias", pack.bias
+            yield f"{name}.perm", pack.perm
+            del pack
+        for name in half_names(layers):
+            yield name, np.ascontiguousarray(_half_array(dest, name))
+
+    write_blob(dest, planes(), meta=meta)
 
 
 def _half_array(path: Path, name: str) -> np.ndarray:
@@ -288,6 +434,7 @@ def _pack_expert(
             _save_pack(dest_path, pack_linear(weight, bias, kind))
             print(f"write {name}", flush=True)
         _write_halves(handle, keys, dest, config, layers)
+    _write_expert_blob(dest, layers)
     return winners
 
 

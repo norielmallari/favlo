@@ -82,6 +82,18 @@ def kernels() -> int:
     return 0
 
 
+def _pack_vae() -> None:
+    """Write the raw VAE beside the checkpoint when that file is already on disk."""
+    from wan22_i2v.metal41.vae import VAE_BLOB, vae_path, write_vae_checkpoint
+
+    path = vae_path()
+    if not path.is_file():
+        print("vae pack skipped", flush=True)
+        return
+    write_vae_checkpoint(path)
+    print(path.parent / VAE_BLOB, flush=True)
+
+
 def _folder_name(text: str) -> str:
     if _FOLDER.fullmatch(text) is None:
         message = "folder name is not a single name"
@@ -153,6 +165,7 @@ def _quantize(args: argparse.Namespace) -> int:
                 low_dir=low_dir,
                 percent=percent,
             )
+        _pack_vae()
         register_quantized(
             dest.name,
             source=args.high,

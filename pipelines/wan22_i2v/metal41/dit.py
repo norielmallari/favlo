@@ -65,8 +65,16 @@ def upload_expert(
     )
 
 
-def upload_linear(gpu: Gpu, pack: LinearPack) -> tuple[LinearPack, dict[str, Any]]:
-    """Copy one matrix to the device. The caller drops the host pack."""
+def upload_linear(
+    gpu: Gpu, pack: LinearPack, *, views: dict[str, Any] | None = None
+) -> tuple[LinearPack, dict[str, Any]]:
+    """Copy one matrix to the device, or bind planes that already sit in a span.
+
+    ``views`` are windows of one expert span. They are not uploaded again.
+    Dropping a view does not release that span.
+    """
+    if views is not None:
+        return slim_pack(pack), views
     buffers = {
         "packed": gpu.keep(gpu.upload(pack.packed)),
         "scales": gpu.keep(gpu.upload(pack.scales)),
@@ -76,8 +84,10 @@ def upload_linear(gpu: Gpu, pack: LinearPack) -> tuple[LinearPack, dict[str, Any
     return slim_pack(pack), buffers
 
 
-def upload_half(gpu: Gpu, array: np.ndarray) -> Any:
-    """Copy one float16 weight to the device."""
+def upload_half(gpu: Gpu, array: np.ndarray, *, view: Any = None) -> Any:
+    """Copy one float16 weight to the device, or return a span window."""
+    if view is not None:
+        return view
     return gpu.keep(gpu.upload(np.ascontiguousarray(array, dtype=np.float16)))
 
 

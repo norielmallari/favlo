@@ -236,6 +236,12 @@ class Gpu:
         self._owned.append(buf)
         return buf
 
+    def span(self, nbytes: int) -> Any:
+        """Shared span for a weight file. The caller fills it. It is not cleared."""
+        buf = device_buffer(self._owner, int(nbytes), zero=False)
+        self._owned.append(buf)
+        return buf
+
     def read_f32(self, buf: Any, count: int) -> np.ndarray:
         self.end()
         view = buf.contents().as_buffer(count * 4)
@@ -262,12 +268,20 @@ class Gpu:
         self._kept.discard(id(buf))
 
     def drop(self, buf: Any) -> None:
-        """Wait, then release one buffer this device allocated."""
+        """Wait, then release one buffer this device allocated.
+
+        A ``BufferView`` is a window of a span. The wait still runs. The span
+        stays until the caller releases it.
+        """
         self.end()
+        if isinstance(buf, BufferView):
+            return
         self.release(buf)
 
     def release(self, buf: Any) -> None:
         """Release a buffer the open command buffer still retains."""
+        if isinstance(buf, BufferView):
+            return
         self.unkeep(buf)
         self._drop([buf])
 
@@ -651,6 +665,8 @@ class Gpu:
 
     def _drop(self, buffers: list[Any]) -> None:
         for buf in buffers:
+            if isinstance(buf, BufferView):
+                continue
             if buf in self._owned:
                 self._owned.remove(buf)
             if id(buf) not in self._kept:
@@ -661,9 +677,10 @@ class Gpu:
 
     def drop_many(self, buffers: list[Any]) -> None:
         self.end()
-        for buf in buffers:
+        real = [buf for buf in buffers if not isinstance(buf, BufferView)]
+        for buf in real:
             self.unkeep(buf)
-        self._drop(buffers)
+        self._drop(real)
 
     def _u(self, *values: int) -> list[bytes]:
         return [struct.pack("I", int(value)) for value in values]
