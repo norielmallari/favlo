@@ -100,6 +100,7 @@ A Gallery is a workspace on an agent's channel.
 | `bge_m3` | [BGE-M3](docs/bge_m3/README.md) | ✅ | ✅ | ✅ |
 | `z_image_turbo` | [Z-Image-Turbo](docs/z_image_turbo/README.md) | ✅ | ✅ | ✅ |
 | `z_image_base` | [Z-Image](docs/z_image_base/README.md) | ✅ | ✅ | ✅ |
+| `klein_4b` | [FLUX.2 [klein] 4B](docs/klein_4b/README.md) | ✅ | ✅ | ✅ |
 | `wan22_i2v` | [Wan 2.2 I2V](docs/wan22_i2v/README.md) | ❌ | ⚠️ | ✅ |
 | `wan22_ti2v_5b` | [Wan 2.2 TI2V-5B](docs/wan22_ti2v_5b/README.md) | ✅ | ✅ | ✅ |
 | `ace_step_15_turbo` | [ACE-Step 1.5 XL Turbo](docs/ace_step_15_turbo/README.md) | ✅ | ✅ | ✅ |
@@ -242,6 +243,7 @@ Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICEN
 | bge-m3 | MIT License | [note](docs/bge_m3/README.md) |
 | Z-Image-Turbo | Apache License, Version 2.0 | [note](docs/z_image_turbo/README.md) |
 | Z-Image | Apache License, Version 2.0 | [note](docs/z_image_base/README.md) |
+| FLUX.2 [klein] 4B | Apache License, Version 2.0 | [note](docs/klein_4b/README.md) |
 | Wan 2.2 I2V | Apache License, Version 2.0 | [note](docs/wan22_i2v/README.md) |
 | umT5-XXL | Apache License, Version 2.0 | [note](docs/umt5_xxl/README.md) |
 | Wan 2.2 TI2V-5B | Apache License, Version 2.0 on the base card. The source checkpoint's license is unset. | [note](docs/wan22_ti2v_5b/README.md) |

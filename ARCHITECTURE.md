@@ -43,6 +43,7 @@ A media pipeline is `pipelines/<pipeline>/<runtime>/` and is registered by its m
 |---|---|---|
 | `z_image_turbo` | `pipelines/z_image_turbo/metal41/` | [docs/z_image_turbo/README.md](docs/z_image_turbo/README.md) |
 | `z_image_base` | `pipelines/z_image_base/metal41/` | [docs/z_image_base/README.md](docs/z_image_base/README.md) |
+| `klein_4b` | `pipelines/klein_4b/metal41/` | [docs/klein_4b/README.md](docs/klein_4b/README.md) |
 | `wan22_i2v` | `pipelines/wan22_i2v/metal41/` | [docs/wan22_i2v/README.md](docs/wan22_i2v/README.md) |
 | `wan22_ti2v_5b` | `pipelines/wan22_ti2v_5b/metal41/` | [docs/wan22_ti2v_5b/README.md](docs/wan22_ti2v_5b/README.md) |
 | `ace_step_15_turbo` | `pipelines/ace_step_15_turbo/metal41/` | [docs/ace_step_15_turbo/README.md](docs/ace_step_15_turbo/README.md) |
