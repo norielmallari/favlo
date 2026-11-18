@@ -92,3 +92,14 @@ Queries the same day: "gemma-4-26B-A4B oMLX M5 Pro 48GB 1721 74.1 4096 site:omlx
 | 10000 | 977.06 tok/s (10000 tok in 10.23 s) | 28.25 tok/s (128 tok in 4.53 s) | 686.18 tok/s (10128 tok in 14.76 s) |
 
 The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "920.39 OR 947.85 OR 1047.66 OR 977.06 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows named in the correction above are different packs and different prompt lengths.
+
+18 November 2026. The same protocol run, nonce `d51201c1`, recorded:
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 911.63 tok/s (512 tok in 0.56 s) | 31.19 tok/s (128 tok in 4.10 s) | 137.34 tok/s (640 tok in 4.66 s) |
+| 1024 | 937.42 tok/s (1024 tok in 1.09 s) | 32.01 tok/s (128 tok in 4.00 s) | 226.33 tok/s (1152 tok in 5.09 s) |
+| 4096 | 975.64 tok/s (4096 tok in 4.20 s) | 30.37 tok/s (128 tok in 4.21 s) | 502.26 tok/s (4224 tok in 8.41 s) |
+| 10000 | 812.87 tok/s (10000 tok in 12.30 s) | 25.41 tok/s (128 tok in 5.04 s) | 584.08 tok/s (10128 tok in 17.34 s) |
+
+The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "911.63 OR 937.42 OR 975.64 OR 812.87 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.

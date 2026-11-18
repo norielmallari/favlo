@@ -60,3 +60,11 @@ Later finds are appended here. The sections above stay as committed.
 15 November 2026. This run uses the packed folder `gemma-4-26B-A4B-it-fp8-e20`. Resident matrices are fp8. Of the 3,840 routed experts, 768 are fp8 and 3,072 are fp4. Keys and values are `half`.
 
 A search the same day, "gemma-4-26B-A4B oMLX M5 Pro 48GB 1721 74.1 4096 site:omlx.ai", returned [oMLX 4-bit on an M5 Pro with 48 GB](https://omlx.ai/benchmarks/performance/6w533fgx) with `turboquant_kv_enabled` false and `mtp_enabled` false: 1,721 tok/s prefill and 74.1 tok/s generation at 4,096 tokens, and 1,855 tok/s prefill and 62.5 tok/s generation at 16,384 tokens. Those rows are a 4-bit pack. The search did not find 249.31 and 31.11, or 322.65 and 31.47.
+
+18 November 2026. The bare coding agent, thinking on and vision off, passed on the same pack. The banner was `kv half mtp off depth 3 thinking on vision off`. Request 2 loaded the prefix from disk. The summed lines were 343.10 tok/s prefill (2388 tok in 6.96 s) and 29.52 tok/s decode (650 tok in 22.02 s).
+
+| Thinking | Vision | Result | Prefill | Decode |
+|---|---|---|---|---|
+| on | off | pass | 343.10 tok/s (2388 tok in 6.96 s) | 29.52 tok/s (650 tok in 22.02 s) |
+
+The command is `uv run python -m harness.coding --model gemma4_26b_a4b`. A search the same day for "343.10 OR 29.52 gemma-4-26B-A4B coding agent vision off prefill tok/s half" did not find those two rates. The published agent rows above use other packs and other machines.
