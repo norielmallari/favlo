@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from favlo.bulk_media_pipeline import BulkMediaPipeline
 from favlo.embeddings_pipeline import EmbeddingsPipeline
 from favlo.language_pipeline import LanguagePipeline
 from favlo.media_pipeline import MediaCall, MediaPaused, MediaPipeline, checkpoint
@@ -22,10 +23,11 @@ def _wait_until(ready, timeout: float = 2.0) -> None:
     assert ready()
 
 
-def test_seam_for_maps_http_kinds_onto_the_three_classes() -> None:
+def test_seam_for_maps_http_kinds_onto_the_four_classes() -> None:
     assert seam_for("chat") is LanguagePipeline
     assert seam_for("responses") is LanguagePipeline
     assert seam_for("embed") is EmbeddingsPipeline
+    assert seam_for("bulk") is BulkMediaPipeline
     for kind in ("media", "image", "video", "music", "voice"):
         assert seam_for(kind) is MediaPipeline
     with pytest.raises(ValueError, match="unknown queue kind"):
@@ -34,20 +36,27 @@ def test_seam_for_maps_http_kinds_onto_the_three_classes() -> None:
 
 def test_each_seam_owns_its_admission_flags() -> None:
     assert LanguagePipeline.preempts_media is True
+    assert LanguagePipeline.preempts_bulk is True
     assert LanguagePipeline.drop_if_disconnected is True
     assert LanguagePipeline.debounce_after_release is True
     assert LanguagePipeline.resident == "exclusive"
-    assert EmbeddingsPipeline.preempts_media is False
+    assert EmbeddingsPipeline.preempts_media is True
+    assert EmbeddingsPipeline.preempts_bulk is True
     assert EmbeddingsPipeline.drop_if_disconnected is False
     assert EmbeddingsPipeline.debounce_after_release is False
     assert EmbeddingsPipeline.resident == "beside"
     assert EmbeddingsPipeline.waits_for_memory is False
     assert MediaPipeline.preempts_media is False
+    assert MediaPipeline.preempts_bulk is True
     assert MediaPipeline.drop_if_disconnected is False
     assert MediaPipeline.debounce_after_release is False
     assert MediaPipeline.resident == "exclusive"
+    assert BulkMediaPipeline.preempts_media is False
+    assert BulkMediaPipeline.preempts_bulk is False
+    assert BulkMediaPipeline.admission == frozenset({"bulk"})
     assert LanguagePipeline.waits_for_memory is True
     assert MediaPipeline.waits_for_memory is True
+    assert BulkMediaPipeline.waits_for_memory is True
 
 
 def test_disconnect_event_is_only_for_a_language_waiter() -> None:
@@ -99,6 +108,180 @@ def test_a_second_media_ticket_does_not_set_preempt() -> None:
     schedule.release(first)
     assert entered.wait(2)
     thread.join(2)
+
+
+def test_bulk_sets_preempt_for_embeddings_chat_and_media() -> None:
+    schedule = Scheduler(chat_debounce=0)
+    bulk = schedule.acquire("bulk")
+    assert schedule.preempt.is_set() is False
+
+    def wait(kind: str, started: threading.Event) -> None:
+        ticket = schedule.acquire(kind)
+        started.set()
+        schedule.release(ticket)
+
+    for kind in ("embed", "chat", "media"):
+        started = threading.Event()
+        thread = threading.Thread(target=wait, args=(kind, started))
+        thread.start()
+        _wait_until(lambda k=kind: schedule.waiting(k) == 1)
+        assert schedule.preempt.is_set()
+        schedule.release(bulk)
+        assert started.wait(2)
+        thread.join(2)
+        assert schedule.preempt.is_set() is False
+        bulk = schedule.acquire("bulk")
+    schedule.release(bulk)
+
+
+def test_a_second_bulk_ticket_does_not_set_preempt() -> None:
+    schedule = Scheduler(chat_debounce=0)
+    first = schedule.acquire("bulk")
+    entered = threading.Event()
+
+    def wait_bulk() -> None:
+        ticket = schedule.acquire("bulk")
+        entered.set()
+        schedule.release(ticket)
+
+    thread = threading.Thread(target=wait_bulk)
+    thread.start()
+    _wait_until(lambda: schedule.waiting("bulk") == 1)
+    assert schedule.preempt.is_set() is False
+    schedule.release(first)
+    assert entered.wait(2)
+    thread.join(2)
+
+
+def test_an_embedding_sets_preempt_on_interactive_media() -> None:
+    schedule = Scheduler(chat_debounce=0)
+    media = schedule.acquire("media")
+    started = threading.Event()
+
+    def wait_embed() -> None:
+        ticket = schedule.acquire("embed")
+        started.set()
+        schedule.release(ticket)
+
+    thread = threading.Thread(target=wait_embed)
+    thread.start()
+    _wait_until(lambda: schedule.waiting("embed") == 1)
+    assert schedule.preempt.is_set()
+    schedule.release(media)
+    assert started.wait(2)
+    thread.join(2)
+    assert schedule.preempt.is_set() is False
+
+
+def test_a_second_media_ticket_still_leaves_interactive_media_preempt_clear() -> None:
+    schedule = Scheduler(chat_debounce=0)
+    media = schedule.acquire("media")
+    started = threading.Event()
+
+    def wait_media() -> None:
+        ticket = schedule.acquire("media")
+        started.set()
+        schedule.release(ticket)
+
+    thread = threading.Thread(target=wait_media)
+    thread.start()
+    _wait_until(lambda: schedule.waiting("media") == 1)
+    assert schedule.preempt.is_set() is False
+    schedule.release(media)
+    assert started.wait(2)
+    thread.join(2)
+
+
+def test_a_chat_ticket_still_sets_preempt_on_interactive_media() -> None:
+    schedule = Scheduler(chat_debounce=0)
+    media = schedule.acquire("media")
+    started = threading.Event()
+
+    def wait_chat() -> None:
+        ticket = schedule.acquire("chat")
+        started.set()
+        schedule.release(ticket)
+
+    thread = threading.Thread(target=wait_chat)
+    thread.start()
+    _wait_until(lambda: schedule.waiting("chat") == 1)
+    assert schedule.preempt.is_set()
+    schedule.release(media)
+    assert started.wait(2)
+    thread.join(2)
+    assert schedule.preempt.is_set() is False
+
+
+def test_media_queue_for_follows_the_handler_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    from favlo.pipelines import media_queue_for
+
+    class _Fields:
+        kind = "video"
+        id_prefix = "video_"
+        object_name = "video"
+        table_name = "videos"
+
+        def parse(self, body: dict) -> dict:
+            return body
+
+        def describe(self, request: dict) -> dict:
+            return {}
+
+        def identity(self, request: dict) -> str:
+            return ""
+
+        def matches(self, request: dict, identity: object) -> bool:
+            return True
+
+        def generate(self, runtime, request, hold, job, stop, call: MediaCall):
+            del runtime, request, hold, job, stop, call
+            return None
+
+        def pack(self, runtime, request, result, job, home, table, call):
+            del runtime, request, result, job, home, table, call
+            return None
+
+        def main(self, argv):
+            del argv
+            return 0
+
+        def open_runtime(self, path, **kwargs):
+            del path, kwargs
+            return _Runtime()
+
+        def mcp_tools(self):
+            return ()
+
+    class _Interactive(_Fields, MediaPipeline):
+        pass
+
+    class _Bulk(_Fields, BulkMediaPipeline):
+        pass
+
+    interactive = _Interactive()
+    bulk = _Bulk()
+    monkeypatch.setattr("favlo.pipelines.pipeline_module", lambda selection: object())
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda model, **kwargs: type("Sel", (), {"pipeline": "example"})(),
+    )
+    monkeypatch.setattr(
+        "favlo.pipelines.handler_for",
+        lambda kind, module, handler=None: interactive,
+    )
+    assert media_queue_for("video", {"model": "example"}) == "media"
+    monkeypatch.setattr(
+        "favlo.pipelines.handler_for",
+        lambda kind, module, handler=None: bulk,
+    )
+    assert media_queue_for("video", {"model": "example"}) == "bulk"
+
+
+def test_served_video_handlers_are_bulk_instances() -> None:
+    from wan22_i2v.metal41.chat import handle_video as i2v
+
+    assert isinstance(i2v, BulkMediaPipeline)
+    assert isinstance(i2v, MediaPipeline)
 
 
 def test_an_embedding_does_not_set_preempt_or_clear_a_language_debounce() -> None:
@@ -219,6 +402,17 @@ class _Check(MediaPipeline):
         del runtime, request, result, job, home, table, call
         return None
 
+    def main(self, argv):
+        del argv
+        return 0
+
+    def open_runtime(self, path, **kwargs):
+        del path, kwargs
+        return _Runtime()
+
+    def mcp_tools(self):
+        return ()
+
 
 def _state() -> dict:
     return {"preempt": threading.Event(), "cancel": threading.Event()}
@@ -274,6 +468,14 @@ def test_language_on_open_assigns_the_stop_callable() -> None:
     class _Box:
         def handle_responses(self, reply, runtime, body, selection, args, state) -> None:
             del reply, runtime, body, selection, args, state
+
+        def main(self, argv):
+            del argv
+            return 0
+
+        def open_runtime(self, path, **kwargs):
+            del path, kwargs
+            return object()
 
     class _Qwen(_Box, LanguagePipeline):
         def on_open(self, runtime, reply, selection) -> None:

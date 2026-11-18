@@ -5,15 +5,17 @@ never a socket. ``GET /v1/models`` lists language and embeddings rows from
 the registry and does not take the request lock. ``GET /props`` and
 ``GET /v1/props`` report that row's context and whether its pipeline embeds
 a still. They do not load the model and do not take the request lock. The
-pipeline manager admits the GPU: embeddings, then chats, then media. An
-embedding waits until the open chat returns. A chat that has not started
-waits while an embedding is queued or running. A chat preempts media and
-leaves ``preempt`` set until the chat queue is empty. A chat whose client
-leaves before that model is opened does not open a runtime. A chat that
-leaves without a reply is not reported as a pipeline failure. An embedding
-does not set ``preempt``. It opens beside the resident model without waiting
-on a memory hold or ``wait_released``, and closes when the request returns.
-Image, video, music, and voice run on the MCP queue. The manager opens the
+pipeline manager admits the GPU: embeddings, then chats, then interactive
+media, then bulk. An embedding waits until the open chat returns. A chat that
+has not started waits while an embedding is queued or running. A chat preempts
+interactive media and bulk and leaves ``preempt`` set until the chat queue is
+empty. An embedding also preempts interactive media and bulk. An interactive
+media waiter preempts bulk. A chat whose client leaves before that model is
+opened does not open a runtime. A chat that leaves without a reply is not
+reported as a pipeline failure. An embedding opens beside the resident model
+without waiting on a memory hold or ``wait_released``, and closes when the
+request returns. Image, video, music, and voice run on the MCP queue. The
+handler instance chooses the media or bulk deque. The manager opens the
 runtime that serves the request.
 """
 
@@ -44,6 +46,8 @@ from favlo.pipelines import (
     drop_runtime,
     foreground_busy,
     handler_for,
+    media_busy,
+    media_queue_for,
     open_for,
     release_admission,
 )
@@ -596,10 +600,29 @@ def _run_media(
     raw: bytes,
     reply: LiveReply,
 ) -> None:
-    """Run one media call. Resume it only after the foreground queue drains."""
+    """Run one media call. Resume it only after higher deques drain."""
+    from favlo.listener import _video_body
+
+    try:
+        if kind in {"video", "music"}:
+            body = _video_body(content_type, raw)
+        else:
+            parsed = json.loads(raw or b"{}")
+            if not isinstance(parsed, dict):
+                message = "request body must be an object"
+                raise ValueError(message)
+            body = parsed
+        queue = media_queue_for(kind, body)
+    except LookupError as exc:
+        reply.json(404, {"error": {"message": str(exc), "type": "not_found"}})
+        return
+    except (json.JSONDecodeError, ValueError) as exc:
+        reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+        return
     epoch = admission_epoch(state)
+    state["media_queue"] = queue
     while True:
-        ticket = admit(state, "media")
+        ticket = admit(state, queue)
         if ticket is None:
             _leave_cleared(reply)
             return
@@ -664,6 +687,9 @@ def _run_once(
         if kind in {"chat", "responses"} and _client_left(wire):
             return
         if kind in _MEDIA_KINDS and foreground_busy(state):
+            state["media_yield"] = True
+            return
+        if kind in _MEDIA_KINDS and state.get("media_queue") == "bulk" and media_busy(state):
             state["media_yield"] = True
             return
         if kind in _MEDIA_KINDS:

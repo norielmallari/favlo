@@ -4,7 +4,7 @@ This package is an embeddings pipeline. It inherits `EmbeddingsPipeline`. The cl
 
 A change to `embed` or the list object loads the seam-checks skill. Do not paste those commands here.
 
-Admission is `embed`. An embeddings request sits ahead of chats that have not started and does not set `preempt`. `resident` is `beside`. `waits_for_memory` is false: the request does not wait on a memory hold or on `wait_released`, and its process does not take that hold while it loads or unloads. A lazy `open_for` keeps the second process in `_open_embed_for` when this model is not already resident, and parks the resident when it is. `embeddings_ttl_seconds` stays in settings.
+Admission is `embed`. An embeddings request sits ahead of chats that have not started and sets `preempt` on interactive media and bulk. `resident` is `beside`. `waits_for_memory` is false: the request does not wait on a memory hold or on `wait_released`, and its process does not take that hold while it loads or unloads. A lazy `open_for` keeps the second process in `_open_embed_for` when this model is not already resident, and parks the resident when it is. `embeddings_ttl_seconds` stays in settings.
 
 Bind `handle_embed` to the one `Pipeline` instance. `embed` returns the vector and the token count. The class writes `usage.prompt_tokens`. Do not copy the list object into this package. Do not catch `ValueError` around the reply builder.
 

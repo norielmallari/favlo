@@ -16,11 +16,11 @@ One module, one responsibility. Line count is not the trigger. Imports point one
 
 The write set for one backend is `pipelines/<model>/<runtime>/`, `docs/<model>/`, and tests that import only that package. `PIPELINE` in the package is the model id. Registration loads `sampling.py` from the package that owns the row. Do not pass a sampling card into the registry.
 
-A served media package inherits `MediaPipeline`. A served language model inherits `LanguagePipeline`. A served embedding model inherits `EmbeddingsPipeline`. All three extend `Pipeline`. Those classes do not run a forward, name stages, or branch on the pipeline. A kernel does not branch on the pipeline. A new abstract method on `Pipeline` updates every subclass of every seam. A new abstract method on one seam updates every subclass of that seam. A seam migration may edit every served subclass of that seam in one change.
+A served interactive media package inherits `MediaPipeline`. A served video package inherits `BulkMediaPipeline`. A served language model inherits `LanguagePipeline`. A served embedding model inherits `EmbeddingsPipeline`. All four extend `Pipeline`. Those classes do not run a forward, name stages, or branch on the pipeline. A kernel does not branch on the pipeline. A new abstract method on `Pipeline` updates every subclass of every seam. A new abstract method on one seam updates every subclass of that seam. A seam migration may edit every served subclass of that seam in one change.
 
 A pipeline calls `begin`, `count`, `end`, and `note` on the console. It does not add a phase, a unit, or a note topic for one package. Progress reporting is `docs/progress-reporting.md`. Synthetic `matmul2d` dtype rates are `docs/synthetic-matmul2d.md`.
 
-A seam task may edit `language_pipeline.py`, `embeddings_pipeline.py`, `media_pipeline.py`, `media_memory.py`, `memory.py`, `mcp_server.py`, `response_chain.py`, `schedule.py`, and `pipelines.py`, and the listener, the registry, and the console. It does not edit another package to do that.
+A seam task may edit `language_pipeline.py`, `embeddings_pipeline.py`, `media_pipeline.py`, `bulk_media_pipeline.py`, `media_memory.py`, `memory.py`, `mcp_server.py`, `response_chain.py`, `schedule.py`, and `pipelines.py`, and the listener, the registry, and the console. It does not edit another package to do that.
 
 ## Algorithms
 
@@ -38,7 +38,7 @@ Spans for one runtime share one owner string. The string is the flag stem, a col
 
 ## Media preemption
 
-An image, video, or music package reads preempt at each stage boundary, after the Metal command already submitted has finished. An embeddings request does not set `preempt` and does not close that device. On preempt, save the finished stage in a host checkpoint, leave the job in progress with the same id, and return. `close` then releases the device so the chat model can allocate. The listener calls the same handler again after those chats. The handler loads that checkpoint and continues. Cancel drops the checkpoint and does not resume. Device buffers do not survive `close`. A value the next stage needs is in the host checkpoint, kept in that package.
+An image, video, or music package reads preempt at each stage boundary, after the Metal command already submitted has finished. A chat or an embeddings request sets `preempt` and the media package closes that device. On preempt, save the finished stage in a host checkpoint, leave the job in progress with the same id, and return. `close` then releases the device so the chat or embedding model can allocate. The listener calls the same handler again after those higher requests. The handler loads that checkpoint and continues. Cancel drops the checkpoint and does not resume. Device buffers do not survive `close`. A value the next stage needs is in the host checkpoint, kept in that package.
 
 ## Checks
 

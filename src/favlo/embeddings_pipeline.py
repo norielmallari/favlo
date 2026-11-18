@@ -23,15 +23,16 @@ class EmbeddingsRequestError(ValueError):
 class EmbeddingsPipeline(Pipeline):
     """One string in, one dense vector out.
 
-    The scheduler reads these flags. This seam does not set ``preempt`` and
-    opens beside the resident model. It does not wait on a memory hold or on
-    ``wait_released``, and its process does not take that hold while it loads
-    or unloads.
+    The scheduler reads these flags. A waiting embedding sets ``preempt`` on
+    interactive media and bulk. It opens beside the resident model. It does
+    not wait on a memory hold or on ``wait_released``, and its process does
+    not take that hold while it loads or unloads.
     """
 
     kind = "embed"
     admission = frozenset({"embed"})
-    preempts_media = False
+    preempts_media = True
+    preempts_bulk = True
     drop_if_disconnected = False
     debounce_after_release = False
     resident = "beside"

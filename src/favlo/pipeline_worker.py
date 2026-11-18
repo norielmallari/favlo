@@ -906,13 +906,15 @@ def _child_state(message: dict[str, Any], control: dict[str, threading.Event], k
 
 def _loads_media_hold(kind: str) -> bool:
     """A language or embeddings call does not unpickle a media checkpoint."""
+    from favlo.bulk_media_pipeline import BulkMediaPipeline
     from favlo.media_pipeline import MediaPipeline
     from favlo.schedule import seam_for
 
     try:
-        return seam_for(kind) is MediaPipeline
+        seam = seam_for(kind)
     except ValueError:
         return False
+    return seam is MediaPipeline or seam is BulkMediaPipeline
 
 
 def _export_holds(state: dict[str, Any]) -> dict[str, str | None]:

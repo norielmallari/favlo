@@ -10,7 +10,8 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from favlo.media_pipeline import MediaTool, MediaCall, MediaPipeline, MediaRequestError, checkpoint
+from favlo.bulk_media_pipeline import BulkMediaPipeline
+from favlo.media_pipeline import MediaTool, MediaCall, MediaRequestError, checkpoint
 from favlo.videos import reported_quality, store_source, sweep_videos
 from wan22_i2v.metal41.hold import ClipHold
 from wan22_i2v.metal41.png import decode_png, resize_rgb
@@ -59,7 +60,7 @@ def handle_chat(
     _reject(reply, "wan22_i2v generates video at POST /v1/videos", None)
 
 
-class Pipeline(MediaPipeline):
+class Pipeline(BulkMediaPipeline):
     """Wan I2V's listener contract. The DiT stays in the runtime."""
 
     kind = "video"

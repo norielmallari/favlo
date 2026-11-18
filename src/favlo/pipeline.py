@@ -1,8 +1,9 @@
 """The daemon call shared by every served pipeline.
 
-``LanguagePipeline``, ``EmbeddingsPipeline``, and ``MediaPipeline`` extend
-this class. It does not run a forward, name a stage, or branch on the
-pipeline. ``handle`` and ``main`` are abstract. This class catches nothing.
+``LanguagePipeline``, ``EmbeddingsPipeline``, ``MediaPipeline``, and
+``BulkMediaPipeline`` extend this class. It does not run a forward, name a
+stage, or branch on the pipeline. ``handle`` and ``main`` are abstract. This
+class catches nothing.
 """
 
 from __future__ import annotations

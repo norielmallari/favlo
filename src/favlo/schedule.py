@@ -1,16 +1,15 @@
 """GPU admission for the pipeline manager.
 
-Two queues. The foreground queue is embeddings, then chats that have not
-started. The media queue runs only when the foreground queue is empty.
-Which kinds preempt, drop a disconnected waiter, debounce, and wait on a
-memory hold live on ``LanguagePipeline``, ``EmbeddingsPipeline``, and
-``MediaPipeline``. This module runs the queues. A chat preempts media at
-its next safe point and leaves ``preempt`` set until the chat queue has
-drained. After a chat releases, a short debounce keeps media from admitting
-so the next model call can reuse the resident language model. An embedding
-does not set ``preempt``, does not preempt a chat that already holds the
-GPU, and does not wait on a memory hold. ``flush`` drops every waiter. The
-request that holds admission stays until it releases.
+Four queues. Embeddings, then chats that have not started, then interactive
+media, then bulk. Which kinds preempt, drop a disconnected waiter, debounce,
+and wait on a memory hold live on ``LanguagePipeline``, ``EmbeddingsPipeline``,
+``MediaPipeline``, and ``BulkMediaPipeline``. This module runs the queues. A
+chat or an embedding preempts interactive media and bulk at the next safe
+point and leaves ``preempt`` set until that higher deque has drained. An
+interactive media waiter preempts bulk. After a chat releases, a short
+debounce keeps media and bulk from admitting so the next model call can reuse
+the resident language model. ``flush`` drops every waiter. The request that
+holds admission stays until it releases.
 """
 
 from __future__ import annotations
@@ -21,11 +20,12 @@ from collections import deque
 from typing import Any
 
 _CHAT_DEBOUNCE_SECONDS = 1.0
-_QUEUE_KINDS = frozenset({"embed", "chat", "responses", "media"})
+_QUEUE_KINDS = frozenset({"embed", "chat", "responses", "media", "bulk"})
 
 
 def seam_for(kind: str) -> type:
     """The admission class for an HTTP or queue kind."""
+    from favlo.bulk_media_pipeline import BulkMediaPipeline
     from favlo.embeddings_pipeline import EmbeddingsPipeline
     from favlo.language_pipeline import LanguagePipeline
     from favlo.media_pipeline import MediaPipeline
@@ -34,6 +34,8 @@ def seam_for(kind: str) -> type:
         return LanguagePipeline
     if kind in EmbeddingsPipeline.admission:
         return EmbeddingsPipeline
+    if kind in BulkMediaPipeline.admission:
+        return BulkMediaPipeline
     if kind in MediaPipeline.admission:
         return MediaPipeline
     message = f"unknown queue kind {kind}"
@@ -54,14 +56,15 @@ def disconnect_event(kind: str, flag: Any) -> Any:
 
 
 def _foreground(kind: str) -> bool:
-    """True for a language or embeddings kind. Media waits behind both."""
+    """True for a language or embeddings kind. Media and bulk wait behind both."""
     try:
         seam = seam_for(kind)
     except ValueError:
         return False
+    from favlo.bulk_media_pipeline import BulkMediaPipeline
     from favlo.media_pipeline import MediaPipeline
 
-    return seam is not MediaPipeline
+    return seam is not MediaPipeline and seam is not BulkMediaPipeline
 
 
 def _queue_is_media(kind: str) -> bool:
@@ -69,6 +72,15 @@ def _queue_is_media(kind: str) -> bool:
 
     try:
         return seam_for(kind) is MediaPipeline
+    except ValueError:
+        return False
+
+
+def _queue_is_bulk(kind: str) -> bool:
+    from favlo.bulk_media_pipeline import BulkMediaPipeline
+
+    try:
+        return seam_for(kind) is BulkMediaPipeline
     except ValueError:
         return False
 
@@ -100,6 +112,7 @@ class Scheduler:
         self._embeds: deque[_Ticket] = deque()
         self._chats: deque[_Ticket] = deque()
         self._media: deque[_Ticket] = deque()
+        self._bulk: deque[_Ticket] = deque()
         self._running: _Ticket | None = None
         self._holding = 0
         self._holders: list[str] = []
@@ -162,7 +175,7 @@ class Scheduler:
         with self._cond:
             self.epoch += 1
             self._chat_debounce_until = 0.0
-            for queue in (self._embeds, self._chats, self._media):
+            for queue in (self._embeds, self._chats, self._media, self._bulk):
                 while queue:
                     self._dropped.add(id(queue.popleft()))
             self._sync_preempt()
@@ -227,7 +240,15 @@ class Scheduler:
                 return True
             return self._debounce_active()
 
+    def media_busy(self) -> bool:
+        """True when interactive media is queued or holds admission."""
+        with self._cond:
+            if self._media:
+                return True
+            return self._running is not None and _queue_is_media(self._running.kind)
+
     def _queue(self, kind: str) -> deque[_Ticket]:
+        from favlo.bulk_media_pipeline import BulkMediaPipeline
         from favlo.embeddings_pipeline import EmbeddingsPipeline
         from favlo.language_pipeline import LanguagePipeline
 
@@ -236,6 +257,8 @@ class Scheduler:
             return self._embeds
         if seam is LanguagePipeline:
             return self._chats
+        if seam is BulkMediaPipeline:
+            return self._bulk
         return self._media
 
     def _is_next(self, ticket: _Ticket) -> bool:
@@ -249,6 +272,10 @@ class Scheduler:
             if self._debounce_active():
                 return False
             return ticket is self._media[0]
+        if self._bulk:
+            if self._debounce_active():
+                return False
+            return ticket is self._bulk[0]
         return False
 
     def _debounce_active(self) -> bool:
@@ -258,7 +285,8 @@ class Scheduler:
         if cancellable:
             return 0.05
         remaining = self._chat_debounce_until - time.monotonic()
-        if remaining > 0 and self._media and not self._embeds and not self._chats:
+        waiting_media = self._media or self._bulk
+        if remaining > 0 and waiting_media and not self._embeds and not self._chats:
             return min(0.05, remaining)
         return None
 
@@ -276,12 +304,24 @@ class Scheduler:
     def _sync_preempt(self) -> None:
         from favlo.embeddings_pipeline import EmbeddingsPipeline
         from favlo.language_pipeline import LanguagePipeline
+        from favlo.media_pipeline import MediaPipeline
 
-        media = self._running is not None and _queue_is_media(self._running.kind)
+        running = self._running
+        if running is None:
+            self.preempt.clear()
+            return
+        media = _queue_is_media(running.kind)
+        bulk = _queue_is_bulk(running.kind)
         waiting = False
         if media and self._chats and LanguagePipeline.preempts_media:
             waiting = True
         if media and self._embeds and EmbeddingsPipeline.preempts_media:
+            waiting = True
+        if bulk and self._chats and LanguagePipeline.preempts_bulk:
+            waiting = True
+        if bulk and self._embeds and EmbeddingsPipeline.preempts_bulk:
+            waiting = True
+        if bulk and self._media and MediaPipeline.preempts_bulk:
             waiting = True
         if waiting:
             self.preempt.set()

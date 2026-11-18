@@ -30,7 +30,7 @@ def _wait_until(ready, timeout: float = 2.0) -> None:
     assert ready()
 
 
-def test_an_embedding_does_not_preempt_media_and_runs_before_the_chat() -> None:
+def test_an_embedding_preempts_media_and_runs_before_the_chat() -> None:
     schedule = Scheduler(chat_debounce=0)
     order: list[str] = []
     media = schedule.acquire("media")
@@ -38,7 +38,7 @@ def test_an_embedding_does_not_preempt_media_and_runs_before_the_chat() -> None:
     chat = threading.Thread(target=_run, args=(schedule, "chat", order))
     embed.start()
     _wait_until(lambda: schedule.waiting("embed") == 1)
-    assert schedule.preempt.is_set() is False
+    assert schedule.preempt.is_set() is True
     assert schedule.foreground() is True
     chat.start()
     _wait_until(lambda: schedule.waiting("chat") == 1)
@@ -158,13 +158,13 @@ def test_an_embedding_does_not_preempt_a_running_chat() -> None:
     assert schedule.preempt.is_set() is False
 
 
-def test_waiting_work_runs_embeddings_then_chats_then_media_fifo() -> None:
+def test_waiting_work_runs_embeddings_then_chats_then_media_then_bulk_fifo() -> None:
     schedule = Scheduler()
     order: list[str] = []
     schedule.hold_memory()
     threads = [
         threading.Thread(target=_run, args=(schedule, kind, order))
-        for kind in ("media", "chat", "embed", "media", "chat", "embed")
+        for kind in ("bulk", "media", "chat", "embed", "bulk", "media", "chat", "embed")
     ]
     for thread in threads:
         thread.start()
@@ -172,6 +172,7 @@ def test_waiting_work_runs_embeddings_then_chats_then_media_fifo() -> None:
         lambda: order.count("embed") == 2
         and schedule.waiting("chat") == 2
         and schedule.waiting("media") == 2
+        and schedule.waiting("bulk") == 2
     )
     assert schedule.foreground() is True
     assert schedule.preempt.is_set() is False
@@ -180,7 +181,7 @@ def test_waiting_work_runs_embeddings_then_chats_then_media_fifo() -> None:
     for thread in threads:
         thread.join(2)
         assert thread.is_alive() is False
-    assert order == ["embed", "embed", "chat", "chat", "media", "media"]
+    assert order == ["embed", "embed", "chat", "chat", "media", "media", "bulk", "bulk"]
 
 
 def test_a_second_media_waits_and_does_not_set_preempt() -> None:
@@ -257,7 +258,7 @@ def test_chat_debounce_expires_so_media_can_resume() -> None:
     assert schedule.foreground() is False
 
 
-def test_preempt_clears_when_the_chat_leaves_and_an_embedding_is_still_waiting() -> None:
+def test_preempt_stays_when_the_chat_leaves_and_an_embedding_is_still_waiting() -> None:
     schedule = Scheduler()
     media_in = threading.Event()
     media_go = threading.Event()
@@ -284,7 +285,7 @@ def test_preempt_clears_when_the_chat_leaves_and_an_embedding_is_still_waiting()
     cancel.set()
     assert closed.wait(2)
     chat.join(2)
-    assert schedule.preempt.is_set() is False
+    assert schedule.preempt.is_set() is True
     assert schedule.waiting("embed") == 1
     media_go.set()
     assert embed_in.wait(2)
@@ -393,21 +394,30 @@ def test_flush_drops_every_waiter_and_the_running_request_stays() -> None:
         except ClientClosed:
             closed.append(kind)
 
-    threads = [threading.Thread(target=wait, args=(kind,)) for kind in ("embed", "chat", "media")]
+    threads = [
+        threading.Thread(target=wait, args=(kind,)) for kind in ("embed", "chat", "media", "bulk")
+    ]
     for thread in threads:
         thread.start()
     _wait_until(
         lambda: schedule.waiting("embed") == 1
         and schedule.waiting("chat") == 1
         and schedule.waiting("media") == 1
+        and schedule.waiting("bulk") == 1
     )
     assert schedule.preempt.is_set() is True
     epoch = schedule.epoch
     schedule.flush()
     for thread in threads:
         thread.join(2)
-    assert sorted(closed) == ["chat", "embed", "media"]
-    assert schedule.waiting("embed") == schedule.waiting("chat") == schedule.waiting("media") == 0
+    assert sorted(closed) == ["bulk", "chat", "embed", "media"]
+    assert (
+        schedule.waiting("embed")
+        == schedule.waiting("chat")
+        == schedule.waiting("media")
+        == schedule.waiting("bulk")
+        == 0
+    )
     assert schedule.preempt.is_set() is False
     assert schedule.running() == "media"
     assert schedule.epoch == epoch + 1

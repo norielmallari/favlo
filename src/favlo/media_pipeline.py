@@ -89,6 +89,7 @@ class MediaPipeline(Pipeline):
     seeds: bool = True
     admission = frozenset({"media", "image", "video", "music", "voice"})
     preempts_media = False
+    preempts_bulk = True
     drop_if_disconnected = False
     debounce_after_release = False
     resident = "exclusive"
@@ -97,6 +98,10 @@ class MediaPipeline(Pipeline):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if getattr(cls, "__abstractmethods__", frozenset()):
+            return
+        # ABC has not assigned ``__abstractmethods__`` yet when this runs, so an
+        # intermediate seam marks itself instead of setting job fields.
+        if cls.__dict__.get("_seam_only"):
             return
         values: dict[str, str] = {}
         for name in ("kind", "id_prefix", "object_name"):

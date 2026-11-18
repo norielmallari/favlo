@@ -25,6 +25,7 @@ class LanguagePipeline(Pipeline):
     kind = "responses"
     admission = frozenset({"chat", "responses"})
     preempts_media = True
+    preempts_bulk = True
     drop_if_disconnected = True
     debounce_after_release = True
     resident = "exclusive"

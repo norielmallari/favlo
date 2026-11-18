@@ -786,6 +786,27 @@ def admit(state: dict[str, Any], kind: str, cancel: Any = None) -> Any:
         return None
 
 
+def media_queue_for(kind: str, body: dict[str, Any]) -> str:
+    """``bulk`` or ``media`` from the handler instance. Does not open a runtime."""
+    from favlo.bulk_media_pipeline import BulkMediaPipeline
+    from favlo.registry import resolve
+
+    model = body.get("model")
+    if not isinstance(model, str) or not model:
+        message = "model is required"
+        raise LookupError(message)
+    selection = resolve(model)
+    module = pipeline_module(selection)
+    named = body.get("handler")
+    handler = handler_for(kind, module, named if isinstance(named, str) else None)
+    if handler is None:
+        message = f"{selection.pipeline} does not serve {kind}"
+        raise LookupError(message)
+    if isinstance(handler, BulkMediaPipeline):
+        return "bulk"
+    return "media"
+
+
 def release_admission(state: dict[str, Any], ticket: Any) -> None:
     admission(state).release(ticket)
 
@@ -796,6 +817,10 @@ def admission_epoch(state: dict[str, Any]) -> int:
 
 def foreground_busy(state: dict[str, Any]) -> bool:
     return bool(admission(state).foreground())
+
+
+def media_busy(state: dict[str, Any]) -> bool:
+    return bool(admission(state).media_busy())
 
 
 def run_job(task_id: str, work: Callable[[], Any]) -> Any:
