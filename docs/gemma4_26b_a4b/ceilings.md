@@ -2,7 +2,7 @@
 
 Bandwidth and kernel ceilings for the kernels `gemma4_26b_a4b` launches. Recompute when any of these kernels changes:
 
-`gemv_fp8`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `kv_dequant_heads`, `kv_gather_half`, `kv_cast_q`, `kv_softmax_raw`, `kv_acc_add`, `kv_attend_store`, `matmul_half_batch`, `matmul_half_64_batch`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, `sample_topk`.
+`gemv_fp8`, `gemv_fp8_vec`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `kv_dequant_heads`, `kv_gather_half`, `kv_cast_q`, `kv_softmax_raw`, `kv_acc_add`, `kv_attend_store`, `matmul_half_batch`, `matmul_half_64_batch`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, `sample_topk`.
 
 The CPU reads one sampled token. Expert ids stay on device.
 
@@ -191,3 +191,13 @@ The rows below time each projection kernel in its own command buffer, on 2 Novem
 | `sample_topk` | 64 | 1 | 40.2 |
 
 The packed intervals above are the kernel ceiling. Local attention at 65536 and 131072 keys stays inside the 1024-key window. Global attention walks every key.
+
+19 November 2026. Decode projections launch `gemv_fp8_vec` instead of `gemv_fp8`. One simdgroup owns one row and the lanes read consecutive 32-byte blocks. The same measurement, one command buffer then a wait, the first sample discarded, the median of the next four:
+
+| Shape | `gemv_fp8` µs | `gemv_fp8_vec` µs |
+|---|---:|---:|
+| 4096×2816 | 208.1 | 154.1 |
+| 2816×2176, active 2112 | 130.6 | 109.3 |
+| 8192×2816 | 429.8 | 305.4 |
+
+A 32×256 pair agreed within 4.3e-6. The packed token above was timed with `gemv_fp8` and is not recomputed here.

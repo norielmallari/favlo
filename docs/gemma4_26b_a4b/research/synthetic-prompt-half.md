@@ -103,3 +103,14 @@ The banner was `kv half mtp off depth 3 thinking off decode 128`, and every meas
 | 10000 | 812.87 tok/s (10000 tok in 12.30 s) | 25.41 tok/s (128 tok in 5.04 s) | 584.08 tok/s (10128 tok in 17.34 s) |
 
 The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "911.63 OR 937.42 OR 975.64 OR 812.87 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.
+
+19 November 2026. Decode projections launch `gemv_fp8_vec`. The same protocol run, nonce `7d0eba7f`, recorded:
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 935.02 tok/s (512 tok in 0.55 s) | 33.74 tok/s (128 tok in 3.79 s) | 147.47 tok/s (640 tok in 4.34 s) |
+| 1024 | 938.28 tok/s (1024 tok in 1.09 s) | 33.85 tok/s (128 tok in 3.78 s) | 236.55 tok/s (1152 tok in 4.87 s) |
+| 4096 | 1046.11 tok/s (4096 tok in 3.92 s) | 32.97 tok/s (128 tok in 3.88 s) | 541.54 tok/s (4224 tok in 7.80 s) |
+| 10000 | 884.93 tok/s (10000 tok in 11.30 s) | 27.38 tok/s (128 tok in 4.68 s) | 633.79 tok/s (10128 tok in 15.98 s) |
+
+The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "935.02 OR 938.28 OR 1046.11 OR 884.93 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.

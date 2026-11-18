@@ -3417,6 +3417,68 @@ kernel void gemv_fp8(
     }
 }
 
+// One simdgroup, one output row. Lanes read consecutive 32-byte blocks.
+// active is a multiple of 32. The row stride stays k_pad.
+kernel void gemv_fp8_vec(
+    device const uchar* codes [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device const float* activation [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& k_pad [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    constant uint& active [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    uint blocks = active >> 5u;
+    device const uchar* row_w = codes + (ulong)row * k_pad;
+    device const uchar* row_scale = scales + (ulong)row * (k_pad >> 5u);
+    float acc = 0.0f;
+    for (uint block = lane; block < blocks; block += 32u) {
+        float factor = as_type<float>(uint(row_scale[block]) << 23);
+        device const uint4* words = (device const uint4*)(row_w + (block << 5u));
+        uint4 packed0 = words[0];
+        uint4 packed1 = words[1];
+        device const float4* act = (device const float4*)(activation + (block << 5u));
+        float sum = 0.0f;
+        uint4 words4[2] = {packed0, packed1};
+        for (uint chunk = 0u; chunk < 2u; ++chunk) {
+            uint w0 = words4[chunk].x;
+            uint w1 = words4[chunk].y;
+            uint w2 = words4[chunk].z;
+            uint w3 = words4[chunk].w;
+            float4 a0 = act[chunk * 4u];
+            float4 a1 = act[chunk * 4u + 1u];
+            float4 a2 = act[chunk * 4u + 2u];
+            float4 a3 = act[chunk * 4u + 3u];
+            sum += (e4m3_mag(uchar(w0)) * ((w0 & 0x80u) != 0u ? -1.0f : 1.0f)) * a0.x;
+            sum += (e4m3_mag(uchar(w0 >> 8u)) * (((w0 >> 8u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a0.y;
+            sum += (e4m3_mag(uchar(w0 >> 16u)) * (((w0 >> 16u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a0.z;
+            sum += (e4m3_mag(uchar(w0 >> 24u)) * (((w0 >> 24u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a0.w;
+            sum += (e4m3_mag(uchar(w1)) * ((w1 & 0x80u) != 0u ? -1.0f : 1.0f)) * a1.x;
+            sum += (e4m3_mag(uchar(w1 >> 8u)) * (((w1 >> 8u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a1.y;
+            sum += (e4m3_mag(uchar(w1 >> 16u)) * (((w1 >> 16u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a1.z;
+            sum += (e4m3_mag(uchar(w1 >> 24u)) * (((w1 >> 24u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a1.w;
+            sum += (e4m3_mag(uchar(w2)) * ((w2 & 0x80u) != 0u ? -1.0f : 1.0f)) * a2.x;
+            sum += (e4m3_mag(uchar(w2 >> 8u)) * (((w2 >> 8u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a2.y;
+            sum += (e4m3_mag(uchar(w2 >> 16u)) * (((w2 >> 16u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a2.z;
+            sum += (e4m3_mag(uchar(w2 >> 24u)) * (((w2 >> 24u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a2.w;
+            sum += (e4m3_mag(uchar(w3)) * ((w3 & 0x80u) != 0u ? -1.0f : 1.0f)) * a3.x;
+            sum += (e4m3_mag(uchar(w3 >> 8u)) * (((w3 >> 8u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a3.y;
+            sum += (e4m3_mag(uchar(w3 >> 16u)) * (((w3 >> 16u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a3.z;
+            sum += (e4m3_mag(uchar(w3 >> 24u)) * (((w3 >> 24u) & 0x80u) != 0u ? -1.0f : 1.0f)) * a3.w;
+        }
+        acc += sum * factor;
+    }
+    float total = simd_sum(acc);
+    if (lane == 0u) {
+        destination[row] = total;
+    }
+}
+
 kernel void residual_scale(
     device float* hidden [[buffer(0)]],
     device const float* update [[buffer(1)]],

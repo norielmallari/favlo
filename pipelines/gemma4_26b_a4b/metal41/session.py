@@ -33,6 +33,7 @@ _KERNELS = (
     "gemv_fp4_routed",
     "gemv_fp4_at",
     "gemv_fp8",
+    "gemv_fp8_vec",
     "gemv_fp8_at",
     "write_rows",
     "write_rows_tight",

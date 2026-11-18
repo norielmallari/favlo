@@ -147,7 +147,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - A span already in the loaded prefix logs `vision cached` and uploads nothing.
 - The process does not keep those rows.
 - The runtime keeps the resident fp8 bytes.
-- Decode reads a projection in `gemv_fp8` and the embedding in `embed_fp8`.
+- Decode reads a projection in `gemv_fp8_vec` and the embedding in `embed_fp8`.
 - The eight routed experts of a token launch from the ids the router wrote on device, one `gemv_fp4_at` and one `gemv_fp8_at` per projection, and the token does not read those ids back.
 - A prefill chunk is 1024 tokens on `fp8_e4m3` and 640 tokens on `half`. It submits every ten layers, so the prefill count advances while the device runs.
 - On `fp8_e4m3`, prefill scores every key head of a tile with `matmul_half_64_batch` and decode scores them with `matmul_half_batch`.
@@ -161,7 +161,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - The down projection pads K from 704 to 768.
 - A dense prefill batch restores the large attention projections into an int8 stage and multiplies with `prefill_i8_n64` when the chunk is at least 256 tokens.
 - Local key and value, the shared MLP, and shorter chunks stay on `matmul_fp8`.
-- Decode stays `gemv_fp8` on the packed bytes.
+- Decode stays `gemv_fp8_vec` on the packed bytes. One simdgroup owns one output row and reads consecutive 32-byte blocks.
 - The atlas is not expanded.
 - The router stays Metal half and uses `matmul2d`.
 

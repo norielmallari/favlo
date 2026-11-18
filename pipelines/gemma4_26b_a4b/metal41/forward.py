@@ -1536,15 +1536,15 @@ class Gemma4Runtime:
     def _linear(self, source: object, matrix: Matrix, count: int) -> None:
         if matrix.kind == "matmul_fp8":
             self.session.encode(
-                "gemv_fp8",
+                "gemv_fp8_vec",
                 [matrix.data, matrix.scales, source, self.out],
                 [
                     self.session._u32(matrix.k_pad),
                     self.session._u32(matrix.rows),
                     self.session._u32(min(count, matrix.k)),
                 ],
-                ((matrix.rows + 7) // 8, 1, 1),
-                (64, 1, 1),
+                (matrix.rows, 1, 1),
+                (32, 1, 1),
                 origins=[matrix.origin, matrix.scale_origin, 0, 0],
             )
             return
