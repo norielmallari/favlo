@@ -229,7 +229,7 @@ The packed record may also hold the official MTP head as Metal `half` (`mtp-half
 
 ## CUDA
 
-As-built note for the CUDA runtime of `qwen35_4b`. The official checkpoint is [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) (Apache License 2.0). The compiler and libraries are the NVIDIA CUDA Toolkit on this machine, `nvcc` from that install. A pip wheel is not the toolkit.
+As-built note for the CUDA runtime of `qwen35_4b`. The official checkpoint is [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) (Apache License 2.0). Windows loads `engine.dll` beside `engine.cu`. Open and serve do not compile it. The NVIDIA driver supplies `nvcuda.dll` and `nvcudart_hybrid64.dll`. `kernels` rewrites that library when `engine.cu` is newer, and that step uses the CUDA Toolkit `nvcc` on this machine. A pip wheel is not the toolkit.
 
 `favlo serve` on a Windows terminal with an empty registry downloads the checkpoint and packs the plane that fits the device budget. The budget is the live free memory from the driver, minus a 256 MiB hold-back. The CUDA runtime reports that free count and does not guarantee an allocation of all of it. The registry key `device_budget` is a positive byte count and lowers that budget. An omitted key leaves the live count. The int8 cache stops at 131072 tokens.
 
@@ -248,7 +248,7 @@ uv run favlo --qwen35_4b setup
 uv run favlo --qwen35_4b kernels
 ```
 
-`kernels` compiles with the CUDA Toolkit for compute capability 8.6 and later. The cubins are sm_86 (RTX 30), sm_89 (RTX 40), and sm_120 (RTX 50), plus sm_120 PTX so a later device of that family can JIT. A device below 8.6 is refused. The int8 check is a cuBLASLt `s8 * s8 + s32` matmul. The int4 check is one toolkit WMMA s4 tile, shape 8×8×32, `s4 * s4 + s32`. Nibbles are packed low-first, the same order as the quantizer.
+`kernels` rewrites the shipped `engine.dll` and compiles the dispatch with the CUDA Toolkit for compute capability 8.6 and later. The cubins are sm_86 (RTX 30), sm_89 (RTX 40), and sm_120 (RTX 50), plus sm_120 PTX so a later device of that family can JIT. A device below 8.6 is refused. The int8 check is a cuBLASLt `s8 * s8 + s32` matmul. The int4 check is one toolkit WMMA s4 tile, shape 8×8×32, `s4 * s4 + s32`. Nibbles are packed low-first, the same order as the quantizer.
 
 The text coding agent on this int8 opening, MTP off, vision off, and thinking on, is recorded in [research/coding-text-cuda.md](research/coding-text-cuda.md). The same agent with thinking off is recorded in [research/coding-instruct-cuda.md](research/coding-instruct-cuda.md). The page needle on this int8 opening, MTP off and thinking off, is recorded in [research/needle-page-int8.md](research/needle-page-int8.md). The thinking-on cold synthetic prompts on this int8 opening, MTP off, are recorded in [research/synthetic-prompt-thinking-cuda.md](research/synthetic-prompt-thinking-cuda.md). The instruct cold synthetic prompts on this int8 opening, MTP off, are recorded in [research/synthetic-prompt-cuda.md](research/synthetic-prompt-cuda.md). Kernel and bandwidth ceilings are in [cuda-ceilings.md](cuda-ceilings.md).
 

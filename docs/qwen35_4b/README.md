@@ -25,7 +25,8 @@ How to download, pack, and talk to `qwen35_4b`. The kernel contract is [ARCHITEC
 
 ### What you need
 
-- Apple Silicon, or Windows with the NVIDIA CUDA Toolkit
+- Apple Silicon, or Windows with an NVIDIA driver
+- On Windows, open and serve load the `engine.dll` that ships in this package. They do not compile it. `kernels` is the rebuild, and that step uses the CUDA Toolkit.
 - Metal 4.1 on Apple Silicon
 - 16 GB of memory
 - Python 3.12 or newer

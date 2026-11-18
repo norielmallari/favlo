@@ -14,7 +14,7 @@ _SOURCE = _HERE / "dispatch.cu"
 _ENGINE = _HERE / "engine.cu"
 _BUILD = _HERE / "build"
 _EXE = _BUILD / ("dispatch.exe" if os.name == "nt" else "dispatch")
-_DLL = _BUILD / ("engine.dll" if os.name == "nt" else "libengine.so")
+_SHIPPED = _HERE / ("engine.dll" if os.name == "nt" else "libengine.so")
 # RTX 30 is sm_86, RTX 40 is sm_89, RTX 50 is sm_120. The PTX image
 # lets a later 12.x device JIT when it has no cubin of its own.
 _GENCODE = (
@@ -25,21 +25,22 @@ _GENCODE = (
 )
 
 
-def ensure_engine() -> Path:
-    """Compile the language step when its source is newer than the library."""
-    home = cuda_home()
-    if home is None:
-        message = "CUDA Toolkit is not installed"
-        raise RuntimeError(message)
-    return _compile_engine(home)
+def shipped_engine() -> Path:
+    """The engine library that ships in the checkout. Open and serve load this file."""
+    if _SHIPPED.is_file():
+        return _SHIPPED
+    name = "engine.dll" if os.name == "nt" else "libengine.so"
+    message = f"{name} is not in the checkout"
+    raise FileNotFoundError(message)
 
 
 def run_kernels() -> None:
-    """Compile the dispatch when the source is newer, then run it on this device."""
+    """Rebuild the shipped engine and the dispatch, then run the dispatch on this device."""
     home = cuda_home()
     if home is None:
         message = "CUDA Toolkit is not installed"
         raise RuntimeError(message)
+    _compile_engine(home)
     exe = _compile(home)
     env = os.environ.copy()
     env["PATH"] = str(home / "bin" / "x64") + os.pathsep + env.get("PATH", "")
@@ -152,10 +153,10 @@ def _compile(home: Path) -> Path:
 
 
 def _compile_engine(home: Path) -> Path:
+    """Rewrite the shipped engine when ``engine.cu`` is newer. ``kernels`` is this step."""
     nvcc = _nvcc(home)
-    _BUILD.mkdir(parents=True, exist_ok=True)
-    if _DLL.is_file() and _DLL.stat().st_mtime >= _ENGINE.stat().st_mtime:
-        return _DLL
+    if _SHIPPED.is_file() and _SHIPPED.stat().st_mtime >= _ENGINE.stat().st_mtime:
+        return _SHIPPED
     command = [
         str(nvcc),
         "-O2",
@@ -165,11 +166,11 @@ def _compile_engine(home: Path) -> Path:
         *_host_flags(),
         str(_ENGINE),
         "-o",
-        str(_DLL),
+        str(_SHIPPED),
         f"-I{home / 'include'}",
     ]
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip() or "nvcc failed"
         raise RuntimeError(detail)
-    return _DLL
+    return _SHIPPED

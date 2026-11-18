@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import ctypes
-import os
 from typing import Any
 
 import numpy as np
-
-from favlo.host import cuda_home
 
 _LIB: ctypes.CDLL | None = None
 
@@ -34,15 +31,11 @@ def _checks() -> Any:
 
 
 def library() -> ctypes.CDLL:
-    """The compiled step. The toolkit's runtime directory is on the loader path."""
+    """The shipped engine. The driver supplies the CUDA runtime. This does not compile."""
     global _LIB
     if _LIB is not None:
         return _LIB
-    ensure_engine = _checks().ensure_engine
-    home = cuda_home()
-    if home is not None:
-        os.add_dll_directory(str(home / "bin" / "x64"))
-    lib = ctypes.CDLL(str(ensure_engine()))
+    lib = ctypes.CDLL(str(_checks().shipped_engine()))
     _bind(lib)
     _LIB = lib
     return lib
