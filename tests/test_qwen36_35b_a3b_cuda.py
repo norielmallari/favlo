@@ -77,6 +77,24 @@ def test_int4_roundtrip_stays_inside_the_grid() -> None:
     assert len(blob) == 2 * 16 + 2 * 4
 
 
+def test_sector_read_roundtrip(tmp_path: Path) -> None:
+    import ctypes
+    import os
+
+    if os.name != "nt":
+        return
+    disk = _load("disk.py", "qwen36_cuda_disk_test")
+    payload = bytes(index % 251 for index in range(12 << 20))
+    path = tmp_path / "span.bin"
+    path.write_bytes(payload)
+    dest = disk.alloc_pages(len(payload))
+    try:
+        disk.read_span(path, 4096, dest, len(payload) - 4096)
+        assert ctypes.string_at(dest, len(payload) - 4096) == payload[4096:]
+    finally:
+        disk.free_pages(dest)
+
+
 def test_sampling_card() -> None:
     sampling = _load("sampling.py", "qwen36_cuda_sampling_test")
     assert sampling.DEFAULT_VARIANT == "thinking"

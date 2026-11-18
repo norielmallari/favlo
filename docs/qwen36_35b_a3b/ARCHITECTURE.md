@@ -481,11 +481,11 @@ RMSNorm multiplies the normalized row by one plus the weight. Gated DeltaNet sca
 
 ## Atlas
 
-The 1,024 int8 expert images are uploaded once and stay in VRAM for the open. The 9,216 int4 images stay in host RAM. That host span is registered read-only after it is written, and the open refuses when the driver will not lock it. The hot path does not read the layer files again.
+The 1,024 int8 expert images are uploaded once and stay in VRAM for the open. The 9,216 int4 images stay in host RAM. Windows reads each layer file with sector-aligned unbuffered transfers, four at a time. Int4 images are placed in the host span and int8 images are uploaded from that read. The host span is registered read-only after it is written, and the open refuses when the driver will not lock it. The hot path does not read the layer files again.
 
 The language weights, the resident int8 experts, the floor key/value cache, and the activation scratch take their opening first. The int8 images are a fixed cost. The bytes the engine still reports free, minus a 32 MiB margin, hold int4 images. A repeat reads that copy. A miss streams the image from the locked host span into a free slot, or into the least recently used slot once the pool is full. Growing the context frees whole int4 slots and discards the copies they held. The eight-slot stage is the path when that cache cannot be allocated. An int8 image uses an int8 activation. An int4 image uses an int4 activation. The shared expert stays in the resident int8 record on the device.
 
-The router, the top 8, and the mix weights stay on the device. Prefill reads every id in the tile back once per layer. Each distinct expert is copied once. The gate products of that tile launch together, then the down products, and each product is reused for every token that selected the expert. An int8 id uses the resident device pointer and does not copy. Decode still reads eight ids for the one token. The prefill loop publishes the completed token count once per tile. The decode token loop does not.
+The router, the top 8, and the mix weights stay on the device. Prefill reads every id in the tile back once per layer. Each distinct expert is copied once. The copies of one layer use a side stream, 64 experts at a time. The next wave's copy runs while the current wave's gate and down products run, and a repeated device slot waits until that product finishes. Each product is reused for every token that selected the expert. An int8 id uses the resident device pointer and does not copy. Decode still reads eight ids for the one token. The prefill loop publishes the completed token count once per tile. The decode token loop does not.
 
 ## Forward
 

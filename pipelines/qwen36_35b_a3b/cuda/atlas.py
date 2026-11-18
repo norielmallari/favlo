@@ -7,10 +7,13 @@ read again on the hot path.
 
 from __future__ import annotations
 
+import ctypes
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from qwen36_35b_a3b.cuda.disk import alloc_pages, free_pages, read_file
 
 from favlo.host import available_bytes
 from qwen36_35b_a3b.cuda.layout import (
@@ -158,37 +161,38 @@ class ExpertAtlas:
         return sizes
 
     def _load(self, folder: Path, sizes: list[int]) -> None:
+        scratch = alloc_pages(max(sizes))
+        pinned = self.engine.register(scratch, max(sizes))
         int8_index = 0
         host_cursor = 0
-        origin = int(self._buffer.ctypes.data)
-        for layer, size in enumerate(sizes):
-            path = folder / f"{layer}.bin"
-            blob = path.read_bytes()
-            if len(blob) != size:
-                message = f"{path.name} read {len(blob)} bytes, not {size}"
-                raise RuntimeError(message)
-            for expert in range(EXPERTS):
-                width = int(self.widths[layer, expert])
-                off = int(self.offsets[layer, expert])
-                image = INT8_IMAGE if width == 8 else INT4_IMAGE
-                piece = blob[off : off + image]
-                if len(piece) != image:
-                    message = f"layer {layer} expert {expert} is short"
-                    raise RuntimeError(message)
-                if width == 8:
-                    dest = self._pinned + int8_index * INT8_IMAGE
-                    self.engine.h2d(dest, piece)
-                    self._device[(layer, expert)] = dest
-                    int8_index += 1
-                    continue
-                begin = self.host - origin + host_cursor
-                self._buffer[begin : begin + INT4_IMAGE] = np.frombuffer(piece, dtype=np.uint8)
-                self._host_at[(layer, expert)] = host_cursor
-                host_cursor += INT4_IMAGE
+        try:
+            for layer, size in enumerate(sizes):
+                path = folder / f"{layer}.bin"
+                read_file(path, scratch, size)
+                for expert in range(EXPERTS):
+                    width = int(self.widths[layer, expert])
+                    off = int(self.offsets[layer, expert])
+                    image = INT8_IMAGE if width == 8 else INT4_IMAGE
+                    if off + image > size:
+                        message = f"layer {layer} expert {expert} is short"
+                        raise RuntimeError(message)
+                    if width == 8:
+                        dest = self._pinned + int8_index * INT8_IMAGE
+                        self.engine.h2d_ptr(dest, scratch + off, image)
+                        self._device[(layer, expert)] = dest
+                        int8_index += 1
+                        continue
+                    ctypes.memmove(self.host + host_cursor, scratch + off, image)
+                    self._host_at[(layer, expert)] = host_cursor
+                    host_cursor += INT4_IMAGE
+        finally:
+            self.engine.sync()
+            if pinned:
+                self.engine.unregister(scratch)
+            free_pages(scratch)
         if host_cursor != self.nbytes or int8_index != int((self.widths == 8).sum()):
             message = "expert atlas did not place every image"
             raise RuntimeError(message)
-        self.engine.sync()
 
     def _lock_host(self) -> None:
         if self.nbytes < 1:

@@ -1286,8 +1286,9 @@ __global__ void silu_quant_kernel(
     const int* group_n,
     int groups,
     int gate_rows,
-    int inner) {
-    int sel = blockIdx.x;
+    int inner,
+    int sel_base) {
+    int sel = blockIdx.x + sel_base;
     int block = threadIdx.x;
     int blocks = inner >> 5;
     if (block >= blocks) {
@@ -2032,6 +2033,104 @@ static int fused_ready() {
     return fused_alloc(reinterpret_cast<void**>(&g_act_scale), static_cast<size_t>(4096) * 16 * sizeof(float));
 }
 
+static cudaEvent_t g_copied[256] = {};
+static cudaEvent_t g_consumed[256] = {};
+static int g_pipe_n = 0;
+
+static int pipe_events(int count) {
+    while (g_pipe_n < count) {
+        int status = check(cudaEventCreateWithFlags(&g_copied[g_pipe_n], cudaEventDisableTiming));
+        if (status != 0) {
+            return status;
+        }
+        status = check(cudaEventCreateWithFlags(&g_consumed[g_pipe_n], cudaEventDisableTiming));
+        if (status != 0) {
+            return status;
+        }
+        g_pipe_n += 1;
+    }
+    return 0;
+}
+
+static int copy_expert(
+    unsigned long long destination, unsigned long long source, int bytes, cudaStream_t stream) {
+    if (bytes < 1) {
+        return 0;
+    }
+    return check(cudaMemcpyAsync(
+        reinterpret_cast<void*>(destination), reinterpret_cast<const void*>(source), static_cast<size_t>(bytes),
+        cudaMemcpyHostToDevice, stream));
+}
+
+static int slot_owner(const unsigned long long* device, int next, int live) {
+    unsigned long long slot = device[next];
+    int owner = -1;
+    if (slot == 0) {
+        return owner;
+    }
+    for (int group = 0; group < live; ++group) {
+        if (device[group] == slot) {
+            owner = group;
+        }
+    }
+    return owner;
+}
+
+static int copy_span(
+    const unsigned long long* device,
+    const unsigned long long* host_src,
+    const int* copy_bytes,
+    int begin,
+    int end,
+    cudaStream_t stream) {
+    for (int group = begin; group < end; ++group) {
+        int status = copy_expert(device[group], host_src[group], copy_bytes[group], stream);
+        if (status != 0) {
+            return status;
+        }
+    }
+    return 0;
+}
+
+static bool span_alias(const unsigned long long* device, int live, int begin, int end) {
+    for (int group = begin; group < end; ++group) {
+        if (slot_owner(device, group, live) >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void launch_span(
+    int begin,
+    int count,
+    int hidden,
+    int gate_rows,
+    int down_inner,
+    int down_rows,
+    int topk,
+    int sel0,
+    int seln,
+    int groups,
+    float* moe,
+    const float* route) {
+    dim3 gate_grid((gate_rows + 3) / 4, count);
+    gate_rows_kernel<<<gate_grid, 128, 0, g_stream>>>(
+        g_fused_ptr + begin, g_fused_meta + begin, g_fused_meta + 256 + begin, g_fused_meta + 512 + begin,
+        g_fused_tok, g_fused_meta + 768 + begin, g_codes8, g_scales8, g_codes4, g_scales4, g_gate, hidden,
+        gate_rows);
+    if (seln < 1) {
+        return;
+    }
+    silu_quant_kernel<<<seln, 32, 0, g_stream>>>(
+        g_gate, g_act, g_act_scale, g_fused_meta, g_fused_meta + 256, groups, gate_rows, down_inner, sel0);
+    dim3 down_grid((down_rows + 3) / 4, count);
+    down_rows_kernel<<<down_grid, 128, 0, g_stream>>>(
+        g_fused_ptr + begin, g_fused_meta + begin, g_fused_meta + 256 + begin, g_fused_meta + 512 + begin,
+        g_fused_tok, g_fused_slot, g_fused_meta + 1024 + begin, g_fused_meta + 1280 + begin, g_act,
+        g_act_scale, moe, route, down_inner, down_rows, hidden, topk);
+}
+
 API int engine_grouped_mlp(
     const unsigned long long* device,
     const unsigned long long* host_src,
@@ -2078,15 +2177,6 @@ API int engine_grouped_mlp(
     int cursor = 0;
     for (int group = 0; group < groups; ++group) {
         off[group] = cursor;
-        int bytes = copy_bytes[group];
-        if (bytes > 0) {
-            status = check(cudaMemcpyAsync(
-                reinterpret_cast<void*>(device[group]), reinterpret_cast<const void*>(host_src[group]),
-                static_cast<size_t>(bytes), cudaMemcpyHostToDevice, g_stream));
-            if (status != 0) {
-                return status;
-            }
-        }
         cursor += group_n[group];
     }
     if (cursor > 4096) {
@@ -2101,6 +2191,21 @@ API int engine_grouped_mlp(
     }
     if (ntok > 512) {
         return 1;
+    }
+    status = pipe_events(groups);
+    if (status != 0) {
+        return status;
+    }
+    cudaStream_t copy_stream = g_side != nullptr ? g_side : g_stream;
+    constexpr int kWave = 64;
+    int first = groups < kWave ? groups : kWave;
+    status = copy_span(device, host_src, copy_bytes, 0, first, copy_stream);
+    if (status != 0) {
+        return status;
+    }
+    status = check(cudaEventRecord(g_copied[0], copy_stream));
+    if (status != 0) {
+        return status;
     }
     status = check(cudaMemcpyAsync(
         g_fused_ptr, device, sizeof(unsigned long long) * static_cast<size_t>(groups), cudaMemcpyHostToDevice,
@@ -2134,18 +2239,46 @@ API int engine_grouped_mlp(
         quant_matrix_kernel<<<ntok, 64, 0, g_stream>>>(normed, g_codes8, g_scales8, hidden, ntok, 127);
         quant_matrix_kernel<<<ntok, 64, 0, g_stream>>>(normed, g_codes4, g_scales4, hidden, ntok, 7);
     }
-    dim3 gate_grid((gate_rows + 3) / 4, groups);
-    gate_rows_kernel<<<gate_grid, 128, 0, g_stream>>>(
-        g_fused_ptr, g_fused_meta, g_fused_meta + 256, g_fused_meta + 512, g_fused_tok, g_fused_meta + 768,
-        g_codes8, g_scales8, g_codes4, g_scales4, g_gate, hidden, gate_rows);
-    if (cursor > 0) {
-        silu_quant_kernel<<<cursor, 32, 0, g_stream>>>(
-            g_gate, g_act, g_act_scale, g_fused_meta, g_fused_meta + 256, groups, gate_rows, down_inner);
-        dim3 down_grid((down_rows + 3) / 4, groups);
-        down_rows_kernel<<<down_grid, 128, 0, g_stream>>>(
-            g_fused_ptr, g_fused_meta, g_fused_meta + 256, g_fused_meta + 512, g_fused_tok, g_fused_slot,
-            g_fused_meta + 1024, g_fused_meta + 1280, g_act, g_act_scale, moe, route, down_inner,
-            down_rows, hidden, topk);
+    int wave = 0;
+    for (int begin = 0; begin < groups; begin += kWave, ++wave) {
+        int end = begin + kWave;
+        if (end > groups) {
+            end = groups;
+        }
+        status = check(cudaStreamWaitEvent(g_stream, g_copied[wave], 0));
+        if (status != 0) {
+            return status;
+        }
+        int sel0 = off[begin];
+        int sel1 = end < groups ? off[end] : cursor;
+        launch_span(
+            begin, end - begin, hidden, gate_rows, down_inner, down_rows, topk, sel0, sel1 - sel0, groups,
+            moe, route);
+        status = check(cudaEventRecord(g_consumed[wave], g_stream));
+        if (status != 0) {
+            return status;
+        }
+        if (end >= groups) {
+            continue;
+        }
+        int next = end + kWave;
+        if (next > groups) {
+            next = groups;
+        }
+        if (span_alias(device, end, end, next)) {
+            status = check(cudaStreamWaitEvent(copy_stream, g_consumed[wave], 0));
+            if (status != 0) {
+                return status;
+            }
+        }
+        status = copy_span(device, host_src, copy_bytes, end, next, copy_stream);
+        if (status != 0) {
+            return status;
+        }
+        status = check(cudaEventRecord(g_copied[wave + 1], copy_stream));
+        if (status != 0) {
+            return status;
+        }
     }
     status = check(cudaGetLastError());
     if (status != 0) {

@@ -22,6 +22,7 @@ from qwen36_35b_a3b.cuda import progress
 from qwen36_35b_a3b.cuda.atlas import ExpertAtlas
 from qwen36_35b_a3b.cuda.closed import RequestClosed
 from qwen36_35b_a3b.cuda.engine import Engine
+from qwen36_35b_a3b.cuda.disk import alloc_pages, free_pages, read_span
 from qwen36_35b_a3b.cuda.layout import (
     ATTN_SCALE,
     CONTEXT_CAP,
@@ -57,7 +58,7 @@ from qwen36_35b_a3b.cuda.layout import (
     scratch_items,
 )
 
-_CHUNK = 8 << 20
+_CHUNK = 32 << 20
 
 
 class Qwen36Runtime:
@@ -694,15 +695,28 @@ class Qwen36Runtime:
                 self._at(f"model.language_model.layers.{layer}.linear_attn.in_proj_qkv.weight")
 
     def _upload(self, path: Path, nbytes: int, row: Any) -> None:
-        with path.open("rb") as handle:
+        hold = min(_CHUNK, max(nbytes, 4096))
+        window = alloc_pages(hold)
+        pinned = self.engine.register(window, hold)
+        try:
             done = 0
-            while done < nbytes:
-                blob = handle.read(min(_CHUNK, nbytes - done))
-                if not blob:
-                    break
-                self.engine.h2d(self.base + done, blob)
-                done += len(blob)
-                progress.note_load(row, len(blob))
+            aligned = nbytes - (nbytes % 4096)
+            while done < aligned:
+                chunk = min(_CHUNK, aligned - done)
+                read_span(path, done, window, chunk)
+                self.engine.h2d_ptr(self.base + done, window, chunk)
+                done += chunk
+                progress.note_load(row, chunk)
+            if done < nbytes:
+                tail = nbytes - done
+                read_span(path, done, window, tail)
+                self.engine.h2d_ptr(self.base + done, window, tail)
+                progress.note_load(row, tail)
+        finally:
+            self.engine.sync()
+            if pinned:
+                self.engine.unregister(window)
+            free_pages(window)
 
     def _alloc(self, nbytes: int, *, zero: bool = False) -> int:
         pointer = self.engine.alloc(nbytes)
