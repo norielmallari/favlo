@@ -28,6 +28,7 @@ Another pipeline does not edit it.
 
 ```text
 uv run favlo --voxcpm2 setup
+uv run favlo --voxcpm2 pack
 uv run favlo --voxcpm2 inspect
 uv run favlo --voxcpm2 kernels
 ```
@@ -47,6 +48,72 @@ It checks the following against the host formulas:
 
 One stack step is checked as a single command buffer.
 
+## Packed record
+
+`pack` reads `model.safetensors` and `audiovae.pth`.
+
+It writes `weights.bin` and `pack.json` in the checkout.
+
+It does not delete either source file.
+
+```text
+uv run favlo --voxcpm2 pack
+uv run favlo --voxcpm2 pack --src <checkout> --dest <directory>
+```
+
+`weights.bin` is one contiguous blob.
+
+`pack.json` is version 1.
+
+It names the blob and each tensor's kind, dtype, shape, offset, and byte length.
+
+A linear also stores its padded shape.
+
+Each tensor starts on a 128-byte boundary.
+
+The bytes between tensors are zero.
+
+The groups are written in this order.
+
+Each group is sorted by name:
+
+- Padded float16 linears. The values are the bfloat16-to-float32 promotion, then the float16 cast in `Session.resident`. N is padded to 32 and K to 256. Pad cells are zero. The stored payload is that padded matrix.
+- Float16 RMSNorm gains, with no pad.
+- Float32 biases, with no pad.
+- The token embedding, float32 and row-major, shape `[vocab, dim]`.
+- Other host vectors, including `feat_encoder.special_token`, float32, in checkpoint shape.
+- AudioVAE tensors after `weight_v` / `weight_g` fusion, float32 and C-order.
+
+Open allocates one shared buffer for `weights.bin` and fills it with an 8 MiB sequential read.
+
+`Store.weight`, `Store.gain`, and `Store.bias_handle` are spans at those offsets.
+
+Convolution weights and biases are spans in the same buffer.
+
+`conv1d` and `conv_transpose1d` release a weight they uploaded for that call.
+
+A packed span is not that handle, so the buffer stays for the next call.
+
+`matmul_f16`, `rmsnorm_row`, `bias_pack`, `causal_conv1d`, and `causal_transpose1d` are unchanged.
+
+The linear payload is larger than the safetensors tensor by the pad.
+
+`working_set_bytes` follows the file open reads, plus the scratch reservation.
+
+When `weights.bin` and `pack.json` are present, that file is `weights.bin`.
+
+When they are absent, it is `model.safetensors` plus `audiovae.pth`.
+
+Open then memory-maps the safetensors file and unpickles `audiovae.pth`.
+
+`models add` still accepts a tree that has `model.safetensors` and `config.json`.
+
+A tree with `weights.bin` and `config.json`, and no safetensors, is complete as well.
+
+`kernels` builds a temporary safetensors file for the shader check.
+
+That check is not the serve path.
+
 `favlo --voxcpm2` does not generate audio.
 
 Speech goes through `favlo media` only.
@@ -55,7 +122,7 @@ Speech goes through `favlo media` only.
 
 `favlo media --pipeline voxcpm2` writes one 48 kHz WAV through the listener.
 
-- Checkpoint bfloat16 linears are uploaded as `half`.
+- `matmul_f16` binds float16 linears padded to N 32 and K 256.
 - `matmul2d` accumulates into float.
 - A language-model step runs as one command buffer.
 - One diffusion estimate, including its conditioning projections and the diffusion stack, runs as one command buffer.
@@ -118,7 +185,7 @@ The AudioVAE decoder is float32, weight-normalized, and conditioned on the 48 kH
 
 This package does not keep a private memory cap.
 
-`models add <folder>` writes `manifest.json` with `complete` true when that directory holds `model.safetensors` and `config.json`, then registers the folder.
+`models add <folder>` writes `manifest.json` with `complete` true when `config.json` is present and the directory holds `model.safetensors` or `weights.bin`, then registers the folder.
 
 The served record is `models/VoxCPM2`, a link to the checkout.
 
@@ -130,7 +197,7 @@ The row key in `models/registry.json` is the folder passed to `models add`, `Vox
 
 `setup` does not register.
 
-`models add` writes `manifest.json` with `complete` true when the directory holds `model.safetensors` and `config.json`, then registers that folder.
+`models add` writes `manifest.json` with `complete` true when `config.json` is present and the directory holds `model.safetensors` or `weights.bin`, then registers that folder.
 
 `alias` stays null unless `models add` is given one, so the folder is the public id.
 
@@ -150,7 +217,7 @@ save_registry(data)
 |---|---|---|
 | `alias` | resolve | One name, with no colon and no slash, or `null`. |
 | `pipeline_default` | omitted model | `true` on one row of this pipeline. Enabling it clears the mark on the other rows of this pipeline. |
-| `directory` | open | The checkout `serve` opens. It holds `model.safetensors` and `config.json`. |
+| `directory` | open | The checkout `serve` opens. It holds `config.json` and either `model.safetensors` or `weights.bin`. |
 
 The file key `media.voice` is the folder `favlo media` uses when the command omits `--model` and that folder is this pipeline.
 

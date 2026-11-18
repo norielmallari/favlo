@@ -11,7 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
-from voxcpm2.metal41.metal import Session
+from voxcpm2.metal41.metal import Session, Span
+from voxcpm2.metal41.store import tensor_view
 
 
 class Decoder:
@@ -27,9 +28,42 @@ class Decoder:
     ) -> None:
         self.session = session
         self.rates = rates
-        self.state = _load(path)
+        self.state = load_decoder(path)
+        self._spans: dict[str, Span] | None = None
         self.sr_index = _bucket(rate, boundaries)
-        _normalize(self.state)
+
+    @classmethod
+    def from_records(
+        cls,
+        session: Session,
+        buffer: object,
+        records: dict[str, dict[str, object]],
+        handle: object,
+        rates: tuple[int, ...],
+        boundaries: tuple[int, ...],
+        rate: int,
+    ) -> Decoder:
+        """Bind AudioVAE tensors already fused into ``buffer``."""
+        self = cls.__new__(cls)
+        self.session = session
+        self.rates = rates
+        self.state = {}
+        self._spans = {}
+        for name, row in records.items():
+            if row.get("kind") != "vae":
+                continue
+            array = tensor_view(buffer, row)
+            self.state[name] = array
+            self._spans[name] = Span(
+                handle,
+                int(row["offset"]),
+                tuple(int(item) for item in array.shape),
+            )
+        if not self._spans:
+            message = "the pack has no AudioVAE weights"
+            raise ValueError(message)
+        self.sr_index = _bucket(rate, boundaries)
+        return self
 
     def decode(self, latent: np.ndarray) -> np.ndarray:
         """``latent`` is ``[channels, time]``. The waveform is one float32 channel."""
@@ -93,20 +127,36 @@ class Decoder:
     ) -> np.ndarray:
         return self.session.conv1d(
             data,
-            self.state[f"{prefix}.weight"],
-            self.state[f"{prefix}.bias"],
+            self._param(f"{prefix}.weight"),
+            self._param(f"{prefix}.bias"),
             left=left,
             dilation=dilation,
             groups=groups,
         )
 
     def _transpose(self, data: np.ndarray, prefix: str, stride: int) -> np.ndarray:
-        weight = self.state[f"{prefix}.weight"]
+        weight = self._param(f"{prefix}.weight")
         if int(weight.shape[-1]) != stride * 2:
             message = f"{prefix} kernel is {weight.shape[-1]}, the stride is {stride}"
             raise ValueError(message)
-        bias = self.state[f"{prefix}.bias"]
+        bias = self._param(f"{prefix}.bias")
         return self.session.conv_transpose1d(data, weight, bias, stride=stride)
+
+    def _param(self, name: str) -> np.ndarray | Span:
+        if self._spans is None:
+            return self.state[name]
+        span = self._spans.get(name)
+        if span is None:
+            message = f"{name} is not in the packed decoder"
+            raise KeyError(message)
+        return span
+
+
+def load_decoder(path: Path) -> dict[str, np.ndarray]:
+    """Float32 decoder state. ``weight_v`` and ``weight_g`` are already fused."""
+    state = _load(path)
+    _normalize(state)
+    return state
 
 
 def _bucket(rate: int, boundaries: tuple[int, ...]) -> int:

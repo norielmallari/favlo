@@ -6,6 +6,8 @@ Those weights are under the Apache License, Version 2.0.
 
 `setup` downloads the checkout into `models/openbmb/VoxCPM2`.
 
+`pack` writes `weights.bin` and `pack.json` beside the checkout.
+
 `models add` registers a finished checkout.
 
 Chat completions are refused.
@@ -18,6 +20,7 @@ As-built detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```text
 uv run favlo --voxcpm2 setup
+uv run favlo --voxcpm2 pack
 uv run favlo --voxcpm2 inspect
 uv run favlo --voxcpm2 kernels
 uv run favlo --voxcpm2 models add VoxCPM2

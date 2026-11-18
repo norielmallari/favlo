@@ -27,6 +27,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("setup", help="download the VoxCPM2 checkout")
     inspect = sub.add_parser("inspect", help="summarize model.safetensors")
     inspect.add_argument("--src", type=Path, default=None)
+    pack = sub.add_parser("pack", help="write kernel-order weights next to the checkout")
+    pack.add_argument("--src", type=Path, default=None)
+    pack.add_argument("--dest", type=Path, default=None)
     sub.add_parser("kernels", help="compile the shader library and check the host formulas")
     models = sub.add_parser("models", help="list or edit the flavor registry")
     models_sub = models.add_subparsers(dest="models_command")
@@ -42,11 +45,23 @@ def main(argv: list[str] | None = None) -> int:
         return _setup()
     if args.command == "inspect":
         return _inspect(args.src)
+    if args.command == "pack":
+        return _pack(args.src, args.dest)
     if args.command == "kernels":
         return _kernels()
     if args.command == "models":
         return _models(args)
     return 2
+
+
+def _pack(src: Path | None, dest: Path | None) -> int:
+    from favlo.cli import repo_root
+    from voxcpm2.metal41.pack import write_pack
+
+    origin = src if src is not None else checkout(repo_root())
+    for name in write_pack(origin, dest):
+        print(name, flush=True)
+    return 0
 
 
 def _setup() -> int:
@@ -113,10 +128,16 @@ def _models(args: argparse.Namespace) -> int:
 def _mark_complete(folder: str) -> None:
     from favlo.cli import repo_root
 
-    path = repo_root() / "models" / folder
+    mark_complete(repo_root() / "models" / folder, folder)
+
+
+def mark_complete(path: Path, folder: str) -> None:
+    from voxcpm2.metal41.store import WEIGHTS_NAME
+
     weights = path / "model.safetensors"
+    blob = path / WEIGHTS_NAME
     config = path / "config.json"
-    if not weights.is_file() or not config.is_file():
+    if not config.is_file() or not (weights.is_file() or blob.is_file()):
         message = f"{folder} is not a VoxCPM2 checkout"
         raise ValueError(message)
     manifest = path / "manifest.json"

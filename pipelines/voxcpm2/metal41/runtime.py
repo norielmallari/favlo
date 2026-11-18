@@ -24,7 +24,14 @@ from voxcpm2.metal41.config import ModelConfig, load_config
 from voxcpm2.metal41.metal import Session
 from voxcpm2.metal41.progress import PATCH_CAP, VoiceProgress
 from voxcpm2.metal41.speak import generate
-from voxcpm2.metal41.store import Store
+from voxcpm2.metal41.store import (
+    WEIGHTS_NAME,
+    Store,
+    load_pack,
+    pack_ready,
+    read_blob,
+    weight_bytes,
+)
 from voxcpm2.metal41.text import style_line
 from voxcpm2.metal41.tokenize import LineTokenizer
 from voxcpm2.metal41.vae import Decoder
@@ -33,7 +40,7 @@ _SCRATCH = 256 << 20
 
 
 class Runtime:
-    """The published checkout. Weights move to the device on the first line."""
+    """The published checkout. A pack is read at open. An unpacked tree uploads on first use."""
 
     def __init__(
         self,
@@ -66,9 +73,7 @@ class Runtime:
     def working_set_bytes(self, request: Any) -> int:
         """Weight files plus the fixed scratch reservation."""
         del request
-        weights = self.path / "model.safetensors"
-        vae_path = self.path / "audiovae.pth"
-        return weights.stat().st_size + vae_path.stat().st_size + _SCRATCH
+        return weight_bytes(self.path) + _SCRATCH
 
     def close(self) -> None:
         if (
@@ -80,13 +85,13 @@ class Runtime:
             return
         before, held = begin_release(self._owner)
         try:
-            if self._session is not None:
-                self._session.close()
-                self._session = None
+            self._decoder = None
             if self._store is not None:
                 self._store.close()
                 self._store = None
-            self._decoder = None
+            if self._session is not None:
+                self._session.close()
+                self._session = None
             self._tokenizer = None
         finally:
             finish_release(self._owner, before, held)
@@ -153,11 +158,7 @@ class Runtime:
         )
         if ready:
             return self._session, self._store, self._decoder, self._tokenizer
-        vae_path = self.path / "audiovae.pth"
         tokenizer_path = self.path / "tokenizer.json"
-        if not vae_path.is_file():
-            message = f"{self.path.name} has no audiovae.pth"
-            raise FileNotFoundError(message)
         if not tokenizer_path.is_file():
             message = f"{self.path.name} has no tokenizer.json"
             raise FileNotFoundError(message)
@@ -165,12 +166,51 @@ class Runtime:
         if memory.room() < need:
             message = f"a voice line does not fit in {memory.room()} bytes"
             raise RuntimeError(message)
+        if pack_ready(self.path):
+            return self._open_packed(tokenizer_path)
+        vae_path = self.path / "audiovae.pth"
+        weights = self.path / "model.safetensors"
+        if (self.path / WEIGHTS_NAME).is_file() and not weights.is_file():
+            message = f"{self.path.name} pack is incomplete"
+            raise ValueError(message)
+        if not vae_path.is_file():
+            message = f"{self.path.name} has no audiovae.pth"
+            raise FileNotFoundError(message)
+        if not weights.is_file():
+            message = f"{self.path.name} has no model.safetensors"
+            raise FileNotFoundError(message)
         self._session = Session(self._owner)
         try:
-            self._store = Store(self.path / "model.safetensors")
+            self._store = Store(weights)
             self._decoder = Decoder(
                 self._session,
                 vae_path,
+                self.config.decoder_rates,
+                self.config.sr_boundaries,
+                self.config.out_sample_rate,
+            )
+            self._tokenizer = LineTokenizer(tokenizer_path)
+        except Exception:
+            self.close()
+            raise
+        return self._session, self._store, self._decoder, self._tokenizer
+
+    def _open_packed(self, tokenizer_path: Path) -> tuple[Session, Store, Decoder, LineTokenizer]:
+        body = load_pack(self.path)
+        records = body["tensors"]
+        if not isinstance(records, dict):
+            message = f"{self.path.name} pack has no tensors"
+            raise ValueError(message)
+        blob = self.path / str(body["file"])
+        self._session = Session(self._owner)
+        try:
+            handle, view = read_blob(blob, self._owner)
+            self._store = Store.bind(view, records, handle)
+            self._decoder = Decoder.from_records(
+                self._session,
+                view,
+                records,
+                handle,
                 self.config.decoder_rates,
                 self.config.sr_boundaries,
                 self.config.out_sample_rate,
@@ -191,10 +231,11 @@ def open_runtime(
     max_memory: str | None = None,
     owner: str | None = None,
 ) -> Runtime:
-    """Load ``config.json`` beside ``model.safetensors``. A missing file raises."""
+    """Load ``config.json``. The tree has ``model.safetensors`` or ``weights.bin``."""
     checkout = Path(path)
     weights = checkout / "model.safetensors"
-    if not weights.is_file():
+    blob = checkout / WEIGHTS_NAME
+    if not weights.is_file() and not blob.is_file():
         message = f"{checkout.name} has no model.safetensors"
         raise FileNotFoundError(message)
     config_path = checkout / "config.json"

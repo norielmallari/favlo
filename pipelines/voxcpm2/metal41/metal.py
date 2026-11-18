@@ -36,14 +36,73 @@ def _pad(value: int, tile: int) -> int:
 
 
 class Resident:
-    """A Linear weight already padded and uploaded as half."""
+    """A Linear weight already padded as half. ``offset`` is a byte span in ``handle``."""
 
-    def __init__(self, handle: object, rows: int, cols: int, rows_pad: int, cols_pad: int) -> None:
+    def __init__(
+        self,
+        handle: object,
+        rows: int,
+        cols: int,
+        rows_pad: int,
+        cols_pad: int,
+        offset: int = 0,
+    ) -> None:
         self.handle = handle
         self.rows = rows
         self.cols = cols
         self.rows_pad = rows_pad
         self.cols_pad = cols_pad
+        self.offset = int(offset)
+
+
+class Span:
+    """Bytes inside a long-lived shared buffer. A conv upload is a different handle."""
+
+    def __init__(self, handle: object, offset: int, shape: tuple[int, ...]) -> None:
+        self.handle = handle
+        self.offset = int(offset)
+        self.shape = tuple(int(item) for item in shape)
+
+
+def pad_linear(weight: np.ndarray) -> tuple[np.ndarray, int, int, int, int]:
+    """Pad a ``[out, in]`` matrix to the matmul tile and cast it to float16."""
+    matrix = np.asarray(weight)
+    if matrix.ndim != 2:
+        message = f"a linear weight has rank {matrix.ndim}"
+        raise ValueError(message)
+    out, inner = int(matrix.shape[0]), int(matrix.shape[1])
+    out_pad = _pad(out, TILE_N)
+    inner_pad = _pad(inner, K_ALIGN)
+    padded = np.zeros((out_pad, inner_pad), dtype=np.float16)
+    padded[:out, :inner] = np.ascontiguousarray(matrix, dtype=np.float16)
+    return padded, out, inner, out_pad, inner_pad
+
+
+def buffer_view(
+    buffer: object,
+    offset: int,
+    shape: tuple[int, ...],
+    dtype: np.dtype,
+) -> np.ndarray:
+    """A float view of ``shape`` at ``offset``. The view aliases ``buffer``."""
+    kind = np.dtype(dtype)
+    count = 1
+    for item in shape:
+        count *= int(item)
+    nbytes = count * int(kind.itemsize)
+    view = memoryview(buffer)[int(offset) : int(offset) + nbytes]
+    if len(view) != nbytes:
+        message = "a packed tensor is outside the buffer"
+        raise ValueError(message)
+    return np.ndarray(tuple(int(item) for item in shape), dtype=kind, buffer=view)
+
+
+def device_argument(session: Session, value: np.ndarray | Span) -> tuple[object, bool]:
+    """Bind ``value``. A packed span stays allocated. An array is uploaded and released."""
+    if isinstance(value, Span):
+        return value, False
+    raw = np.ascontiguousarray(value, dtype=np.float32).tobytes()
+    return session.upload(raw), True
 
 
 class Plane:
@@ -114,16 +173,9 @@ class Session:
 
     def resident(self, weight: np.ndarray) -> Resident:
         """Pad a ``[out, in]`` matrix to the matmul tile and upload it as half."""
-        matrix = np.asarray(weight)
-        if matrix.ndim != 2:
-            message = f"a linear weight has rank {matrix.ndim}"
-            raise ValueError(message)
-        out, inner = int(matrix.shape[0]), int(matrix.shape[1])
-        out_pad = _pad(out, TILE_N)
-        inner_pad = _pad(inner, K_ALIGN)
-        padded = np.zeros((out_pad, inner_pad), dtype=np.float16)
-        padded[:out, :inner] = np.ascontiguousarray(matrix, dtype=np.float16)
-        return Resident(self.upload(padded.tobytes()), out, inner, out_pad, inner_pad)
+        padded, out, inner, out_pad, inner_pad = pad_linear(weight)
+        raw = np.ascontiguousarray(padded).tobytes()
+        return Resident(self.upload(raw), out, inner, out_pad, inner_pad)
 
     def rmsnorm(self, hidden: np.ndarray, weight: np.ndarray, eps: float) -> np.ndarray:
         """RMSNorm over the last axis. The result is float16."""
@@ -181,7 +233,7 @@ class Session:
         try:
             raw = self._dispatch(
                 "matmul_f16",
-                [source, resident.handle, dest],
+                [source, resident, dest],
                 [
                     struct.pack("<I", rows_pad),
                     struct.pack("<I", resident.rows_pad),
@@ -277,26 +329,27 @@ class Session:
     def conv1d(
         self,
         source: np.ndarray,
-        weight: np.ndarray,
-        bias: np.ndarray,
+        weight: np.ndarray | Span,
+        bias: np.ndarray | Span,
         *,
         left: int,
         dilation: int,
         groups: int,
     ) -> np.ndarray:
-        """Causal conv1d. Source is ``[in, time]``, weight is ``[out, in/groups, kernel]``."""
+        """Causal conv1d. Source is ``[in, time]``, weight is ``[out, in/groups, kernel]``.
+
+        A ``Span`` is bound and kept. An array is uploaded and released with the activation.
+        """
         data = np.ascontiguousarray(source, dtype=np.float32)
-        kernel = np.ascontiguousarray(weight, dtype=np.float32)
-        shift = np.ascontiguousarray(bias, dtype=np.float32).reshape(-1)
         cin, time = int(data.shape[0]), int(data.shape[1])
-        cout, cin_g, width = (int(kernel.shape[0]), int(kernel.shape[1]), int(kernel.shape[2]))
+        cout, cin_g, width = _extent(weight)
         if cin // int(groups) != cin_g:
-            message = f"conv groups {groups} do not match weight {kernel.shape}"
+            message = f"conv groups {groups} do not match weight {weight.shape}"
             raise ValueError(message)
         out = np.empty((cout, time), dtype=np.float32)
         src = self.upload(data.tobytes())
-        wbuf = self.upload(kernel.tobytes())
-        bbuf = self.upload(shift.tobytes())
+        wbuf, release_w = device_argument(self, weight)
+        bbuf, release_b = device_argument(self, bias)
         dest = memory.allocate(out.nbytes, owner=self._owner, zero=True)
         try:
             raw = self._dispatch(
@@ -317,33 +370,36 @@ class Session:
             )
         finally:
             memory.release(src)
-            memory.release(wbuf)
-            memory.release(bbuf)
             memory.release(dest)
+            if release_w:
+                memory.release(wbuf)
+            if release_b:
+                memory.release(bbuf)
         return np.frombuffer(raw, dtype=np.float32).copy().reshape(out.shape)
 
     def conv_transpose1d(
         self,
         source: np.ndarray,
-        weight: np.ndarray,
-        bias: np.ndarray,
+        weight: np.ndarray | Span,
+        bias: np.ndarray | Span,
         *,
         stride: int,
     ) -> np.ndarray:
-        """Causal transposed conv. Weight is ``[in, out, kernel]``. Length is ``time * stride``."""
+        """Causal transposed conv. Weight is ``[in, out, kernel]``. Length is ``time * stride``.
+
+        A ``Span`` is bound and kept. An array is uploaded and released with the activation.
+        """
         data = np.ascontiguousarray(source, dtype=np.float32)
-        kernel = np.ascontiguousarray(weight, dtype=np.float32)
-        shift = np.ascontiguousarray(bias, dtype=np.float32).reshape(-1)
         cin, tin = int(data.shape[0]), int(data.shape[1])
-        _, cout, width = (int(kernel.shape[0]), int(kernel.shape[1]), int(kernel.shape[2]))
-        if int(kernel.shape[0]) != cin:
-            message = f"transpose in-channels are {kernel.shape[0]}, the input has {cin}"
+        cin_w, cout, width = _extent(weight)
+        if cin_w != cin:
+            message = f"transpose in-channels are {cin_w}, the input has {cin}"
             raise ValueError(message)
         tout = tin * int(stride)
         out = np.empty((cout, tout), dtype=np.float32)
         src = self.upload(data.tobytes())
-        wbuf = self.upload(kernel.tobytes())
-        bbuf = self.upload(shift.tobytes())
+        wbuf, release_w = device_argument(self, weight)
+        bbuf, release_b = device_argument(self, bias)
         dest = memory.allocate(out.nbytes, owner=self._owner, zero=True)
         try:
             raw = self._dispatch(
@@ -363,9 +419,11 @@ class Session:
             )
         finally:
             memory.release(src)
-            memory.release(wbuf)
-            memory.release(bbuf)
             memory.release(dest)
+            if release_w:
+                memory.release(wbuf)
+            if release_b:
+                memory.release(bbuf)
         return np.frombuffer(raw, dtype=np.float32).copy().reshape(out.shape)
 
     def plane(self, rows: int, cols: int, *, zero: bool = False) -> Plane:
@@ -437,7 +495,7 @@ class Session:
         )
         self._encode(
             "matmul_f16",
-            [self._half_a, weight.handle, self._wide],
+            [self._half_a, weight, self._wide],
             [_u(rows_pad), _u(weight.rows_pad), _u(weight.cols_pad)],
             (weight.rows_pad // TILE_N, rows_pad // TILE_M, 1),
             self._matmul_threads,
@@ -643,7 +701,8 @@ class Session:
     ) -> None:
         encoder.setComputePipelineState_(self._pipes[name])
         for index, handle in enumerate(handles):
-            memory.bind(encoder, index, handle, 0)
+            bound, shift = _binding(handle)
+            memory.bind(encoder, index, bound, shift)
         for offset, packed in enumerate(constants):
             encoder.setBytes_length_atIndex_(packed, len(packed), len(handles) + offset)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(
@@ -681,6 +740,23 @@ class Session:
             message = f"{name} command status {status} {error}"
             raise RuntimeError(message)
         return raw
+
+
+def _binding(item: object) -> tuple[object, int]:
+    """A memory handle and the byte offset of a packed span. A raw handle starts at 0."""
+    handle = getattr(item, "handle", None)
+    offset = getattr(item, "offset", None)
+    if handle is None or offset is None:
+        return item, 0
+    return handle, int(offset)
+
+
+def _extent(weight: np.ndarray | Span) -> tuple[int, int, int]:
+    shape = weight.shape
+    if len(shape) != 3:
+        message = f"a conv weight has rank {len(shape)}"
+        raise ValueError(message)
+    return int(shape[0]), int(shape[1]), int(shape[2])
 
 
 def _groups(x: int, y: int, z: int, tx: int, ty: int) -> tuple[int, int, int]:
