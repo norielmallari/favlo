@@ -86,6 +86,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [z_image_base/README.md](z_image_base/README.md) | Z-Image summary |
 | [klein_4b/README.md](klein_4b/README.md) | FLUX.2 [klein] 4B summary |
 | [klein_4b/ceilings.md](klein_4b/ceilings.md) | FLUX.2 [klein] 4B kernel ceilings for one 576×320 edit |
+| [klein_4b/research/generation-time.md](klein_4b/research/generation-time.md) | FLUX.2 [klein] 4B 256 and 1024 generation times |
 | [wan22_i2v/README.md](wan22_i2v/README.md) | Wan 2.2 I2V summary |
 | [wan22_ti2v_5b/README.md](wan22_ti2v_5b/README.md) | Wan 2.2 TI2V-5B summary |
 | [umt5_xxl/README.md](umt5_xxl/README.md) | Shared umT5-XXL int8 pack (Wan `umt5` CLI) |

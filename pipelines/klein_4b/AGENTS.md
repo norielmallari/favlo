@@ -1,6 +1,6 @@
 # This package
 
-This package is a media pipeline. It inherits `MediaPipeline`. Kind is `image`. `id_prefix` and `object_name` are set on the class. The smoke tool local name is `generate_image`. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder.
+This package is a media pipeline. It inherits `MediaPipeline`. Kind is `image`. `id_prefix` and `object_name` are set on the class. The smoke tool local name is `generate_image`. `edit_image` is the second published tool. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder.
 
 A change to `parse`, `generate`, `pack`, pause, or the job dict loads the media-preemption skill. Do not paste those commands here.
 
@@ -20,4 +20,4 @@ A new abstract method on `MediaPipeline` updates every served media package in t
 
 The runtime implements `ensure_open(request)` and `close()`. The shell calls `ensure_open` after parse and always calls `close` before `on_finish`, including on pause, fail, and cancel. Helpers live in `src/favlo/media_memory.py`: `stamp_owner`, `open_gate`, `begin_release`, `confirm_release`, and `finish_release`. Do not keep `_memory_cap`, a private `parse_memory`, or a private reclaim wait.
 
-`src/favlo/memory.py` is the only allocator. `open_runtime` accepts `owner` and calls `memory.set_max_memory`. Stamp with `stamp_owner` before the first allocate. The example shape is `example-model:1`. `working_set_bytes(request)` returns weights plus scratch for the named shape. `ensure_open` runs `open_gate` and reloads when closed. The request keeps its resolution, frame count, and duration. Shrink only the scratch knob.
+`src/favlo/memory.py` is the only allocator. `open_runtime` accepts `owner` and calls `memory.set_max_memory`. Stamp with `stamp_owner` before the first allocate. The example shape is `example-model:1`. `working_set_bytes(request)` returns weights plus scratch for the named shape. `ensure_open` runs `open_gate` and reloads when closed. The request keeps its resolution, frame count, and duration. Shrink only the scratch knob. The CUDA runtime refuses when the named canvas does not fit. Its device bytes come from `cudaMalloc`. The host gate still runs.
