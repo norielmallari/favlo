@@ -171,8 +171,12 @@ class Qwen36Runtime:
         frequency: float,
         limit: int,
         on_token: Any,
+        fill: bool = False,
     ) -> list[int]:
-        """Apply ``prompt`` from the prefix hit, then sample up to ``limit`` tokens."""
+        """Apply ``prompt`` from the prefix hit, then sample up to ``limit`` tokens.
+
+        ``fill`` keeps a stop id and continues until ``limit``.
+        """
         if not prompt:
             message = "prompt is empty"
             raise RuntimeError(message)
@@ -216,7 +220,7 @@ class Qwen36Runtime:
             progress.end_phase(
                 console, prefill, progress.rate("prefill", len(fresh), self._prefill_seconds)
             )
-        if first in _STOP:
+        if first in _STOP and not fill:
             self._keep(prompt, [])
             return []
         drawn = [first]
@@ -229,7 +233,7 @@ class Qwen36Runtime:
                 self._check()
                 self._step(drawn[-1], head=True)
                 nxt = self._sample()
-                if nxt in _STOP:
+                if nxt in _STOP and not fill:
                     break
                 drawn.append(nxt)
                 if on_token is not None:
@@ -696,27 +700,40 @@ class Qwen36Runtime:
 
     def _upload(self, path: Path, nbytes: int, row: Any) -> None:
         hold = min(_CHUNK, max(nbytes, 4096))
-        window = alloc_pages(hold)
-        pinned = self.engine.register(window, hold)
+        windows = [alloc_pages(hold), alloc_pages(hold)]
+        pinned = [self.engine.register(window, hold) for window in windows]
         try:
             done = 0
             aligned = nbytes - (nbytes % 4096)
+            slot = 0
+            pending = 0
             while done < aligned:
                 chunk = min(_CHUNK, aligned - done)
-                read_span(path, done, window, chunk)
-                self.engine.h2d_ptr(self.base + done, window, chunk)
+                # The copy reads the window after this call returns. Two windows
+                # stay in flight; a window is filled again only after both copies
+                # have finished.
+                if pending == 2:
+                    self.engine.sync()
+                    pending = 0
+                read_span(path, done, windows[slot], chunk)
+                self.engine.h2d_ptr(self.base + done, windows[slot], chunk)
                 done += chunk
                 progress.note_load(row, chunk)
+                slot ^= 1
+                pending += 1
+            if pending:
+                self.engine.sync()
             if done < nbytes:
                 tail = nbytes - done
-                read_span(path, done, window, tail)
-                self.engine.h2d_ptr(self.base + done, window, tail)
+                read_span(path, done, windows[0], tail)
+                self.engine.h2d_ptr(self.base + done, windows[0], tail)
                 progress.note_load(row, tail)
         finally:
             self.engine.sync()
-            if pinned:
-                self.engine.unregister(window)
-            free_pages(window)
+            for window, flag in zip(windows, pinned):
+                if flag:
+                    self.engine.unregister(window)
+                free_pages(window)
 
     def _alloc(self, nbytes: int, *, zero: bool = False) -> int:
         pointer = self.engine.alloc(nbytes)

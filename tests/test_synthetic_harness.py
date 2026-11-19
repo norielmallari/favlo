@@ -55,6 +55,19 @@ def _boundary(text: str) -> int:
     return 30 + len(text) + extra
 
 
+def test_a_long_prompt_searches_the_line_count() -> None:
+    calls = 0
+
+    def encode(text: str) -> int:
+        nonlocal calls
+        calls += 1
+        return len(text.split()) + 7
+
+    text = user_text(tokens=2000, label="Passage 2000.", encode=encode, seed=1)
+    assert encode(text) == 2000
+    assert calls < 50
+
+
 def test_a_label_longer_than_the_target_is_rejected() -> None:
     try:
         user_text(tokens=2, label="Passage 10000.", encode=_overhead, seed=0)

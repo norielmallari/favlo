@@ -394,6 +394,21 @@ __global__ void conv_silu_kernel(
     history[2 * channels + channel] = __float2half(newer);
 }
 
+__device__ float warp_reduce_sum(float value) {
+    value += __shfl_xor_sync(0xffffffff, value, 16);
+    value += __shfl_xor_sync(0xffffffff, value, 8);
+    value += __shfl_xor_sync(0xffffffff, value, 4);
+    value += __shfl_xor_sync(0xffffffff, value, 2);
+    value += __shfl_xor_sync(0xffffffff, value, 1);
+    return value;
+}
+
+__device__ float dot4(float4 left, float4 right) {
+    return left.x * right.x + left.y * right.y + left.z * right.z + left.w * right.w;
+}
+
+// One warp owns one state row. The 128 columns are one coalesced vector, so a
+// 512-token tile does not stride 512 bytes between neighboring threads.
 __global__ void gdn_kernel(
     float* state,
     const float* query,
@@ -411,49 +426,60 @@ __global__ void gdn_kernel(
     int count,
     int value_stride) {
     int head = blockIdx.x;
-    int row = threadIdx.x;
-    if (head >= 32 || row >= 128) {
+    if (head >= 32) {
         return;
     }
-    __shared__ float ks[128];
-    __shared__ float qs[128];
-    __shared__ float vs[128];
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    __shared__ __align__(16) float ks[128];
+    __shared__ __align__(16) float qs[128];
+    __shared__ __align__(16) float vs[128];
     __shared__ float ys[128];
-    float* line = state + (static_cast<long long>(head) * 128 + row) * 128;
-    int weight_at = norm_span == 0 ? row : head * 128 + row;
-    float gain = __half2float(norm[weight_at]);
+    float* head_state = state + (static_cast<long long>(head) * 128) * 128;
     for (int token = 0; token < count; ++token) {
+        const float* qrow = query + static_cast<long long>(token) * 32 * 128;
+        const float* krow = key + static_cast<long long>(token) * 32 * 128;
+        const float* vrow = value + static_cast<long long>(token) * value_stride;
+        ks[threadIdx.x] = krow[head * 128 + threadIdx.x];
+        qs[threadIdx.x] = qrow[head * 128 + threadIdx.x] * rsqrtf(128.0f);
+        vs[threadIdx.x] = vrow[head * 128 + threadIdx.x];
+        __syncthreads();
         float aa = a_proj[token * 32 + head];
         float bb = b_proj[token * 32 + head];
         float shifted = aa + __half2float(dt_bias[head]);
         float soft = shifted > 20.0f ? shifted : log1pf(expf(shifted));
         float decay = expf(-expf(__half2float(a_log[head])) * soft);
         float beta = 1.0f / (1.0f + expf(-bb));
-        const float* qrow = query + static_cast<long long>(token) * 32 * 128;
-        const float* krow = key + static_cast<long long>(token) * 32 * 128;
-        const float* vrow = value + static_cast<long long>(token) * value_stride;
-        ks[row] = krow[head * 128 + row];
-        qs[row] = qrow[head * 128 + row] * rsqrtf(128.0f);
-        vs[row] = vrow[head * 128 + row];
-        __syncthreads();
-        float sk = 0.0f;
-        for (int col = 0; col < 128; ++col) {
-            line[col] *= decay;
-            sk += line[col] * ks[col];
+        for (int row0 = 0; row0 < 128; row0 += 4) {
+            int row = row0 + warp;
+            float4* line = reinterpret_cast<float4*>(head_state + row * 128);
+            float4 chunk = line[lane];
+            float4 key4 = reinterpret_cast<const float4*>(ks)[lane];
+            chunk.x *= decay;
+            chunk.y *= decay;
+            chunk.z *= decay;
+            chunk.w *= decay;
+            float sk = warp_reduce_sum(dot4(chunk, key4));
+            float delta = beta * (vs[row] - sk);
+            chunk.x += delta * key4.x;
+            chunk.y += delta * key4.y;
+            chunk.z += delta * key4.z;
+            chunk.w += delta * key4.w;
+            line[lane] = chunk;
+            float y = warp_reduce_sum(dot4(chunk, reinterpret_cast<const float4*>(qs)[lane]));
+            if (lane == 0) {
+                ys[row] = y;
+            }
         }
-        float delta = beta * (vs[row] - sk);
-        float y = 0.0f;
-        for (int col = 0; col < 128; ++col) {
-            line[col] += delta * ks[col];
-            y += line[col] * qs[col];
-        }
-        ys[row] = y;
         __syncthreads();
+        int row = threadIdx.x;
         float sum = 0.0f;
         for (int col = 0; col < 128; ++col) {
             sum += ys[col] * ys[col];
         }
         float inv = rsqrtf(sum / 128.0f + eps);
+        int weight_at = norm_span == 0 ? row : head * 128 + row;
+        float gain = __half2float(norm[weight_at]);
         float z = gate[static_cast<long long>(token) * 32 * 128 + head * 128 + row];
         float silu = z / (1.0f + expf(-z));
         destination[static_cast<long long>(token) * 32 * 128 + head * 128 + row] = ys[row] * inv * gain * silu;

@@ -196,4 +196,6 @@ uv run favlo --qwen36_35b_a3b delete qwen36_35b_a3b
 - [research/coding-text.md](research/coding-text.md) — text coding agent on `half`
 - [research/synthetic-prompt.md](research/synthetic-prompt.md) — cold 512- and 10000-token prompts
 - [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md) — cold 512-, 1024-, 4096-, and 10000-token prompts on `half`
+- [research/synthetic-prompt-thinking-cuda.md](research/synthetic-prompt-thinking-cuda.md) — cold 512-, 1024-, 4096-, and 10000-token prompts on CUDA, thinking on
+- [research/synthetic-prompt-cuda.md](research/synthetic-prompt-cuda.md) — cold 512-, 1024-, 4096-, and 10000-token prompts on CUDA int8-e10
 - [research/fp16-peak-restore.md](research/fp16-peak-restore.md) — float16 peak-restore bound

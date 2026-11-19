@@ -43,21 +43,36 @@ def user_text(
     if not label.strip():
         message = "label must not be empty"
         raise ValueError(message)
-    lines = [label.strip()]
-    count = encode(_join(lines))
+    label_text = label.strip()
+    count = encode(_join([label_text]))
     if count > tokens:
         message = "the label is longer than the token target"
         raise ValueError(message)
-    rng = random.Random(seed)
-    added = 0
-    while count < tokens and added <= tokens:
-        lines.append(_filler_line(rng))
-        count = encode(_join(lines))
-        added += 1
-    if count < tokens:
+    if count == tokens:
+        return _join([label_text])
+    short = 0
+    added = 1
+    found = False
+    while added <= tokens:
+        count = encode(_join(_lines_with(label_text, seed, added)))
+        if count >= tokens:
+            found = True
+            break
+        short = added
+        added *= 2
+    if not found:
         message = "the filler is shorter than the token target"
         raise RuntimeError(message)
-    lines = _fit_tokens(lines, tokens, encode)
+    lo = short
+    hi = added
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        got = encode(_join(_lines_with(label_text, seed, mid)))
+        if got < tokens:
+            lo = mid
+        else:
+            hi = mid
+    lines = _fit_tokens(_lines_with(label_text, seed, hi), tokens, encode)
     return _join(lines)
 
 
@@ -250,6 +265,19 @@ def _pad_exact(
             return False
     lines[-1] = stem
     return count == tokens
+
+
+def _lines_with(label: str, seed: int, added: int) -> list[str]:
+    """The label plus ``added`` filler lines from ``seed``.
+
+    Rebuilding from the seed keeps a length search on the same text the
+    one-line loop would have written.
+    """
+    rng = random.Random(seed)
+    lines = [label]
+    for _ in range(added):
+        lines.append(_filler_line(rng))
+    return lines
 
 
 def _filler_line(rng: random.Random) -> str:

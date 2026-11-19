@@ -185,6 +185,7 @@ class ExpertAtlas:
                     ctypes.memmove(self.host + host_cursor, scratch + off, image)
                     self._host_at[(layer, expert)] = host_cursor
                     host_cursor += INT4_IMAGE
+                self.engine.sync()
         finally:
             self.engine.sync()
             if pinned:

@@ -39,3 +39,5 @@ The banner prints the loaded plane, MTP, thinking, and vision.
 Later finds are appended here. The sections above stay as committed.
 
 8 November 2026. The same banner passed again after leftover device memory began holding the expert images last used. Prefill summed to 18.14 tok/s over 3043 tokens and decode to 5.42 tok/s over 769 tokens. Query: "18.14 OR 5.42 Qwen3.6-35B-A3B tok/s int8 coding 3043". The search did not find that pair as this int8 text coding agent. A CPU-only run reports 5.40 tok/s generation for a GGUF of this model. That is not this prefill and decode pair. The predecessors above still stand.
+
+19 November 2026. The same banner passed again after each device copy finished before its read buffer was filled again, and after one warp updated each Gated DeltaNet state row as a contiguous vector. Prefill summed to 200.12 tok/s over 3288 tokens and decode to 7.56 tok/s over 1058 tokens. Query: "200.12 OR 7.56 Qwen3.6-35B-A3B tok/s int8 coding 3288". The search did not find that pair as this int8 text coding agent. Published rates for other quantizations and other GPUs are not this pair. The predecessors above still stand.

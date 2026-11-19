@@ -360,6 +360,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - Both follow the OpenAI logit update.
 - An omitted `max_output_tokens` does not cap the completion.
 - It stops on a stop id or at the last context position.
+- `favlo:fill_decode` true keeps sampling through those ids until `max_output_tokens`.
 - That room is the context ceiling.
 - The cache grows during decode to reach it, and the atlas shrinks to the images that still fit.
 - `settings.json` key `max_tokens` is that cap when the request omits it.
@@ -481,7 +482,7 @@ RMSNorm multiplies the normalized row by one plus the weight. Gated DeltaNet sca
 
 ## Atlas
 
-The 1,024 int8 expert images are uploaded once and stay in VRAM for the open. The 9,216 int4 images stay in host RAM. Windows reads each layer file with sector-aligned unbuffered transfers, four at a time. Int4 images are placed in the host span and int8 images are uploaded from that read. The host span is registered read-only after it is written, and the open refuses when the driver will not lock it. The hot path does not read the layer files again.
+The 1,024 int8 expert images are uploaded once and stay in VRAM for the open. The 9,216 int4 images stay in host RAM. Windows reads each layer file with sector-aligned unbuffered transfers, four at a time. Int4 images are placed in the host span and int8 images are uploaded from that read. That upload finishes before the next layer fills the same buffer. The resident record uses two read buffers, and a buffer is filled again only after its device copy has finished. The host span is registered read-only after it is written, and the open refuses when the driver will not lock it. The hot path does not read the layer files again.
 
 The language weights, the resident int8 experts, the floor key/value cache, and the activation scratch take their opening first. The int8 images are a fixed cost. The bytes the engine still reports free, minus a 32 MiB margin, hold int4 images. A repeat reads that copy. A miss streams the image from the locked host span into a free slot, or into the least recently used slot once the pool is full. Growing the context frees whole int4 slots and discards the copies they held. The eight-slot stage is the path when that cache cannot be allocated. An int8 image uses an int8 activation. An int4 image uses an int4 activation. The shared expert stays in the resident int8 record on the device.
 
@@ -489,7 +490,7 @@ The router, the top 8, and the mix weights stay on the device. Prefill reads eve
 
 ## Forward
 
-Gated DeltaNet decays the state by \(\alpha\), then adds \(\beta(v - Sk)k^\top\), and reads with the query. \(\alpha = \exp(-\exp(A_{\log})\mathrm{softplus}(a + \mathrm{dt\_bias}))\) and \(\beta = \mathrm{sigmoid}(b)\). The mixed projection is a causal depthwise convolution of width 4, then SiLU. Query and key are L2-normalized. Sixteen key heads repeat onto thirty-two value heads. The output norm multiplies the stored weight, and the output gate is SiLU.
+Gated DeltaNet decays the state by \(\alpha\), then adds \(\beta(v - Sk)k^\top\), and reads with the query. One warp updates one state row, and the 128 columns move as four-wide vectors. \(\alpha = \exp(-\exp(A_{\log})\mathrm{softplus}(a + \mathrm{dt\_bias}))\) and \(\beta = \mathrm{sigmoid}(b)\). The mixed projection is a causal depthwise convolution of width 4, then SiLU. Query and key are L2-normalized. Sixteen key heads repeat onto thirty-two value heads. The output norm multiplies the stored weight, and the output gate is SiLU.
 
 Full attention is every fourth layer, starting at layer 3. Each head's 512 `q_proj` rows split into 256 query rows and 256 gate rows. Partial RoPE covers the first 64 channels. Channel \(i\) rotates with channel \(i+32\). The frequency base is \(10^7\). The attend kernel is online softmax over the int8 cache. The query is scaled by \(1/\sqrt{256}\). The gate is a sigmoid. Temperature 0 is argmax on the device after the presence penalty. A positive temperature draws from a top list of at most 64 on the device. The draft model is off.
 

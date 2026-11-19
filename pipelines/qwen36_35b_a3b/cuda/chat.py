@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import queue
 import re
@@ -10,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from jinja2 import Environment
+from jinja2 import Environment, Template
 from tokenizers import Tokenizer
 
 from favlo.language_pipeline import LanguagePipeline
@@ -91,10 +92,11 @@ class Pipeline(LanguagePipeline):
         presence = float(prepared.get("presence_penalty", card["presence_penalty"]))
         frequency = float(prepared.get("frequency_penalty", 0.0) or 0.0)
         limit = _limit(prepared, len(prompt))
+        fill = bool(prepared.get("favlo:fill_decode"))
         if prepared.get("stream"):
             _stream(
                 reply, runtime, prepared, prompt, limit, thinking, search,
-                temperature, top_p, top_k, presence, frequency,
+                temperature, top_p, top_k, presence, frequency, fill,
             )
             return
         tokens = runtime.generate(
@@ -106,12 +108,29 @@ class Pipeline(LanguagePipeline):
             frequency=frequency,
             limit=limit,
             on_token=None,
+            fill=fill,
         )
         reply.json(200, _object(reply, prepared, prompt, tokens, runtime, thinking, search, limit))
 
 
 pipeline = Pipeline()
 handle_responses = pipeline
+
+
+@functools.lru_cache(maxsize=4)
+def load_tokenizer(root: Path) -> Tokenizer:
+    """The checkpoint tokenizer. One process keeps the parsed file."""
+    return Tokenizer.from_file(str(root / "tokenizer.json"))
+
+
+@functools.lru_cache(maxsize=4)
+def _chat_template(path: str) -> Template:
+    """The compiled chat template. One process keeps the parsed file."""
+    env = Environment(autoescape=False)
+    env.filters["tojson"] = lambda value: json.dumps(value, ensure_ascii=False)
+    env.globals["raise_exception"] = lambda message: (_ for _ in ()).throw(ValueError(str(message)))
+    source = _GENERATION.sub("", Path(path).read_text(encoding="utf-8"))
+    return env.from_string(source)
 
 
 def encode_chat(
@@ -130,16 +149,12 @@ def encode_chat(
     """
     del reasoning_effort
     messages = _template_messages(messages)
+    tokenizer = load_tokenizer(root)
     template_path = root / "chat_template.jinja"
-    tokenizer = Tokenizer.from_file(str(root / "tokenizer.json"))
     if not template_path.is_file():
         text = "\n".join(str(message.get("content") or "") for message in messages)
         return list(tokenizer.encode(text).ids)
-    env = Environment(autoescape=False)
-    env.filters["tojson"] = lambda value: json.dumps(value, ensure_ascii=False)
-    env.globals["raise_exception"] = lambda message: (_ for _ in ()).throw(ValueError(str(message)))
-    source = _GENERATION.sub("", template_path.read_text(encoding="utf-8"))
-    text = env.from_string(source).render(
+    text = _chat_template(str(template_path)).render(
         messages=messages,
         tools=tools or None,
         add_generation_prompt=True,
@@ -163,6 +178,7 @@ def _stream(
     top_k: int,
     presence: float,
     frequency: float,
+    fill: bool,
 ) -> None:
     try:
         reply.begin_events()
@@ -205,6 +221,7 @@ def _stream(
                 frequency=frequency,
                 limit=limit,
                 on_token=pending.put,
+                fill=fill,
             )
         except BaseException as exc:
             failed.append(exc)
@@ -213,7 +230,7 @@ def _stream(
 
     worker = threading.Thread(target=produce, name="qwen36-cuda-decode")
     worker.start()
-    tokenizer = Tokenizer.from_file(str(runtime.root / "tokenizer.json"))
+    tokenizer = load_tokenizer(runtime.root)
     shown = ""
     try:
         while True:
@@ -267,7 +284,7 @@ def _object(
     search: dict[str, Any] | None,
     limit: int,
 ) -> dict[str, Any]:
-    tokenizer = Tokenizer.from_file(str(runtime.root / "tokenizer.json"))
+    tokenizer = load_tokenizer(runtime.root)
     text = tokenizer.decode(tokens)
     reasoning, content, calls = _split(text, thinking)
     output: list[dict[str, Any]] = []
