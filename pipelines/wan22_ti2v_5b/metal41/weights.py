@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 
-from wan22_ti2v_5b.metal41.activations import softmax
 from wan22_ti2v_5b.metal41.blob import expect_f16, expect_i8
 from wan22_ti2v_5b.metal41.gpu import Gpu
 
@@ -170,16 +169,12 @@ def attend(
     relative bucket bias is added to the raw dot product.
     """
     dim = int(query.shape[2])
-    scale = np.float32(dim**-0.5 if scaled else 1.0)
-    scores = gpu.gemm_half_heads(
-        query.astype(np.float16),
-        key.astype(np.float16),
-        transpose_right=True,
+    scale = float(dim**-0.5 if scaled else 1.0)
+    return gpu.attend_half(
+        query,
+        key,
+        value,
+        scale=scale,
+        bias=bias,
+        key_mask=key_mask,
     )
-    scores = scores * scale
-    if bias is not None:
-        scores = scores + bias.astype(np.float32)
-    if key_mask is not None:
-        scores[:, :, ~key_mask] = np.float32(-1.0e30)
-    weights = softmax(scores).astype(np.float16)
-    return gpu.gemm_half_heads(weights, value.astype(np.float16), transpose_right=False)

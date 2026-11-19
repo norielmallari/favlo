@@ -1,4 +1,4 @@
-"""One knot of diffusion blocks, kept on the device until the knot ends."""
+"""One knot of diffusion blocks. The token stream stays half until the knot ends."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from wan22_ti2v_5b.metal41.activations import apply_rope, layernorm, softmax
 from wan22_ti2v_5b.metal41.gpu import Gpu, _Dispatch, _pad
 from wan22_ti2v_5b.metal41.quant import quantize_activation
 from wan22_ti2v_5b.metal41.schedule import rope_tables
-from wan22_ti2v_5b.metal41.spec import DIM, EPS, HEAD, HEADS, TILE_N, TILE_N_I8
+from wan22_ti2v_5b.metal41.spec import DIM, EPS, HEAD, HEADS, TILE_N_I8
 from wan22_ti2v_5b.metal41.weights import Matrix
 
 _ROW = np.dtype(
@@ -29,10 +29,25 @@ _SOFT = np.dtype(
     ]
 )
 _SCALE = np.float32(HEAD**-0.5)
+_FLASH_Q = 16
+_FLASH_K = 48
+_FLASH_THREADS = 128
+_FLASH = np.dtype(
+    [
+        ("q_len", np.uint32),
+        ("kv_len", np.uint32),
+        ("heads", np.uint32),
+        ("origin", np.uint32),
+        ("scale", np.float32),
+        ("tiles", np.uint32),
+        ("q_cap", np.uint32),
+        ("kv_cap", np.uint32),
+    ]
+)
 
 
 class Stream:
-    """Thirty blocks share one command buffer. The residual stays on device."""
+    """Thirty blocks share one command buffer. The residual stays half on device."""
 
     def __init__(self, gpu: Gpu) -> None:
         self.gpu = gpu
@@ -66,10 +81,12 @@ class Stream:
             self._cross_id = id(context)
             self._cross = [None] * len(blocks)
             self._text_src = self._upload_rows(context, self._text_pm)
-        slots = np.ascontiguousarray(proj.reshape(rows, 6, DIM).transpose(1, 0, 2))
+        slots = np.ascontiguousarray(
+            proj.reshape(rows, 6, DIM).transpose(1, 0, 2), dtype=np.float16
+        )
         proj_h = self.gpu.upload(slots)
-        host = np.zeros((self._pm, DIM), dtype=np.float32)
-        host[:rows] = tokens
+        host = np.zeros((self._pm, DIM), dtype=np.float16)
+        host[:rows] = tokens.astype(np.float16)
         self.gpu.release(self._stream)
         self._stream = self.gpu.upload(host)
         self._handles[0] = self._stream
@@ -78,8 +95,8 @@ class Stream:
             self._block(group, block, index, rows, text_rows, height, width, proj_h)
         group.finish("dit")
         self.gpu.release(proj_h)
-        out = self.gpu.download(self._stream, np.float32, (self._pm, DIM))[:rows]
-        return out
+        out = self.gpu.download(self._stream, np.float16, (self._pm, DIM))[:rows]
+        return out.astype(np.float32)
 
     def _block(
         self,
@@ -95,24 +112,23 @@ class Stream:
         self._norm(group, self._stream, self._normed, self._pm, DIM, None, None)
         self._modulate(group, rows, proj_h, block, scale=1, shift=0)
         self._qkv(group, block, rows)
-        self._attend(group, rows, rows, self._qh, self._kh, self._vh, height, width, rope=True)
+        self._attend(group, rows, height, width)
         self._project(group, self._update, self._pm, DIM, block.self_o, self._acc)
         self._gate(group, rows, self._acc, proj_h, block, slot=2)
         self._norm(group, self._stream, self._normed, self._pm, DIM, block.norm3, block.norm3_bias)
         self._project(group, self._normed, self._pm, DIM, block.cross_q, self._q)
         self._rms(group, self._q, rows, DIM, block.cross_norm_q)
-        self._cast(group, self._q, self._qh, self._pm * DIM)
         self._cross_pair(group, block, index, text_rows)
         key_h, value_h = self._cross[index]
-        self._attend_pair(group, rows, text_rows, self._qh, key_h, value_h)
+        self._attend_pair(group, rows, text_rows, self._q, key_h, value_h, self._pm, self._text_cap)
         self._project(group, self._update, self._pm, DIM, block.cross_o, self._acc)
         count = rows * DIM
-        group.launch("add_f32", (self._stream, self._acc), np.int32(count).tobytes(), count)
+        group.launch("add_h", (self._stream, self._acc), np.int32(count).tobytes(), count)
         self._norm(group, self._stream, self._normed, self._pm, DIM, None, None)
         self._modulate(group, rows, proj_h, block, scale=4, shift=3)
         self._project(group, self._normed, self._pm, DIM, block.ffn0, self._acc)
         group.launch(
-            "gelu_tanh_f32",
+            "gelu_tanh_h",
             (self._acc,),
             np.int32(self._pm * int(block.ffn0.logical_n)).tobytes(),
             self._pm * int(block.ffn0.logical_n),
@@ -122,92 +138,32 @@ class Stream:
         self._gate(group, rows, self._update, proj_h, block, slot=5)
 
     def _qkv(self, group: _Dispatch, block, rows: int) -> None:
-        self._project(group, self._normed, self._pm, DIM, block.self_q, self._acc)
-        self._copy(group, self._acc, self._q, self._pm * DIM)
-        self._project(group, self._normed, self._pm, DIM, block.self_k, self._acc)
-        self._copy(group, self._acc, self._k, self._pm * DIM)
-        self._project(group, self._normed, self._pm, DIM, block.self_v, self._acc)
-        self._copy(group, self._acc, self._v, self._pm * DIM)
+        self._project(group, self._normed, self._pm, DIM, block.self_q, self._q)
+        self._project(group, self._normed, self._pm, DIM, block.self_k, self._k)
+        self._project(group, self._normed, self._pm, DIM, block.self_v, self._v)
         self._rms(group, self._q, rows, DIM, block.self_norm_q)
         self._rms(group, self._k, rows, DIM, block.self_norm_k)
 
-    def _attend(
-        self,
-        group: _Dispatch,
-        rows: int,
-        keys: int,
-        query,
-        key,
-        value,
-        height: int,
-        width: int,
-        *,
-        rope: bool,
-    ) -> None:
-        if rope:
-            self._rope(group, self._q, rows, height, width)
-            self._rope(group, self._k, rows, height, width)
-        self._cast(group, self._q, query, self._pm * DIM)
-        self._cast(group, self._k, key, self._pm * DIM)
-        self._cast(group, self._v, value, self._pm * DIM)
-        self._attend_pair(group, rows, keys, query, key, value)
+    def _attend(self, group: _Dispatch, rows: int, height: int, width: int) -> None:
+        self._rope(group, self._q, rows, height, width)
+        self._rope(group, self._k, rows, height, width)
+        self._attend_pair(group, rows, rows, self._q, self._k, self._v, self._pm, self._kv_cap)
 
-    def _attend_pair(self, group: _Dispatch, rows: int, keys: int, query, key, value) -> None:
-        pk = _pad(keys, TILE_N)
-        dims = np.array([self._pm, pk, HEAD, DIM, DIM], dtype=np.int32)
-        for head in range(HEADS):
-            shift = head * HEAD * 2
-            group.gemm(
-                "gemm_f16_tn",
-                (query, key, self._scores),
-                dims,
-                tile_n=TILE_N,
-                offsets=(shift, shift, head * self._pm * pk * 4),
-            )
-        soft = np.zeros(1, dtype=_SOFT)
-        soft["rows"] = HEADS * self._pm
-        soft["stride"] = pk
-        soft["valid"] = keys
-        soft["scale"] = _SCALE
-        group.launch(
-            "softmax_f16",
-            (self._scores, self._weights),
-            soft.tobytes(),
-            HEADS * self._pm,
-        )
-        mixed = np.array([self._pm, HEAD, keys, pk, DIM], dtype=np.int32)
-        for head in range(HEADS):
-            group.gemm(
-                "gemm_f16_nn",
-                (self._weights, value, self._heads),
-                mixed,
-                tile_n=TILE_N,
-                offsets=(
-                    head * self._pm * pk * 2,
-                    head * HEAD * 2,
-                    head * self._pm * HEAD * 4,
-                ),
-            )
-        shape = np.array([self._pm, HEADS, HEAD], dtype=np.int32)
-        group.launch(
-            "merge_heads_f32",
-            (self._heads, self._update),
-            shape.tobytes(),
-            self._pm * DIM,
-        )
+    def _attend_pair(
+        self, group: _Dispatch, rows: int, keys: int, query, key, value, q_cap: int, kv_cap: int
+    ) -> None:
+        launch_flash(group, query, key, value, self._update, rows, keys, q_cap, kv_cap)
 
     def _cross_pair(self, group: _Dispatch, block, index: int, text_rows: int) -> None:
         cached = self._cross[index]
         if cached is not None:
             return
-        key_h = self.gpu.zeros(self._text_pm * DIM * 2)
-        value_h = self.gpu.zeros(self._text_pm * DIM * 2)
+        key_h = self.gpu.zeros(self._text_cap * DIM * 2)
+        value_h = self.gpu.zeros(self._text_cap * DIM * 2)
         self._handles.extend((key_h, value_h))
-        self._project(group, self._text_src, self._text_pm, DIM, block.cross_k, self._text_f)
-        self._rms(group, self._text_f, text_rows, DIM, block.cross_norm_k)
-        self._cast(group, self._text_f, key_h, self._text_pm * DIM)
-        self._project(group, self._text_src, self._text_pm, DIM, block.cross_v, self._text_f)
-        self._cast(group, self._text_f, value_h, self._text_pm * DIM)
+        self._project(group, self._text_src, self._text_pm, DIM, block.cross_k, key_h)
+        self._rms(group, key_h, text_rows, DIM, block.cross_norm_k)
+        self._project(group, self._text_src, self._text_pm, DIM, block.cross_v, value_h)
         self._cross[index] = (key_h, value_h)
 
     def _project(
@@ -216,7 +172,7 @@ class Stream:
         out_n = matrix.stored_n()
         logical = int(matrix.logical_n)
         group.rows(
-            "quantize_i8",
+            "quantize_i8_h",
             (source, self._codes, self._row_scale),
             np.array([rows, cols], dtype=np.int32).tobytes(),
             rows,
@@ -227,18 +183,18 @@ class Stream:
         dims = np.array([rows, out_n, cols, cols, cols], dtype=np.int32)
         group.gemm(
             "gemm_i8",
-            (self._codes, weight_h, dest),
+            (self._codes, weight_h, self._iacc),
             dims,
             tile_n=TILE_N_I8,
             offsets=(0, weight_off, 0),
         )
         shape = np.array([rows, out_n, logical], dtype=np.int32)
         group.launch(
-            "scale_i8",
-            (dest, self._row_scale, scale_h, bias_h),
+            "scale_i8_h",
+            (self._iacc, self._row_scale, scale_h, bias_h, dest),
             shape.tobytes(),
             rows * out_n,
-            offsets=(0, 0, scale_off, bias_off),
+            offsets=(0, 0, scale_off, bias_off, 0),
         )
 
     def _norm(self, group, source, dest, rows: int, cols: int, weight, bias) -> None:
@@ -249,7 +205,7 @@ class Stream:
         args["has_bias"] = 0 if bias is None else 1
         args["eps"] = np.float32(EPS)
         group.rows(
-            "layernorm_f32",
+            "layernorm_h",
             (source, self._vector(weight), self._vector(bias), dest),
             args.tobytes(),
             rows,
@@ -263,7 +219,7 @@ class Stream:
         args["has_bias"] = 0
         args["eps"] = np.float32(EPS)
         group.rows(
-            "rmsnorm_f32",
+            "rmsnorm_h",
             (values, self._vector(weight), values),
             args.tobytes(),
             rows,
@@ -273,7 +229,7 @@ class Stream:
         mod = self._vector(block.modulation)
         shape = np.array([rows, DIM], dtype=np.int32)
         group.launch(
-            "modulate_f32",
+            "modulate_h",
             (self._normed, proj_h, proj_h, mod, mod, self._normed),
             shape.tobytes(),
             rows * DIM,
@@ -281,8 +237,8 @@ class Stream:
                 0,
                 self._proj_offset(scale, rows),
                 self._proj_offset(shift, rows),
-                scale * DIM * 4,
-                shift * DIM * 4,
+                scale * DIM * 2,
+                shift * DIM * 2,
                 0,
             ),
         )
@@ -291,27 +247,21 @@ class Stream:
         mod = self._vector(block.modulation)
         shape = np.array([rows, DIM], dtype=np.int32)
         group.launch(
-            "residual_f32",
+            "residual_h",
             (self._stream, update, proj_h, mod, self._stream),
             shape.tobytes(),
             rows * DIM,
-            offsets=(0, 0, self._proj_offset(slot, rows), slot * DIM * 4, 0),
+            offsets=(0, 0, self._proj_offset(slot, rows), slot * DIM * 2, 0),
         )
 
     def _rope(self, group, values, rows: int, height: int, width: int) -> None:
         grid = np.array([rows, HEADS, height, width], dtype=np.int32)
         group.launch(
-            "rope_f32",
+            "rope_h",
             (values, self._tables[0], self._tables[1], self._tables[2]),
             grid.tobytes(),
             rows * HEADS * 64,
         )
-
-    def _copy(self, group, source, dest, count: int) -> None:
-        group.launch("copy_f32", (source, dest), np.int32(count).tobytes(), count)
-
-    def _cast(self, group, source, dest, count: int) -> None:
-        group.launch("cast_f16", (source, dest), np.int32(count).tobytes(), count)
 
     def _fit(self, rows: int, text_rows: int, blocks: list) -> None:
         if self._rows == rows and self._text_rows == text_rows and self._tables is not None:
@@ -324,26 +274,21 @@ class Stream:
         self._text_rows = text_rows
         self._pm = _pad(rows, 64)
         self._text_pm = _pad(text_rows, 64)
+        self._kv_cap = max(self._pm, _pad(rows, _FLASH_K))
+        self._text_cap = max(self._text_pm, _pad(text_rows, _FLASH_K))
         wide = max(self._pm, self._text_pm)
-        pk = _pad(max(rows, text_rows), TILE_N)
         pairs = (
-            ("_stream", self._pm * DIM * 4),
-            ("_normed", self._pm * DIM * 4),
-            ("_acc", wide * 14336 * 4),
-            ("_update", self._pm * DIM * 4),
-            ("_q", self._pm * DIM * 4),
-            ("_k", self._pm * DIM * 4),
-            ("_v", self._pm * DIM * 4),
-            ("_qh", self._pm * DIM * 2),
-            ("_kh", self._pm * DIM * 2),
-            ("_vh", self._pm * DIM * 2),
+            ("_stream", self._pm * DIM * 2),
+            ("_normed", self._pm * DIM * 2),
+            ("_acc", wide * 14336 * 2),
+            ("_iacc", wide * 14336 * 4),
+            ("_update", self._pm * DIM * 2),
+            ("_q", self._pm * DIM * 2),
+            ("_k", self._kv_cap * DIM * 2),
+            ("_v", self._kv_cap * DIM * 2),
             ("_codes", wide * 14336),
             ("_row_scale", wide * 4),
-            ("_scores", HEADS * self._pm * pk * 4),
-            ("_weights", HEADS * self._pm * pk * 2),
-            ("_heads", HEADS * self._pm * HEAD * 4),
-            ("_text_f", self._text_pm * DIM * 4),
-            ("_text_src", self._text_pm * DIM * 4),
+            ("_text_src", self._text_pm * DIM * 2),
         )
         for name, nbytes in pairs:
             handle = self.gpu.zeros(nbytes)
@@ -355,11 +300,11 @@ class Stream:
         )
         self._cross = [None] * len(blocks)
         self._cross_id = None
-        self._zero = self.gpu._keep(("zero", DIM), np.zeros(DIM, dtype=np.float32))
+        self._zero = self.gpu._keep(("zero", DIM, "half"), np.zeros(DIM, dtype=np.float16))
 
     def _upload_rows(self, rows: np.ndarray, padded: int):
-        host = np.zeros((padded, DIM), dtype=np.float32)
-        host[: int(rows.shape[0])] = rows
+        host = np.zeros((padded, DIM), dtype=np.float16)
+        host[: int(rows.shape[0])] = rows.astype(np.float16)
         handle = self.gpu.upload(host)
         self._handles.append(handle)
         return handle
@@ -373,7 +318,7 @@ class Stream:
             return self._zero
         return self.gpu._keep(
             ("vec", id(values)),
-            np.ascontiguousarray(values, dtype=np.float32).reshape(-1),
+            np.ascontiguousarray(values, dtype=np.float16).reshape(-1),
         )
 
     def _plane(self, matrix: Matrix, part: str):
@@ -392,11 +337,12 @@ class Stream:
         if matrix.bias is not None:
             flat = np.ascontiguousarray(matrix.bias, dtype=np.float16).reshape(-1)
             row[: int(matrix.logical_n)] = flat[:out_n]
-        key = id(matrix.packed) if matrix.packed is not None else (id(matrix.span), matrix.packed_at)
+        packed = matrix.packed
+        key = id(packed) if packed is not None else (id(matrix.span), matrix.packed_at)
         return self.gpu._keep((key, "bias", out_n), row), 0
 
     def _proj_offset(self, slot: int, rows: int) -> int:
-        return slot * rows * DIM * 4
+        return slot * rows * DIM * 2
 
 
 def check_stream(gpu: Gpu) -> None:
@@ -411,6 +357,12 @@ def check_stream(gpu: Gpu) -> None:
     if not np.array_equal(got_codes, coded) or float(np.max(np.abs(got_scale - scale))) > 1e-5:
         message = "device quantize drifted"
         raise RuntimeError(message)
+    rounded = np.ascontiguousarray(rows, dtype=np.float16)
+    coded_h, scale_h = quantize_activation(rounded.astype(np.float32))
+    got_codes, got_scale = _quantize_half(gpu, rounded)
+    if not np.array_equal(got_codes, coded_h) or float(np.max(np.abs(got_scale - scale_h))) > 1e-5:
+        message = "half quantize drifted"
+        raise RuntimeError(message)
     tokens = rng.standard_normal((4, HEAD)).astype(np.float32)
     expect = apply_rope(tokens, 2, 2)
     got = _rope(gpu, tokens)
@@ -423,7 +375,46 @@ def check_stream(gpu: Gpu) -> None:
     if float(np.max(np.abs(got - expect))) > 1e-3:
         message = "device softmax drifted"
         raise RuntimeError(message)
+    error = _flash(gpu)
+    print(f"stream attention {error:.6e}", flush=True)
+    if error > 5e-2:
+        message = "device attention drifted"
+        raise RuntimeError(message)
     print("stream max abs ok", flush=True)
+
+
+def launch_flash(
+    group: _Dispatch,
+    query,
+    key,
+    value,
+    dest,
+    q_len: int,
+    kv_len: int,
+    q_cap: int,
+    kv_cap: int,
+) -> None:
+    """One flash attention. The half rows are ``[cap, heads, 128]``."""
+    if q_cap < _pad(q_len, _FLASH_Q) or kv_cap < _pad(max(kv_len, 1), _FLASH_K):
+        message = "flash tile does not fit"
+        raise RuntimeError(message)
+    tiles = (q_len + _FLASH_Q - 1) // _FLASH_Q
+    args = np.zeros(1, dtype=_FLASH)
+    args["q_len"] = q_len
+    args["kv_len"] = kv_len
+    args["heads"] = HEADS
+    args["origin"] = 0
+    args["scale"] = _SCALE
+    args["tiles"] = tiles
+    args["q_cap"] = q_cap
+    args["kv_cap"] = kv_cap
+    group.grid(
+        "attend_flash",
+        (query, key, value, dest),
+        args.tobytes(),
+        tiles * HEADS,
+        _FLASH_THREADS,
+    )
 
 
 def _expect_close(gpu: Gpu, name: str, rows, expect, weight, bias) -> None:
@@ -450,6 +441,26 @@ def _expect_close(gpu: Gpu, name: str, rows, expect, weight, bias) -> None:
     if float(np.max(np.abs(got - expect))) > 1e-4:
         message = "device layernorm drifted"
         raise RuntimeError(message)
+
+
+def _quantize_half(gpu: Gpu, rows: np.ndarray):
+    src = gpu.upload(np.ascontiguousarray(rows, dtype=np.float16))
+    codes = gpu.zeros(rows.size)
+    scale = gpu.zeros(rows.shape[0] * 4)
+    group = _Dispatch(gpu)
+    group.rows(
+        "quantize_i8_h",
+        (src, codes, scale),
+        np.array(rows.shape, dtype=np.int32).tobytes(),
+        int(rows.shape[0]),
+    )
+    group.finish("quantize_i8_h")
+    got_codes = gpu.download(codes, np.int8, rows.shape)
+    got_scale = gpu.download(scale, np.float32, (rows.shape[0],))
+    gpu.release(src)
+    gpu.release(codes)
+    gpu.release(scale)
+    return got_codes, got_scale
 
 
 def _quantize(gpu: Gpu, rows: np.ndarray):
@@ -484,6 +495,46 @@ def _rope(gpu: Gpu, tokens: np.ndarray) -> np.ndarray:
     for handle in handles:
         gpu.release(handle)
     return got
+
+
+def _flash(gpu: Gpu) -> float:
+    """Live rows that do not fill a tile, with poison past the live edge."""
+    rng = np.random.default_rng(5)
+    q_len, kv_len = 20, 13
+    q_cap, kv_cap = _pad(q_len, _FLASH_Q), _pad(kv_len, _FLASH_K)
+    query = np.zeros((q_cap, HEADS, HEAD), dtype=np.float32)
+    key = np.zeros((kv_cap, HEADS, HEAD), dtype=np.float32)
+    value = np.zeros((kv_cap, HEADS, HEAD), dtype=np.float32)
+    noise = np.float32(0.05)
+    query[:q_len] = rng.standard_normal((q_len, HEADS, HEAD)).astype(np.float32) * noise
+    key[:kv_len] = rng.standard_normal((kv_len, HEADS, HEAD)).astype(np.float32) * noise
+    value[:kv_len] = rng.standard_normal((kv_len, HEADS, HEAD)).astype(np.float32) * noise
+    query[q_len:] = np.float32(3)
+    key[kv_len:] = np.float32(3)
+    value[kv_len:] = np.float32(3)
+    expect = _attend_reference(query[:q_len], key[:kv_len], value[:kv_len])
+    q_h = gpu.upload(np.ascontiguousarray(query.reshape(q_cap, DIM), dtype=np.float16))
+    k_h = gpu.upload(np.ascontiguousarray(key.reshape(kv_cap, DIM), dtype=np.float16))
+    v_h = gpu.upload(np.ascontiguousarray(value.reshape(kv_cap, DIM), dtype=np.float16))
+    dest = gpu.zeros(q_cap * DIM * 4)
+    group = _Dispatch(gpu)
+    launch_flash(group, q_h, k_h, v_h, dest, q_len, kv_len, q_cap, kv_cap)
+    group.finish("attend_flash")
+    got = gpu.download(dest, np.float16, (q_cap, DIM))[:q_len].astype(np.float32)
+    for handle in (q_h, k_h, v_h, dest):
+        gpu.release(handle)
+    return float(np.max(np.abs(got - expect.reshape(q_len, DIM))))
+
+
+def _attend_reference(query: np.ndarray, key: np.ndarray, value: np.ndarray) -> np.ndarray:
+    q = query.astype(np.float16).astype(np.float32)
+    k = key.astype(np.float16).astype(np.float32)
+    v = value.astype(np.float16).astype(np.float32)
+    dots = np.einsum("thd,khd->htk", q, k) * _SCALE
+    peak = np.max(dots, axis=-1, keepdims=True)
+    weights = np.exp(dots - peak)
+    weights /= np.sum(weights, axis=-1, keepdims=True)
+    return np.einsum("htk,khd->thd", weights, v)
 
 
 def _softmax(gpu: Gpu, scores: np.ndarray) -> np.ndarray:

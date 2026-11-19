@@ -46,7 +46,6 @@ class Runtime:
         self.vae: WanVae | None = None
         self.clip: Clip | None = None
         open_gate(_MIN_FRAME * 3, detail="packed record")
-        self._bind()
 
     def ensure_open(self, request: VideoRequest) -> None:
         """Wait for prior releases, reload when closed, then check this clip fits."""

@@ -1051,6 +1051,157 @@ kernel void rope_f32(
     tokens[offset + 1] = even * sine + odd * cosine;
 }
 
+// FlashAttention for head dim 128. Sixteen queries share a key tile of 48.
+// Q, K, and V are half. The running softmax is Milakov's max and sum, and the
+// destination stays half. q_cap and kv_cap are the allocated rows, so the
+// last tile stays inside the buffer. q_len and kv_len are the live rows.
+constant int AQ = 16;
+constant int AK = 48;
+constant int FD = 128;
+
+struct FlashArgs {
+    uint q_len;
+    uint kv_len;
+    uint heads;
+    uint origin;
+    float scale;
+    uint tiles;
+    uint q_cap;
+    uint kv_cap;
+};
+
+kernel void attend_flash(
+    device half* query [[buffer(0)]],
+    device half* key [[buffer(1)]],
+    device half* value [[buffer(2)]],
+    device half* destination [[buffer(3)]],
+    constant FlashArgs& args [[buffer(4)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    uint q_len = args.q_len;
+    uint kv_len = args.kv_len;
+    uint heads = args.heads;
+    uint origin = args.origin;
+    uint tiles = args.tiles;
+    float scale = args.scale;
+    uint head = tgid.x / tiles;
+    uint q0 = (origin + (tgid.x - head * tiles)) * uint(AQ);
+    if (head >= heads || q0 >= q_len || kv_len == 0u || tiles == 0u) {
+        return;
+    }
+    threadgroup half ph[AQ * AK];
+    threadgroup float scores[AQ * AK];
+    threadgroup float accum[AQ * FD];
+    threadgroup float mrun[AQ];
+    threadgroup float lrun[AQ];
+    threadgroup float alpha_row[AQ];
+    int stride = int(heads * uint(FD));
+    device half* qbase = query + head * uint(FD);
+    device half* kbase = key + head * uint(FD);
+    device half* vbase = value + head * uint(FD);
+    tensor<device half, dextents<int, 2>, tensor_inline> queries(
+        qbase, dextents<int, 2>(FD, int(args.q_cap)), array<int, 2>{1, stride});
+    tensor<device half, dextents<int, 2>, tensor_inline> keys(
+        kbase, dextents<int, 2>(FD, int(args.kv_cap)), array<int, 2>{1, stride});
+    tensor<device half, dextents<int, 2>, tensor_inline> values(
+        vbase, dextents<int, 2>(FD, int(args.kv_cap)), array<int, 2>{1, stride});
+    tensor<threadgroup half, dextents<int, 2>, tensor_inline> probs(
+        ph, dextents<int, 2>(AK, AQ), array<int, 2>{1, AK});
+    tensor<threadgroup float, dextents<int, 2>, tensor_inline> running(
+        accum, dextents<int, 2>(FD, AQ), array<int, 2>{1, FD});
+    auto tile_q = queries.slice(0, int(q0));
+    auto tile_p = probs.slice(0, 0);
+    auto tile_o = running.slice(0, 0);
+    constexpr auto qk_desc = matmul2d_descriptor(AQ, AK, FD, false, true, false);
+    matmul2d<qk_desc, execution_simdgroups<4>> qk_op;
+    constexpr auto pv_desc = matmul2d_descriptor(
+        AQ, FD, AK, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<pv_desc, execution_simdgroups<4>> pv_op;
+    for (uint i = tid; i < uint(AQ) * uint(FD); i += 128u) {
+        accum[i] = 0.0f;
+    }
+    if (tid < uint(AQ)) {
+        mrun[tid] = -INFINITY;
+        lrun[tid] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint k0 = 0u; k0 < kv_len; k0 += uint(AK)) {
+        for (uint i = tid; i < uint(AQ) * uint(AK); i += 128u) {
+            scores[i] = -INFINITY;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        auto tile_k = keys.slice(0, int(k0));
+        auto score_tile = qk_op.get_destination_cooperative_tensor<
+            decltype(tile_q), decltype(tile_k), float>();
+        qk_op.run(tile_q, tile_k, score_tile);
+        for (uint16_t i = 0u; i < score_tile.get_capacity(); ++i) {
+            if (!score_tile.is_valid_element(i)) {
+                continue;
+            }
+            auto ix = score_tile.get_multidimensional_index(i);
+            uint c = uint(ix[0]);
+            uint r = uint(ix[1]);
+            uint q = q0 + r;
+            uint key_index = k0 + c;
+            float dot = -INFINITY;
+            bool live = r < uint(AQ) && c < uint(AK) && q < q_len && key_index < kv_len;
+            if (live) {
+                dot = score_tile[i] * scale;
+            }
+            scores[r * uint(AK) + c] = dot;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < uint(AQ)) {
+            float row_max = -INFINITY;
+            for (uint c = 0u; c < uint(AK); ++c) {
+                row_max = max(row_max, scores[tid * uint(AK) + c]);
+            }
+            float next = max(mrun[tid], row_max);
+            float rescale = 0.0f;
+            if (mrun[tid] != -INFINITY) {
+                rescale = exp(mrun[tid] - next);
+            }
+            alpha_row[tid] = rescale;
+            float sum = 0.0f;
+            for (uint c = 0u; c < uint(AK); ++c) {
+                float weight = 0.0f;
+                float dot = scores[tid * uint(AK) + c];
+                if (dot != -INFINITY) {
+                    weight = exp(dot - next);
+                }
+                ph[tid * uint(AK) + c] = half(weight);
+                sum += weight;
+            }
+            lrun[tid] = lrun[tid] * rescale + sum;
+            mrun[tid] = next;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = tid; i < uint(AQ) * uint(FD); i += 128u) {
+            uint r = i / uint(FD);
+            accum[i] *= alpha_row[r];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        auto tile_v = values.slice(0, int(k0));
+        pv_op.run(tile_p, tile_v, tile_o);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint i = tid; i < uint(AQ) * uint(FD); i += 128u) {
+        uint r = i / uint(FD);
+        uint d = i - r * uint(FD);
+        uint q = q0 + r;
+        if (q >= q_len) {
+            continue;
+        }
+        device half* out = destination + (q * heads + head) * uint(FD) + d;
+        if (lrun[r] == 0.0f) {
+            *out = half(0.0f);
+        } else {
+            *out = half(accum[i] / lrun[r]);
+        }
+    }
+}
+
 struct SoftArgs {
     int rows;
     int stride;
@@ -1112,4 +1263,374 @@ kernel void merge_heads_f32(
     int head = rem / dim;
     int col = rem - head * dim;
     dest[gid] = source[(head * rows + row) * dim + col];
+}
+
+kernel void quantize_i8_h(
+    device const half *source [[buffer(0)]],
+    device char *codes [[buffer(1)]],
+    device float *row_scale [[buffer(2)]],
+    constant int2 &shape [[buffer(3)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint width [[threads_per_threadgroup]])
+{
+    if (int(row) >= shape.x) {
+        return;
+    }
+    int cols = shape.y;
+    threadgroup float scratch[256];
+    const device half *line = source + row * cols;
+    float peak = 0.0f;
+    for (int col = int(lane); col < cols; col += int(width)) {
+        peak = max(peak, fabs(float(line[col])));
+    }
+    scratch[lane] = peak;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint span = width / 2; span > 0; span >>= 1) {
+        if (lane < span) {
+            scratch[lane] = max(scratch[lane], scratch[lane + span]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float top = scratch[0];
+    float inverse = top > 0.0f ? 127.0f / top : 0.0f;
+    if (lane == 0) {
+        row_scale[row] = top > 0.0f ? top / 127.0f : 0.0f;
+    }
+    device char *out = codes + row * cols;
+    for (int col = int(lane); col < cols; col += int(width)) {
+        float rounded = rint(float(line[col]) * inverse);
+        rounded = clamp(rounded, -127.0f, 127.0f);
+        out[col] = char(rounded);
+    }
+}
+
+kernel void scale_i8_h(
+    device const int *acc [[buffer(0)]],
+    device const float *row_scale [[buffer(1)]],
+    device const float *col_scale [[buffer(2)]],
+    device const half *bias [[buffer(3)]],
+    device half *dest [[buffer(4)]],
+    constant ScaleArgs &shape [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int rows = shape.rows;
+    int cols = shape.cols;
+    int logical = shape.logical;
+    if (int(gid) >= rows * cols) {
+        return;
+    }
+    int col = int(gid) % cols;
+    int row = int(gid) / cols;
+    float value = float(acc[gid]) * row_scale[row] * col_scale[col];
+    if (col < logical) {
+        value += float(bias[col]);
+    }
+    dest[gid] = half(value);
+}
+
+kernel void layernorm_h(
+    device const half *source [[buffer(0)]],
+    device const half *weight [[buffer(1)]],
+    device const half *bias [[buffer(2)]],
+    device half *dest [[buffer(3)]],
+    constant RowArgs &args [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint width [[threads_per_threadgroup]])
+{
+    if (int(row) >= args.rows) {
+        return;
+    }
+    int cols = args.cols;
+    threadgroup float scratch[256];
+    const device half *line = source + row * cols;
+    float sum = 0.0f;
+    for (int col = int(lane); col < cols; col += int(width)) {
+        sum += float(line[col]);
+    }
+    scratch[lane] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint span = width / 2; span > 0; span >>= 1) {
+        if (lane < span) {
+            scratch[lane] += scratch[lane + span];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float mean = scratch[0] / float(cols);
+    float var = 0.0f;
+    for (int col = int(lane); col < cols; col += int(width)) {
+        float delta = float(line[col]) - mean;
+        var += delta * delta;
+    }
+    scratch[lane] = var;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint span = width / 2; span > 0; span >>= 1) {
+        if (lane < span) {
+            scratch[lane] += scratch[lane + span];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(scratch[0] / float(cols) + args.eps);
+    device half *out = dest + row * cols;
+    for (int col = int(lane); col < cols; col += int(width)) {
+        float value = (float(line[col]) - mean) * inv;
+        if (args.has_weight != 0) {
+            value *= float(weight[col]);
+        }
+        if (args.has_bias != 0) {
+            value += float(bias[col]);
+        }
+        out[col] = half(value);
+    }
+}
+
+kernel void rmsnorm_h(
+    device const half *source [[buffer(0)]],
+    device const half *weight [[buffer(1)]],
+    device half *dest [[buffer(2)]],
+    constant RowArgs &args [[buffer(3)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint width [[threads_per_threadgroup]])
+{
+    if (int(row) >= args.rows) {
+        return;
+    }
+    int cols = args.cols;
+    threadgroup float scratch[256];
+    const device half *line = source + row * cols;
+    float sum = 0.0f;
+    for (int col = int(lane); col < cols; col += int(width)) {
+        float value = float(line[col]);
+        sum += value * value;
+    }
+    scratch[lane] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint span = width / 2; span > 0; span >>= 1) {
+        if (lane < span) {
+            scratch[lane] += scratch[lane + span];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(scratch[0] / float(cols) + args.eps);
+    device half *out = dest + row * cols;
+    for (int col = int(lane); col < cols; col += int(width)) {
+        float value = float(line[col]) * inv;
+        if (args.has_weight != 0) {
+            value *= float(weight[col]);
+        }
+        out[col] = half(value);
+    }
+}
+
+kernel void modulate_h(
+    device const half *source [[buffer(0)]],
+    device const half *proj_scale [[buffer(1)]],
+    device const half *proj_shift [[buffer(2)]],
+    device const half *mod_scale [[buffer(3)]],
+    device const half *mod_shift [[buffer(4)]],
+    device half *dest [[buffer(5)]],
+    constant int2 &shape [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int cols = shape.y;
+    if (int(gid) >= shape.x * cols) {
+        return;
+    }
+    int col = int(gid) % cols;
+    float scale = float(proj_scale[gid]) + float(mod_scale[col]);
+    float shift = float(proj_shift[gid]) + float(mod_shift[col]);
+    dest[gid] = half(float(source[gid]) * (1.0f + scale) + shift);
+}
+
+kernel void residual_h(
+    device const half *residual [[buffer(0)]],
+    device const half *update [[buffer(1)]],
+    device const half *proj_gate [[buffer(2)]],
+    device const half *mod_gate [[buffer(3)]],
+    device half *dest [[buffer(4)]],
+    constant int2 &shape [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int cols = shape.y;
+    if (int(gid) >= shape.x * cols) {
+        return;
+    }
+    int col = int(gid) % cols;
+    float gate = float(proj_gate[gid]) + float(mod_gate[col]);
+    dest[gid] = half(float(residual[gid]) + float(update[gid]) * gate);
+}
+
+kernel void gelu_tanh_h(
+    device half *values [[buffer(0)]],
+    constant int &count [[buffer(1)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (int(gid) >= count) {
+        return;
+    }
+    float value = float(values[gid]);
+    float inner = 0.7978845608f * (value + 0.044715f * value * value * value);
+    values[gid] = half(0.5f * value * (1.0f + tanh(inner)));
+}
+
+kernel void silu_h(
+    device half *values [[buffer(0)]],
+    constant int &count [[buffer(1)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (int(gid) >= count) {
+        return;
+    }
+    float value = float(values[gid]);
+    values[gid] = half(value / (1.0f + exp(-value)));
+}
+
+kernel void rope_h(
+    device half *tokens [[buffer(0)]],
+    device const float *time_table [[buffer(1)]],
+    device const float *height_table [[buffer(2)]],
+    device const float *width_table [[buffer(3)]],
+    constant int4 &grid [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int tokens_n = grid.x;
+    int heads = grid.y;
+    int height = grid.z;
+    int width = grid.w;
+    int pairs = 64;
+    int count = tokens_n * heads * pairs;
+    if (int(gid) >= count) {
+        return;
+    }
+    int pair = int(gid) % pairs;
+    int head = (int(gid) / pairs) % heads;
+    int token = int(gid) / (pairs * heads);
+    int spatial = height * width;
+    int frame = token / spatial;
+    int rem = token - frame * spatial;
+    int y = rem / width;
+    int x = rem - y * width;
+    const device float *table;
+    int axis;
+    int axis_pairs;
+    int local;
+    if (pair < 22) {
+        table = time_table;
+        axis = frame;
+        axis_pairs = 22;
+        local = pair;
+    } else if (pair < 43) {
+        table = height_table;
+        axis = y;
+        axis_pairs = 21;
+        local = pair - 22;
+    } else {
+        table = width_table;
+        axis = x;
+        axis_pairs = 21;
+        local = pair - 43;
+    }
+    float cosine = table[axis * (axis_pairs * 2) + local];
+    float sine = table[axis * (axis_pairs * 2) + axis_pairs + local];
+    int offset = ((token * heads + head) * 128) + pair * 2;
+    float even = float(tokens[offset]);
+    float odd = float(tokens[offset + 1]);
+    tokens[offset] = half(even * cosine - odd * sine);
+    tokens[offset + 1] = half(even * sine + odd * cosine);
+}
+
+kernel void add_h(
+    device half *residual [[buffer(0)]],
+    device const half *update [[buffer(1)]],
+    constant int &count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (int(gid) >= count) {
+        return;
+    }
+    residual[gid] = half(float(residual[gid]) + float(update[gid]));
+}
+
+struct FlowArgs {
+    int count;
+    float sigma;
+    float sigma_next;
+    int renoise;
+};
+
+kernel void flow_step(
+    device float *latent [[buffer(0)]],
+    device const float *velocity [[buffer(1)]],
+    device const float *noise [[buffer(2)]],
+    device const float *image [[buffer(3)]],
+    device const float *mask [[buffer(4)]],
+    constant FlowArgs &args [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (int(gid) >= args.count) {
+        return;
+    }
+    float clean = latent[gid] - args.sigma * velocity[gid];
+    float next = clean;
+    if (args.renoise != 0) {
+        next = (1.0f - args.sigma_next) * clean + args.sigma_next * noise[gid];
+    }
+    float keep = mask[gid];
+    latent[gid] = (1.0f - keep) * image[gid] + keep * next;
+}
+
+struct WaveArgs {
+    int width;
+    float position;
+};
+
+kernel void sinusoid(
+    device half *dest [[buffer(0)]],
+    constant WaveArgs &args [[buffer(1)]],
+    uint gid [[thread_position_in_grid]])
+{
+    int half_w = args.width / 2;
+    if (int(gid) >= half_w) {
+        return;
+    }
+    float freq = exp(-log(10000.0f) * float(gid) / float(half_w));
+    float arg = args.position * freq;
+    dest[gid] = half(cos(arg));
+    dest[half_w + int(gid)] = half(sin(arg));
+}
+
+struct ScoreArgs {
+    int rows;
+    int stride;
+    int valid;
+    float scale;
+    int has_bias;
+    int has_mask;
+};
+
+kernel void score_bias(
+    device float *scores [[buffer(0)]],
+    device const float *bias [[buffer(1)]],
+    device const int *mask [[buffer(2)]],
+    constant ScoreArgs &args [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (int(gid) >= args.rows * args.stride) {
+        return;
+    }
+    int col = int(gid) % args.stride;
+    int row = int(gid) / args.stride;
+    if (col >= args.valid) {
+        return;
+    }
+    float value = scores[gid] * args.scale;
+    if (args.has_bias != 0) {
+        value += bias[row * args.valid + col];
+    }
+    if (args.has_mask != 0 && mask[col] == 0) {
+        value = -1.0e30f;
+    }
+    scores[gid] = value;
 }

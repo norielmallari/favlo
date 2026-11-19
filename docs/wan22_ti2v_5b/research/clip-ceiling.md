@@ -50,3 +50,5 @@ On an M5 Pro with 48 GB the isolated DiT sum at 576×320 and 9 frames is 4.267 s
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+19 November 2026. `attend_flash` replaced the per-head score GEMM. `uv run favlo --wan22_ti2v_5b ceilings` reprinted the isolated medians. The 576×320 9-frame DiT sum is 2.258 s. Native linears at 1280×704 and 121 frames are 24.440 s. Native attention is 119.567 s. The 26 October printed clips were not rerun.

@@ -138,7 +138,8 @@ A video client calls `wan22_ti2v_5b__generate_video_t2v` or `wan22_ti2v_5b__gene
 - An omitted `image` is text-to-video.
 - A provided `image` is image-to-video.
 - The clip is 24 fps.
-- An omitted duration is 121 frames.
+- `frames` is 4n+1 and at least 5. `duration` wins when both are set.
+- An omitted duration and frame count is 121 frames.
 - `steps` is 0 or 4.
 - `guidance_scale` is omitted or 1.
 

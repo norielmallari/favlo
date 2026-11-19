@@ -10,10 +10,12 @@ import numpy as np
 
 from favlo.cli import repo_root
 from favlo.smoke_lock import hold, release
-from wan22_ti2v_5b.metal41.gpu import Gpu
+from wan22_ti2v_5b.metal41.gpu import Gpu, _Dispatch, _pad
 from wan22_ti2v_5b.metal41.quant import pack_fp4, pack_fp8, pack_int8, quantize_activation
 from wan22_ti2v_5b.metal41.quantize import quantize
 from wan22_ti2v_5b.metal41.schedule import require_knots, timesteps
+from wan22_ti2v_5b.metal41.spec import DIM, LAYERS
+from wan22_ti2v_5b.metal41.stream import _FLASH_K, _FLASH_Q, launch_flash
 
 _PIPELINE = "wan22_ti2v_5b"
 _STUDENT = "quanhaol/Wan2.2-TI2V-5B-Turbo"
@@ -120,7 +122,8 @@ def _check_int8(gpu: Gpu) -> None:
     bias = rng.standard_normal(128).astype(np.float32)
     packed, scales, _dequant = pack_int8(weight)
     got = gpu.linear(left, packed, scales, kind="int8", bias=bias)
-    codes, row_scale = quantize_activation(left)
+    rounded = left.astype(np.float16).astype(np.float32)
+    codes, row_scale = quantize_activation(rounded)
     product = codes.astype(np.int32) @ packed.astype(np.int32).T
     ref = product.astype(np.float32) * row_scale[:, None] * scales[None, :]
     ref = ref + bias.astype(np.float16).astype(np.float32)
@@ -182,46 +185,34 @@ def _ceilings() -> int:
     """Isolated kernel times. The print is this run."""
     gpu = Gpu("wan22_ti2v_5b-ceilings")
     try:
+        calls = LAYERS * 4
         square = _time_i8(gpu, 576, 3072, 3072)
         up = _time_i8(gpu, 576, 14336, 3072)
         down = _time_i8(gpu, 576, 3072, 14336)
-        qk = _time_f16(gpu, 576, 576, 128, transpose=True)
-        mix = _time_f16(gpu, 576, 128, 576, transpose=False)
-        cross_qk = _time_f16(gpu, 576, 512, 128, transpose=True)
-        cross_mix = _time_f16(gpu, 576, 128, 512, transpose=False)
+        self_attn = _time_flash(gpu, 540, 540)
+        cross_attn = _time_flash(gpu, 540, 512)
         native_square = _time_i8(gpu, 27328, 3072, 3072)
         native_up = _time_i8(gpu, 27328, 14336, 3072)
         native_down = _time_i8(gpu, 27328, 3072, 14336)
-        native_qk = _time_f16(gpu, 64, 27296, 128, transpose=True)
-        native_av = _time_f16(gpu, 64, 128, 27296, transpose=False)
+        native_self = _time_flash(gpu, 27280, 27280)
+        native_cross = _time_flash(gpu, 27280, 512)
     finally:
         gpu.close()
-    smoke = (
-        960 * square
-        + 120 * up
-        + 120 * down
-        + 2880 * qk
-        + 2880 * mix
-        + 2880 * cross_qk
-        + 2880 * cross_mix
-    )
-    native_linear = 960 * native_square + 120 * native_up + 120 * native_down
-    tiles = (27280 + 63) // 64
-    native_attn = tiles * 24 * 30 * 4 * (native_qk + native_av)
+    smoke = calls * (8 * square + up + down + self_attn + cross_attn)
+    native_linear = calls * (8 * native_square + native_up + native_down)
+    native_attn = calls * (native_self + native_cross)
     print(f"smoke int8 square {square:.6f}", flush=True)
     print(f"smoke int8 up {up:.6f}", flush=True)
     print(f"smoke int8 down {down:.6f}", flush=True)
-    print(f"smoke qk {qk:.6f}", flush=True)
-    print(f"smoke av {mix:.6f}", flush=True)
-    print(f"smoke cross qk {cross_qk:.6f}", flush=True)
-    print(f"smoke cross av {cross_mix:.6f}", flush=True)
+    print(f"smoke self {self_attn:.6f}", flush=True)
+    print(f"smoke cross {cross_attn:.6f}", flush=True)
     print(f"smoke dit {smoke:.3f}", flush=True)
     print(f"native square {native_square:.6f}", flush=True)
     print(f"native up {native_up:.6f}", flush=True)
     print(f"native down {native_down:.6f}", flush=True)
     print(f"native linear {native_linear:.3f}", flush=True)
-    print(f"native qk tile {native_qk:.6f}", flush=True)
-    print(f"native av tile {native_av:.6f}", flush=True)
+    print(f"native self {native_self:.6f}", flush=True)
+    print(f"native cross {native_cross:.6f}", flush=True)
     print(f"native attention {native_attn:.3f}", flush=True)
     flops = 2.0 * 27328 * 3072 * 14336
     print(f"native down tops {(flops / native_down) / 1e12:.2f}", flush=True)
@@ -254,30 +245,23 @@ def _time_i8(gpu: Gpu, rows: int, out_n: int, cols: int) -> float:
     return seconds
 
 
-def _time_f16(gpu: Gpu, rows: int, cols: int, k_dim: int, *, transpose: bool) -> float:
-    rng = np.random.default_rng(rows + cols + k_dim)
-    left = rng.standard_normal((rows, k_dim)).astype(np.float16)
-    if transpose:
-        right = rng.standard_normal((cols, k_dim)).astype(np.float16)
-        name = "gemm_f16_tn"
-        stride_b = k_dim
-    else:
-        right = np.zeros((k_dim, cols), dtype=np.float16)
-        right[:, :] = rng.standard_normal((k_dim, cols)).astype(np.float16)
-        name = "gemm_f16_nn"
-        stride_b = cols
-    left_h = gpu.upload(np.ascontiguousarray(left))
-    right_h = gpu.upload(np.ascontiguousarray(right))
-    dest = gpu.zeros(rows * cols * 4)
-    dims = np.array([rows, cols, k_dim, k_dim, stride_b], dtype=np.int32)
+def _time_flash(gpu: Gpu, q_len: int, kv_len: int) -> float:
+    q_cap = max(_pad(q_len, 64), _pad(q_len, _FLASH_Q))
+    kv_cap = max(_pad(kv_len, 64), _pad(kv_len, _FLASH_K))
+    rng = np.random.default_rng(q_len + kv_len)
+    query = gpu.upload(rng.standard_normal((q_cap, DIM)).astype(np.float16))
+    key = gpu.upload(rng.standard_normal((kv_cap, DIM)).astype(np.float16))
+    value = gpu.upload(rng.standard_normal((kv_cap, DIM)).astype(np.float16))
+    dest = gpu.zeros(q_cap * DIM * 4)
 
     def once() -> None:
-        gpu._gemm(name, (left_h, right_h, dest), dims, scales=False)
+        group = _Dispatch(gpu)
+        launch_flash(group, query, key, value, dest, q_len, kv_len, q_cap, kv_cap)
+        group.finish("attend_flash")
 
     seconds = _median(once)
-    gpu.release(left_h)
-    gpu.release(right_h)
-    gpu.release(dest)
+    for handle in (query, key, value, dest):
+        gpu.release(handle)
     return seconds
 
 

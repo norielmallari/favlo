@@ -174,13 +174,13 @@ def test_open_sets_the_ledger_cap_and_refuses_a_short_budget(tmp_path: Path, mon
 
     record = tmp_path / "record"
     record.mkdir()
-    (record / "manifest.json").write_text("{}", encoding="utf-8")
+    (record / "manifest.json").write_text('{"vae": "missing.pth"}', encoding="utf-8")
     caps: list[object] = []
     monkeypatch.setattr(runtime_mod.memory, "set_max_memory", caps.append)
     monkeypatch.setattr(runtime_mod.memory, "budget", lambda: runtime_mod._MIN_FRAME * 3 - 1)
     try:
         runtime_mod.open_runtime(record, "fp8", None, None, max_memory="16GiB")
-    except MemoryError as exc:
+    except RuntimeError as exc:
         assert "does not fit" in str(exc)
     else:
         raise AssertionError("a short budget opened")

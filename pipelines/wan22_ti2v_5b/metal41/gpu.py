@@ -13,6 +13,42 @@ from wan22_ti2v_5b.metal41.spec import FP16_MAX, TILE_M, TILE_N, TILE_N_I8
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _THREADS = 128
 _HEAD_BUDGET = 512 * 1024 * 1024
+_ROW = np.dtype(
+    [
+        ("rows", np.int32),
+        ("cols", np.int32),
+        ("has_weight", np.int32),
+        ("has_bias", np.int32),
+        ("eps", np.float32),
+    ]
+)
+_SOFT = np.dtype(
+    [
+        ("rows", np.int32),
+        ("stride", np.int32),
+        ("valid", np.int32),
+        ("scale", np.float32),
+    ]
+)
+_SCORE = np.dtype(
+    [
+        ("rows", np.int32),
+        ("stride", np.int32),
+        ("valid", np.int32),
+        ("scale", np.float32),
+        ("has_bias", np.int32),
+        ("has_mask", np.int32),
+    ]
+)
+_FLOW = np.dtype(
+    [
+        ("count", np.int32),
+        ("sigma", np.float32),
+        ("sigma_next", np.float32),
+        ("renoise", np.int32),
+    ]
+)
+_WAVE = np.dtype([("width", np.int32), ("position", np.float32)])
 
 
 class Gpu:
@@ -189,8 +225,6 @@ class Gpu:
         scales: np.ndarray | None,
         bias: np.ndarray | None,
     ) -> np.ndarray:
-        from wan22_ti2v_5b.metal41.quant import quantize_activation
-
         rows, cols = int(left.shape[0]), int(left.shape[1])
         out_n = int(packed.shape[0])
         stored_k = int(packed.shape[1])
@@ -205,26 +239,32 @@ class Gpu:
             raise RuntimeError(message)
         logical = int(bias.shape[0]) if bias is not None else out_n
         padded_m = _pad(rows, TILE_M)
-        host = np.zeros((padded_m, cols), dtype=np.float32)
-        host[:rows] = np.ascontiguousarray(left, dtype=np.float32)
-        codes, row_scale = quantize_activation(host)
+        host = np.zeros((padded_m, cols), dtype=np.float16)
+        host[:rows] = np.ascontiguousarray(left, dtype=np.float16)
+        src = self.upload(host)
+        codes = self.zeros(padded_m * cols)
+        row_h = self.zeros(padded_m * 4)
         bias_row = np.zeros(out_n, dtype=np.float16)
         if bias is not None:
             bias_row[:logical] = np.ascontiguousarray(bias, dtype=np.float16).reshape(-1)[:out_n]
-        left_h = self.upload(codes)
         weight_h = self._resident(packed)
-        row_h = self.upload(row_scale)
         scale_h = self._resident(scales)
         bias_h = self.upload(bias_row)
         dest = self.zeros(padded_m * out_n * 4)
         dims = np.array([padded_m, out_n, cols, cols, cols], dtype=np.int32)
         shape = np.array([padded_m, out_n, logical], dtype=np.int32)
         group = _Dispatch(self)
-        group.gemm("gemm_i8", (left_h, weight_h, dest), dims, tile_n=TILE_N_I8)
+        group.rows(
+            "quantize_i8_h",
+            (src, codes, row_h),
+            np.array([padded_m, cols], dtype=np.int32).tobytes(),
+            padded_m,
+        )
+        group.gemm("gemm_i8", (codes, weight_h, dest), dims, tile_n=TILE_N_I8)
         group.launch("scale_i8", (dest, row_h, scale_h, bias_h), shape.tobytes(), padded_m * out_n)
         group.finish("linear_i8")
         values = self.download(dest, np.float32, (padded_m, out_n))[:rows, :logical]
-        for handle in (left_h, row_h, bias_h, dest):
+        for handle in (src, codes, row_h, bias_h, dest):
             self.release(handle)
         return values
 
@@ -308,8 +348,6 @@ class Gpu:
         return values
 
     def _linear_i8_span(self, left: np.ndarray, matrix) -> np.ndarray:
-        from wan22_ti2v_5b.metal41.quant import quantize_activation
-
         rows, cols = int(left.shape[0]), int(left.shape[1])
         out_n, stored_k = (int(value) for value in matrix.stored_shape)
         if stored_k != cols:
@@ -323,11 +361,11 @@ class Gpu:
             raise RuntimeError(message)
         logical = int(matrix.logical_n)
         padded_m = _pad(rows, TILE_M)
-        host = np.zeros((padded_m, cols), dtype=np.float32)
-        host[:rows] = np.ascontiguousarray(left, dtype=np.float32)
-        codes, row_scale = quantize_activation(host)
-        left_h = self.upload(codes)
-        row_h = self.upload(row_scale)
+        host = np.zeros((padded_m, cols), dtype=np.float16)
+        host[:rows] = np.ascontiguousarray(left, dtype=np.float16)
+        left_h = self.upload(host)
+        codes = self.zeros(padded_m * cols)
+        row_h = self.zeros(padded_m * 4)
         if matrix.bias_at is None:
             bias_row = np.zeros(out_n, dtype=np.float16)
             if matrix.bias is not None:
@@ -344,9 +382,15 @@ class Gpu:
         dims = np.array([padded_m, out_n, cols, cols, cols], dtype=np.int32)
         shape = np.array([padded_m, out_n, logical], dtype=np.int32)
         group = _Dispatch(self)
+        group.rows(
+            "quantize_i8_h",
+            (left_h, codes, row_h),
+            np.array([padded_m, cols], dtype=np.int32).tobytes(),
+            padded_m,
+        )
         group.gemm(
             "gemm_i8",
-            (left_h, matrix.span, dest),
+            (codes, matrix.span, dest),
             dims,
             tile_n=TILE_N_I8,
             offsets=(0, int(matrix.packed_at), 0),
@@ -360,11 +404,265 @@ class Gpu:
         )
         group.finish("linear_i8")
         values = self.download(dest, np.float32, (padded_m, out_n))[:rows, :logical]
-        for handle in (left_h, row_h, dest):
+        for handle in (left_h, codes, row_h, dest):
             self.release(handle)
         if release_bias:
             self.release(bias_h)
         return values
+
+    def layernorm(
+        self,
+        rows: np.ndarray,
+        weight: np.ndarray | None = None,
+        bias: np.ndarray | None = None,
+        eps: float = 1e-6,
+    ) -> np.ndarray:
+        """Layer norm in half. The result is float32 for the caller."""
+        return self._row_op("layernorm_h", rows, weight, bias, eps, with_bias=True)
+
+    def rmsnorm(self, rows: np.ndarray, weight: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+        """RMS norm in half. The result is float32 for the caller."""
+        return self._row_op("rmsnorm_h", rows, weight, None, eps, with_bias=False)
+
+    def gelu(self, values: np.ndarray) -> np.ndarray:
+        """In-place tanh GELU on a half upload."""
+        return self._inplace("gelu_tanh_h", values)
+
+    def silu(self, values: np.ndarray) -> np.ndarray:
+        """In-place SiLU on a half upload."""
+        return self._inplace("silu_h", values)
+
+    def sinusoid(self, position: float, width: int = 256) -> np.ndarray:
+        """Cosine then sine, half, matching the host time embedding."""
+        dest = self.zeros(width * 2)
+        args = np.zeros(1, dtype=_WAVE)
+        args["width"] = width
+        args["position"] = np.float32(position)
+        group = _Dispatch(self)
+        group.launch("sinusoid", (dest,), args.tobytes(), width // 2)
+        group.finish("sinusoid")
+        got = self.download(dest, np.float16, (width,)).astype(np.float32)
+        self.release(dest)
+        return got
+
+    def blend_volume(self, latent: np.ndarray, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """``(1 - mask) * image + mask * latent``. Mask and image broadcast to ``latent``."""
+        volume = latent.shape
+        count = int(latent.size)
+        lat = self.upload(np.ascontiguousarray(latent, dtype=np.float32))
+        img = self.upload(self._broadcast(image, volume))
+        msk = self.upload(self._broadcast(mask, volume))
+        group = _Dispatch(self)
+        group.launch("blend_latent", (lat, img, msk), np.int32(count).tobytes(), count)
+        group.finish("blend_latent")
+        out = self.download(lat, np.float32, volume)
+        for handle in (lat, img, msk):
+            self.release(handle)
+        return out
+
+    def flow_step(
+        self,
+        latent: np.ndarray,
+        velocity: np.ndarray,
+        noise: np.ndarray,
+        image: np.ndarray,
+        mask: np.ndarray,
+        sigma: float,
+        sigma_next: float,
+        *,
+        renoise: bool,
+    ) -> np.ndarray:
+        """``x0 = x - sigma * v``, then the next knot, then the image blend."""
+        volume = latent.shape
+        count = int(latent.size)
+        lat = self.upload(np.ascontiguousarray(latent, dtype=np.float32))
+        vel = self.upload(np.ascontiguousarray(velocity, dtype=np.float32))
+        noi = self.upload(np.ascontiguousarray(noise, dtype=np.float32))
+        img = self.upload(self._broadcast(image, volume))
+        msk = self.upload(self._broadcast(mask, volume))
+        args = np.zeros(1, dtype=_FLOW)
+        args["count"] = count
+        args["sigma"] = np.float32(sigma)
+        args["sigma_next"] = np.float32(sigma_next)
+        args["renoise"] = 1 if renoise else 0
+        group = _Dispatch(self)
+        group.launch("flow_step", (lat, vel, noi, img, msk), args.tobytes(), count)
+        group.finish("flow_step")
+        out = self.download(lat, np.float32, volume)
+        for handle in (lat, vel, noi, img, msk):
+            self.release(handle)
+        return out
+
+    def attend_half(
+        self,
+        query: np.ndarray,
+        key: np.ndarray,
+        value: np.ndarray,
+        *,
+        scale: float,
+        bias: np.ndarray | None = None,
+        key_mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """QK, softmax, and AV stay in one command buffer. ``query`` is ``[batch, rows, dim]``."""
+        batch = int(query.shape[0])
+        rows = int(query.shape[1])
+        cols = int(key.shape[1])
+        padded_m = _pad(rows, TILE_M)
+        padded_n = _pad(cols, TILE_N)
+        score_bytes = padded_m * padded_n * 4
+        chunk = max(1, _HEAD_BUDGET // max(score_bytes, 1))
+        parts = []
+        for start in range(0, batch, chunk):
+            stop = min(batch, start + chunk)
+            bias_chunk = None if bias is None else bias[start:stop]
+            parts.append(
+                self._attend_chunk(
+                    query[start:stop],
+                    key[start:stop],
+                    value[start:stop],
+                    scale=scale,
+                    bias=bias_chunk,
+                    key_mask=key_mask,
+                )
+            )
+        if len(parts) == 1:
+            return parts[0]
+        return np.concatenate(parts, axis=0)
+
+    def _attend_chunk(
+        self,
+        query: np.ndarray,
+        key: np.ndarray,
+        value: np.ndarray,
+        *,
+        scale: float,
+        bias: np.ndarray | None,
+        key_mask: np.ndarray | None,
+    ) -> np.ndarray:
+        count = int(query.shape[0])
+        rows = int(query.shape[1])
+        dim = int(query.shape[2])
+        cols = int(key.shape[1])
+        channels = int(value.shape[2])
+        padded_m = _pad(rows, TILE_M)
+        padded_n = _pad(cols, TILE_N)
+        padded_c = _pad(channels, TILE_N)
+        group = _Dispatch(self)
+        mask_h = None
+        if key_mask is not None:
+            flags = np.ascontiguousarray(key_mask.astype(np.int32).reshape(-1))
+            mask_h = self.upload(flags)
+        staged: list[tuple] = []
+        for index in range(count):
+            host_q = np.zeros((padded_m, dim), dtype=np.float16)
+            host_q[:rows] = np.ascontiguousarray(query[index], dtype=np.float16)
+            host_k = np.zeros((padded_n, dim), dtype=np.float16)
+            host_k[:cols] = np.ascontiguousarray(key[index], dtype=np.float16)
+            host_v = np.zeros((cols, padded_c), dtype=np.float16)
+            host_v[:, :channels] = np.ascontiguousarray(value[index], dtype=np.float16)
+            q_h = self.upload(host_q)
+            k_h = self.upload(host_k)
+            v_h = self.upload(host_v)
+            scores = self.zeros(padded_m * padded_n * 4)
+            weights = self.zeros(padded_m * padded_n * 2)
+            dest = self.zeros(padded_m * padded_c * 4)
+            dims_qk = np.array([padded_m, padded_n, dim, dim, dim], dtype=np.int32)
+            group.gemm("gemm_f16_tn", (q_h, k_h, scores), dims_qk, tile_n=TILE_N)
+            soft_scale = np.float32(scale)
+            bias_h = None
+            if bias is not None or key_mask is not None:
+                bias_row = np.zeros((rows, cols), dtype=np.float32)
+                if bias is not None:
+                    bias_row[:, :] = bias[index]
+                bias_h = self.upload(np.ascontiguousarray(bias_row))
+                score_args = np.zeros(1, dtype=_SCORE)
+                score_args["rows"] = rows
+                score_args["stride"] = padded_n
+                score_args["valid"] = cols
+                score_args["scale"] = np.float32(scale)
+                score_args["has_bias"] = 0 if bias is None else 1
+                score_args["has_mask"] = 0 if key_mask is None else 1
+                mask_bind = mask_h if mask_h is not None else bias_h
+                group.launch(
+                    "score_bias",
+                    (scores, bias_h, mask_bind),
+                    score_args.tobytes(),
+                    rows * padded_n,
+                )
+                soft_scale = np.float32(1.0)
+            soft = np.zeros(1, dtype=_SOFT)
+            soft["rows"] = rows
+            soft["stride"] = padded_n
+            soft["valid"] = cols
+            soft["scale"] = soft_scale
+            group.launch("softmax_f16", (scores, weights), soft.tobytes(), rows)
+            dims_av = np.array([padded_m, padded_c, cols, padded_n, padded_c], dtype=np.int32)
+            group.gemm("gemm_f16_nn", (weights, v_h, dest), dims_av, tile_n=TILE_N)
+            staged.append((q_h, k_h, v_h, scores, weights, dest, bias_h))
+        group.finish("attend_half")
+        out = np.empty((count, rows, channels), dtype=np.float32)
+        for index, handles in enumerate(staged):
+            dest = handles[5]
+            out[index] = self.download(dest, np.float32, (padded_m, padded_c))[:rows, :channels]
+            for handle in handles:
+                if handle is not None:
+                    self.release(handle)
+        if mask_h is not None:
+            self.release(mask_h)
+        return out
+
+    def _row_op(
+        self,
+        name: str,
+        rows: np.ndarray,
+        weight,
+        bias,
+        eps: float,
+        *,
+        with_bias: bool,
+    ) -> np.ndarray:
+        data = np.ascontiguousarray(rows, dtype=np.float16)
+        flat_rows, cols = int(data.shape[0]), int(data.shape[1])
+        src = self.upload(data)
+        dst = self.zeros(data.size * 2)
+        weight_h = self._half_vector(weight, cols)
+        bias_h = self._half_vector(bias, cols) if with_bias else None
+        args = np.zeros(1, dtype=_ROW)
+        args["rows"] = flat_rows
+        args["cols"] = cols
+        args["has_weight"] = 0 if weight is None else 1
+        args["has_bias"] = 0 if bias is None else 1
+        args["eps"] = np.float32(eps)
+        handles = (src, weight_h, bias_h, dst) if with_bias else (src, weight_h, dst)
+        group = _Dispatch(self)
+        group.rows(name, handles, args.tobytes(), flat_rows)
+        group.finish(name)
+        got = self.download(dst, np.float16, data.shape).astype(np.float32)
+        for handle in handles:
+            self.release(handle)
+        return got
+
+    def _inplace(self, name: str, values: np.ndarray) -> np.ndarray:
+        data = np.ascontiguousarray(values, dtype=np.float16)
+        handle = self.upload(data.reshape(-1))
+        group = _Dispatch(self)
+        group.launch(name, (handle,), np.int32(data.size).tobytes(), int(data.size))
+        group.finish(name)
+        got = self.download(handle, np.float16, data.shape).astype(np.float32)
+        self.release(handle)
+        return got
+
+    def _half_vector(self, values: np.ndarray | None, cols: int):
+        if values is None:
+            return self.upload(np.zeros(cols, dtype=np.float16))
+        flat = np.ascontiguousarray(values, dtype=np.float16).reshape(-1)
+        if int(flat.shape[0]) != cols:
+            message = f"norm vector {flat.shape[0]} is not {cols}"
+            raise RuntimeError(message)
+        return self.upload(flat)
+
+    def _broadcast(self, values: np.ndarray, volume: tuple[int, ...]) -> np.ndarray:
+        return np.ascontiguousarray(np.broadcast_to(values, volume), dtype=np.float32)
 
     def gemm_half(
         self,
@@ -1043,6 +1341,26 @@ class _Dispatch:
         groups = max(1, (threads + width - 1) // width)
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(
             _size(groups, 1, 1),
+            _size(width, 1, 1),
+        )
+
+    def grid(
+        self,
+        name: str,
+        handles,
+        constants: bytes,
+        groups: int,
+        width: int,
+        offsets: tuple[int, ...] | None = None,
+    ) -> None:
+        """One threadgroup per tile. ``width`` is the simdgroup width the kernel expects."""
+        blob = self.gpu.upload(np.frombuffer(constants, dtype=np.uint8))
+        self._blobs.append(blob)
+        encoder = self.encoder
+        encoder.setComputePipelineState_(self.gpu._pipe(name))
+        self._bind(handles, blob, offsets)
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+            _size(max(int(groups), 1), 1, 1),
             _size(width, 1, 1),
         )
 

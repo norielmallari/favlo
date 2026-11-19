@@ -18,8 +18,6 @@ from wan22_ti2v_5b.metal41.activations import (
     layernorm,
     merge_heads,
     qk_norm,
-    silu,
-    sinusoidal,
     split_heads,
 )
 from wan22_ti2v_5b.metal41.blob import load_planes, resolve_named
@@ -101,7 +99,7 @@ class DiT:
 
     def _embed_text(self, text: np.ndarray, mask: np.ndarray) -> np.ndarray:
         del mask
-        hidden = self.gelu(apply(self.gpu, text, self.text0))
+        hidden = self.gpu.gelu(apply(self.gpu, text, self.text0))
         return apply(self.gpu, hidden, self.text2)
 
     def _times(self, token_time: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -117,12 +115,12 @@ class DiT:
         return temb_rows, proj_rows
 
     def _time_embed(self, value: float) -> np.ndarray:
-        wave = sinusoidal(value)[None, :]
-        hidden = silu(apply(self.gpu, wave, self.time0))
+        wave = self.gpu.sinusoid(value)[None, :]
+        hidden = self.gpu.silu(apply(self.gpu, wave, self.time0))
         return apply(self.gpu, hidden, self.time2)[0]
 
     def _time_proj(self, temb: np.ndarray) -> np.ndarray:
-        return apply(self.gpu, silu(temb)[None, :], self.time_proj)[0]
+        return apply(self.gpu, self.gpu.silu(temb)[None, :], self.time_proj)[0]
 
     def _block(
         self,
@@ -174,7 +172,7 @@ class DiT:
     def _head(self, tokens: np.ndarray, temb: np.ndarray) -> np.ndarray:
         shift = temb + self.head_mod[0]
         scale = temb + self.head_mod[1]
-        normed = layernorm(tokens)
+        normed = self.gpu.layernorm(tokens)
         normed = normed * (1.0 + scale) + shift
         return apply(self.gpu, normed, self.head)
 

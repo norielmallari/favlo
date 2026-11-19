@@ -19,6 +19,10 @@ def _video(name: str, description: str, *, still: bool) -> dict[str, Any]:
         "prompt": {"type": "string", "description": "Motion prompt."},
         "size": {"type": "string", "description": "Required WIDTHxHEIGHT."},
         "duration": {"type": "number", "description": "Length in seconds."},
+        "frames": {
+            "type": "integer",
+            "description": "Frame count, 4n+1 and at least 5.",
+        },
         "seed": {"type": "integer", "description": "Omit for random."},
         "quality": {"type": "string", "description": "auto, low, medium, high, xhigh, max."},
         "negative_prompt": {"type": "string", "description": "Empty uses the sample negative."},
@@ -29,7 +33,6 @@ def _video(name: str, description: str, *, still: bool) -> dict[str, Any]:
     if still:
         properties["image"] = {"description": "image_ id, PNG, file://, or name."}
         properties["prompt"] = {"type": "string", "description": "Motion prompt; still is frame 0."}
-        required.append("image")
     return {
         "name": name,
         "description": description,

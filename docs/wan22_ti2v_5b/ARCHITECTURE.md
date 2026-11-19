@@ -21,8 +21,9 @@ This page is the as-built detail for the `wan22_ti2v_5b` package. [README.md](RE
 - Both tools require `size`.
 - Edges are multiples of 32.
 - The catalog lists `1280x704` and `704x1280`.
-- MCP `duration` is clip length in seconds.
-- An omitted `duration` is 121 frames.
+- MCP `frames` is the frame count, 4n+1 and at least 5.
+- MCP `duration` is clip length in seconds and wins when both are set.
+- An omitted `duration` and `frames` is 121 frames.
 - `steps` is 0 or 4.
 - `guidance_scale` is omitted or 1.
 - `negative_prompt` is accepted and not encoded.
@@ -44,13 +45,19 @@ The sampler uses four knots, 1000, 960, 888.888889, and 727.272727. Each knot is
 - A residual's channel RMS, SiLU, and convolution share one submission too.
 - A narrow one is float `conv3d`.
 - An int8 product and its scale share one command buffer.
-- Attention submits every head before each wait.
-- A knot keeps the residual stream on the device and submits its 30 blocks before it waits.
+- Self-attention and cross-attention are one flash kernel. Sixteen queries share a key tile of 48. The query, key, value, and destination are half. The score matrix is not stored. The running softmax stays float.
+- The int8 product reads a half activation. The device quantizes that half row, and the epilogue stores half so the token stream stays on the half path.
+- A linear that returns to the host quantizes the same way and stores float32 for the caller.
+- A knot keeps that half residual on the device and submits its 30 blocks before it waits.
+- Time sinusoid, SiLU, the head layer norm, umT5 RMSNorm, and tanh-GELU run on the device in half.
+- umT5 attention keeps its relative bucket bias. The bias, the key mask, and the softmax stay on the device between the two half GEMMs.
+- The latent blend and the Euler step (`x0`, then the next noise mix) run on the device. The latent stays float.
+- VAE attention softmax stays on the device between the two half GEMMs. The VAE volume stays float because the conv epilogue rescales above the half range. The wide convolution itself is already a half `matmul2d`.
 - The prompt's cross-attention key and value stay for the four knots.
 - Weights already on the device stay until close.
-- On an M5 Pro with 48 GB the isolated DiT sum at 576×320 and 9 frames is 4.267 s.
-- A printed 832×480 9-frame text clip decoded in 18.942 s and the still clip decoded in 15.315 s.
-- That measurement is [research/clip-ceiling.md](research/clip-ceiling.md).
+- On an M5 Pro with 48 GB the isolated DiT sum at 576×320 and 9 frames is 2.258 s. That sum is the 19 Nov float-destination measurement.
+- Native attention at 1280×704 and 121 frames is 119.567 s. That figure is the same measurement.
+- The 26 October printed clips are [research/clip-ceiling.md](research/clip-ceiling.md).
 
 - `MediaPipeline` calls `ensure_open` before the clip and always calls `close` when the request returns.
 - `ensure_open` runs the shared open gate and reloads the DiT, text encoder, and VAE when closed.

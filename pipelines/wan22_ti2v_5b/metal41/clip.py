@@ -14,16 +14,13 @@ from wan22_ti2v_5b.metal41.avi import encode_avi
 from wan22_ti2v_5b.metal41.dit import DiT
 from wan22_ti2v_5b.metal41.request import VideoRequest
 from wan22_ti2v_5b.metal41.schedule import (
-    blend,
     image_mask,
     latent_grid,
-    renoise,
     sigmas,
     text_mask,
     timesteps,
     token_grid,
     token_timesteps,
-    x0_from_velocity,
 )
 from wan22_ti2v_5b.metal41.spec import LATENT_CHANNELS
 from wan22_ti2v_5b.metal41.text import TextEncoder
@@ -73,7 +70,7 @@ class Clip:
             else:
                 image = self.vae.encode(request.image)
                 mask = image_mask(*grid)
-                latent = blend(latent, image, mask)
+                latent = self.dit.gpu.blend_volume(latent, image, mask)
             state = ClipHold(
                 request=request,
                 video_id=video_id,
@@ -97,18 +94,28 @@ class Clip:
             checkpoint(stop, None, preempt=False)
             sigma = float(noise[state.step])
             print(f"knot {state.step} {knots[state.step]:.6f}", flush=True)
-            state.latent = blend(state.latent, _image(state), state.mask)
+            state.latent = self.dit.gpu.blend_volume(state.latent, _image(state), state.mask)
             clock = token_timesteps(state.mask, float(int(knots[state.step])))
             started = time.perf_counter()
             velocity = self.dit.velocity(state.latent, clock, state.text, state.text_valid, tokens)
             print(f"dit {time.perf_counter() - started:.3f}s", flush=True)
-            clean = x0_from_velocity(state.latent, sigma, velocity)
-            if state.step + 1 < len(knots):
-                fresh = rng.standard_normal(state.latent.shape).astype(np.float32)
-                state.latent = renoise(clean, float(noise[state.step + 1]), fresh)
+            last = state.step + 1 >= len(knots)
+            if last:
+                fresh = np.zeros_like(state.latent)
+                sigma_next = 0.0
             else:
-                state.latent = clean
-            state.latent = blend(state.latent, _image(state), state.mask)
+                fresh = rng.standard_normal(state.latent.shape).astype(np.float32)
+                sigma_next = float(noise[state.step + 1])
+            state.latent = self.dit.gpu.flow_step(
+                state.latent,
+                velocity,
+                fresh,
+                _image(state),
+                state.mask,
+                sigma,
+                sigma_next,
+                renoise=not last,
+            )
             state.step += 1
             if state.step == len(knots):
                 break

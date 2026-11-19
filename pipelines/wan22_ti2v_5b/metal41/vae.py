@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from wan22_ti2v_5b.metal41.blob import BlobTable, load_planes, resolve_named
+from wan22_ti2v_5b.metal41.blob import BlobTable, BoundTensor, load_planes, resolve_named
 from wan22_ti2v_5b.metal41.checkpoint import Archive, load_state
 from wan22_ti2v_5b.metal41.gpu import Gpu
 
@@ -36,6 +36,22 @@ _STD = np.array(
     ],
     dtype=np.float32,
 )
+
+
+def _flat_conv(found: BoundTensor, shape: tuple[int, ...]) -> bool:
+    """A 1×1×1 conv stored as a wide matrix is the attention GEMM."""
+    if found.layout != "conv64" or len(shape) != 2 or found.dtype != np.float16:
+        return False
+    source = found.source_shape
+    out_c, k_dim = int(shape[0]), int(shape[1])
+    if len(source) < 2 or int(source[0]) != out_c:
+        return False
+    taps = int(np.prod(source[1:], dtype=np.int64))
+    if taps != k_dim or found.stored_shape != (out_c, k_dim):
+        return False
+    found.logical_n = out_c
+    found.logical_k = k_dim
+    return True
 
 
 class WanVae:
@@ -355,14 +371,12 @@ class WanVae:
         mixed = self.gpu.linear(left, qkv_w, None, kind="f16", bias=qkv_b)
         mixed = mixed.reshape(frames, tokens, channels * 3)
         query, key, value = np.split(mixed, 3, axis=2)
-        scale = np.float32(channels**-0.5)
-        scores = self.gpu.gemm_half_heads(
-            query.astype(np.float16),
-            key.astype(np.float16),
-            transpose_right=True,
+        mixed = self.gpu.attend_half(
+            query,
+            key,
+            value,
+            scale=float(channels**-0.5),
         )
-        weights = _softmax(scores * scale).astype(np.float16)
-        mixed = self.gpu.gemm_half_heads(weights, value.astype(np.float16), transpose_right=False)
         projected = self.gpu.linear(
             mixed.reshape(frames * tokens, channels).astype(np.float16),
             proj_w,
@@ -399,7 +413,7 @@ class WanVae:
         if found is None:
             if isinstance(archive, BlobTable):
                 found = archive.tensor(name)
-                if tuple(found.source_shape) != tuple(shape):
+                if tuple(found.source_shape) != tuple(shape) and not _flat_conv(found, shape):
                     message = f"{name} is {found.source_shape}, forward wants {shape}"
                     raise RuntimeError(message)
             else:
@@ -608,9 +622,3 @@ def check_fused_conv(gpu: Gpu) -> None:
         message = "fused conv tail drifted"
         raise RuntimeError(message)
     print("fused conv ok", flush=True)
-
-
-def _softmax(scores: np.ndarray) -> np.ndarray:
-    peak = np.max(scores, axis=-1, keepdims=True)
-    weights = np.exp(scores - peak)
-    return weights / np.sum(weights, axis=-1, keepdims=True)

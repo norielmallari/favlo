@@ -56,7 +56,7 @@ def check_frame(port: int, png: bytes, sentence: str, model: str) -> str:
         {
             "model": model,
             "temperature": 0,
-            "max_tokens": 8,
+            "max_tokens": 16,
             "enable_thinking": False,
             "messages": [
                 {

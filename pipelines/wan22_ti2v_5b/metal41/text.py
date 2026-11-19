@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from tokenizers import Tokenizer
 
-from wan22_ti2v_5b.metal41.activations import gelu_tanh, merge_heads, rmsnorm, split_heads
+from wan22_ti2v_5b.metal41.activations import merge_heads, split_heads
 from wan22_ti2v_5b.metal41.blob import copy_plane, load_planes, map_plane, resolve_named
 from wan22_ti2v_5b.metal41.gpu import Gpu
 from wan22_ti2v_5b.metal41.schedule import relative_bucket
@@ -77,13 +77,13 @@ class TextEncoder:
         for layer in range(_LAYERS):
             hidden = self._block(hidden, mask, layer)
             hidden[~mask] = 0.0
-        hidden = rmsnorm(hidden, self._norm, 1e-6)
+        hidden = self.gpu.rmsnorm(hidden, self._norm, 1e-6)
         hidden[~mask] = 0.0
         return hidden, mask
 
     def _block(self, hidden: np.ndarray, mask: np.ndarray, layer: int) -> np.ndarray:
         block = self._layers[layer]
-        normed = rmsnorm(hidden, block.norm1, 1e-6)
+        normed = self.gpu.rmsnorm(hidden, block.norm1, 1e-6)
         query = apply(self.gpu, normed, block.q)
         key = apply(self.gpu, normed, block.k)
         value = apply(self.gpu, normed, block.v)
@@ -98,8 +98,8 @@ class TextEncoder:
         )
         hidden = hidden + apply(self.gpu, merge_heads(mixed), block.o)
         hidden[~mask] = 0.0
-        normed = rmsnorm(hidden, block.norm2, 1e-6)
-        gate = gelu_tanh(apply(self.gpu, normed, block.gate))
+        normed = self.gpu.rmsnorm(hidden, block.norm2, 1e-6)
+        gate = self.gpu.gelu(apply(self.gpu, normed, block.gate))
         up = apply(self.gpu, normed, block.up)
         hidden = hidden + apply(self.gpu, gate * up, block.down)
         return hidden
