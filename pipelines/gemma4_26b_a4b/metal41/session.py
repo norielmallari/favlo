@@ -81,6 +81,8 @@ _KERNELS = (
     "store_kv_rows_fp8",
     "pack_kv_fp8",
     "unpack_kv_fp8",
+    "pack_prefix_half",
+    "copy_words",
     "geglu",
     "geglu_rows",
     "gather_rows",
@@ -916,6 +918,22 @@ def _check_prefix_pack(session: Session) -> None:
         if back != expect:
             message = f"prefix half restore mismatch count {count} dim {dim}"
             raise RuntimeError(message)
+    heads, dim, count, capacity = 4, 32, 17, 40
+    wide = np.ascontiguousarray(rng.standard_normal((heads, capacity, dim)).astype(np.float16))
+    expect = pack_head_major(np.ascontiguousarray(wide[:, :count]).tobytes(), heads, dim, count)
+    source = session.upload(wide)
+    packed = session.zeros(len(expect))
+    session.encode(
+        "pack_prefix_half",
+        [source, packed],
+        [session._u32(heads), session._u32(dim), session._u32(count), session._u32(capacity)],
+        ((heads * count * dim + 255) // 256, 1, 1),
+        (256, 1, 1),
+    )
+    session.flush()
+    if memory.load(packed, 0, len(expect)) != expect:
+        message = "prefix half gather mismatch"
+        raise RuntimeError(message)
     print("kernels prefix half ok", flush=True)
 
 

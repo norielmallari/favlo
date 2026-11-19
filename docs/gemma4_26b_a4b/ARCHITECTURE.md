@@ -195,9 +195,9 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - The host does not walk the completion.
 - A command buffer is opened through the shared memory helper, which drains the autorelease pool, and is retired after it finishes.
 - A decode step encodes the thirty layers and the logits in one command buffer.
-- A greedy step records that buffer once and replays it. The host writes the position and the token, then reads the next id.
+- A greedy step records that buffer once, while the prefix pack is still running, and replays it. The host writes the position and the token, then reads the next id.
 - The host reads the sampled token id after that buffer.
-- The prefix flush stays on this thread, outside the prefill and decode clocks, so the next request can align against that file.
+- The prefix pack is its own command buffer after prefill, so its scratch heap is already resident. The host copies that scratch, and the file write runs on a side thread while decode starts. The next request waits for that write.
 - The stop-id check stays in the sampler.
 - Query and key norms are one launch per tensor.
 - On `half`, decode attention is `attend_decode`.
@@ -231,7 +231,7 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - Those linears are the fp8 rows already in the record, so a second quantize is not required.
 - The expanded length is `prompt_tokens`.
 - An image prompt is stored in the prefix file in the live plane, the same way a text prompt is.
-- Prefill stores the generation-suffix cut before the rest of the prompt, with no `prefix store` line. The capture waits until the command buffer that wrote the cache has finished, because the copy uses another queue.
+- Prefill stores the generation-suffix cut before the rest of the prompt, with no `prefix store` line. `pack_prefix_half` gathers each head's filled rows, and `copy_words` copies a contiguous plane. The file write does not stay on this thread.
 - A prompt that has not run a tool call pins that cut. A later tool turn stores its cut and leaves the pin.
 - The suffix is `<|channel>thought\n<channel|>`, `<|channel>thought\n`, or `<|turn>model\n` when thinking is on and the turn has not opened a thought.
 - The pin is one filename in `pinned` beside the `.bin` files, written again when a hit already covers that cut.

@@ -2589,6 +2589,38 @@ kernel void store_kv_rows_fp8(
     }
 }
 
+// Filled rows of a [head, capacity, dim] half cache, packed to [head, count, dim].
+kernel void pack_prefix_half(
+    device const half* source [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& heads [[buffer(2)]],
+    constant uint& dim [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& capacity [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint row = count * dim;
+    uint total = heads * row;
+    if (gid >= total || row == 0u) {
+        return;
+    }
+    uint head = gid / row;
+    uint inner = gid - head * row;
+    destination[gid] = source[ulong(head) * capacity * dim + inner];
+}
+
+// Contiguous prefix bytes. The byte count is four times ``words``.
+kernel void copy_words(
+    device const uint* source [[buffer(0)]],
+    device uint* destination [[buffer(1)]],
+    constant uint& words [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < words) {
+        destination[gid] = source[gid];
+    }
+}
+
 // One scale block of a filled cache. ``transposed`` packs local values as [dim, count].
 kernel void pack_kv_fp8(
     device const half* source [[buffer(0)]],

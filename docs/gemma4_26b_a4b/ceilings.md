@@ -2,7 +2,9 @@
 
 Bandwidth and kernel ceilings for the kernels `gemma4_26b_a4b` launches. Recompute when any of these kernels changes:
 
-`gemv_fp8`, `gemv_fp8_vec`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `kv_dequant_heads`, `kv_gather_half`, `kv_cast_q`, `kv_softmax_raw`, `kv_acc_add`, `kv_attend_store`, `matmul_half_batch`, `matmul_half_64_batch`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, `sample_topk`.
+`gemv_fp8`, `gemv_fp8_vec`, `gemv_fp4_at`, `gemv_fp8_at`, `embed_fp8`, `matmul_fp8`, `matmul_half`, `matmul_fp4_64_at`, `matmul_fp8_64_at`, `restore_fp8_i8`, `quantize_half_i8`, `quantize_float_i8`, `prefill_i8_n64`, `scale_i8_f32`, `write_row`, `write_rows_tight`, `rmsnorm`, `rmsnorm_rows`, `rmsnorm_heads`, `router_topk`, `rope_pairs`, `rope_rows`, `store_kv`, `store_kv_rows`, `kv_dequant_heads`, `kv_gather_half`, `kv_cast_q`, `kv_softmax_raw`, `kv_acc_add`, `kv_attend_store`, `matmul_half_batch`, `matmul_half_64_batch`, `attend_span`, `attend_span4`, `attend_decode`, `geglu_rows`, `geglu_pair`, `group_expert_slots`, `gather_half_slots`, `pad_half_rows`, `scatter_slot_rows`, `mix_experts`, `residual_scale`, `scale_copy`, `zero_buffer`, `softcap`, `topk_groups`, `sample_topk`, `pack_prefix_half`, `copy_words`.
+
+`pack_prefix_half` and `copy_words` snapshot the prefix. They are outside the token ceilings below.
 
 The CPU reads one sampled token. Expert ids stay on device.
 
@@ -145,7 +147,7 @@ The 90% test uses the packed step, measured on 3 November 2026. One decode step 
 
 Context 1 is 21.675 ms, 46.14 tok/s. Context 1024 is 24.641 ms, 40.58 tok/s. Context 65536 is 46.195 ms, 21.65 tok/s. Context 131072 is 67.564 ms, 14.80 tok/s.
 
-The greedy synthetic decode on 19 November 2026, half cache, is 41.43 tok/s at 1,024 prompt tokens. That is the wall-clock rate. The packed figure above remains the kernel ceiling.
+The greedy synthetic decode on 19 November 2026, half cache, is 44.52 tok/s at 1,024 prompt tokens. That is the wall-clock rate. The packed figure above remains the kernel ceiling.
 
 The rows below time each projection kernel in its own command buffer, on 2 November 2026. They are not added into the packed step. A sum of those rows counts a command-buffer gap on every dispatch, and the live step is faster than that sum.
 

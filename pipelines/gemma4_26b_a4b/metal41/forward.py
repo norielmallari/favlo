@@ -31,8 +31,10 @@ from __future__ import annotations
 import ctypes
 import fcntl
 import os
+import queue
 import random
 import struct
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +46,7 @@ from favlo.console import format_note, format_rate, publish_count
 from favlo.memory import device_buffer, memory
 from favlo.prefix import (
     DEFAULT_BUDGET,
+    PrefixRecord,
     PrefixSession,
     PrefixStore,
     checkpoint_digest,
@@ -298,6 +301,11 @@ class Gemma4Runtime:
         self._vision = None
         self.capacity = 256
         self._replay_key = None
+        self._prefix_writer = None
+        self._prefix_queue = None
+        self._prefix_lock = threading.Lock()
+        self._prefix_notes: list[int] = []
+        self._prefix_errors: list[OSError] = []
         self.atlas = None
         self.prefix = None
         resident_bytes = (path / "resident.bin").stat().st_size
@@ -330,6 +338,7 @@ class Gemma4Runtime:
         if self._closed:
             return
         self._closed = True
+        self._finish_prefix_writer()
         prefix = getattr(self, "prefix", None)
         if prefix is not None:
             try:
@@ -433,7 +442,7 @@ class Gemma4Runtime:
                 if self.filled != cut:
                     break
                 self.prefix.note(prompt[:cut])
-                self._store_prefix(note=False)
+                self._store_prefix(note=False, defer=True)
                 if cut == held:
                     self._keep_boundary(prompt[:cut])
                 hit = cut
@@ -442,6 +451,20 @@ class Gemma4Runtime:
                     self._prefill_visual(prompt, hit, pictures, log_cached=not logged_cached)
                 else:
                     self._prefill(prompt[hit:])
+            replay = (
+                temperature == 0.0
+                and not presence
+                and not halt_at
+                and not channel_open
+                and not visual
+            )
+            self.session.flush()
+            self.prefix.note(prompt[: self.filled])
+            armed = self._arm_prefix_pack()
+            if replay and self._replay_key != (self.capacity, presence):
+                self.session.commit()
+                self._record_replay(presence)
+                self._replay_key = (self.capacity, presence)
             self.session.flush()
             prompt_n = pending
             self.prompt_tokens = self.filled
@@ -451,8 +474,8 @@ class Gemma4Runtime:
             self._prefill_progress = None
             self._end_phase(prefill_row, prefill_line)
             prefill_row = None
-            self.prefix.note(prompt[: self.filled])
-            self._store_prefix()
+            if armed:
+                self._publish_prefix(note=True)
             drawn: list[int] = []
             self._counts_fresh = True
             decode_row = self._begin_phase("decode", limit, live=True)
@@ -471,13 +494,6 @@ class Gemma4Runtime:
             reasoned = 0
             halted = False
             pending: int | None = None
-            replay = (
-                temperature == 0.0
-                and not presence
-                and not halt_at
-                and not channel_open
-                and not visual
-            )
             for _ in range(limit):
                 if self._stop or len(drawn) >= limit:
                     halted = True
@@ -534,6 +550,7 @@ class Gemma4Runtime:
             self._flush_log()
             return drawn, prefill_line, decode_line
         finally:
+            self._finish_prefix_writer()
             self._prefill_progress = None
             if prefill_row is not None:
                 self._end_phase(prefill_row, "")
@@ -1735,19 +1752,88 @@ class Gemma4Runtime:
         if path.is_file():
             store.pin(path)
 
-    def _store_prefix(self, *, note: bool = True) -> None:
-        # The copy reads a different queue from the one that wrote the cache.
-        # Wait until that command buffer finishes, or the file keeps the previous turn.
+    def _arm_prefix_pack(self) -> bool:
+        """Encode the filled cache. The caller has flushed, so this opens a new buffer."""
+        prefix = self.prefix
+        if prefix is None or not prefix.tokens or not prefix.dirty:
+            return False
+        return bool(prefix.adapter.encode_pack())
+
+    def _publish_prefix(self, *, note: bool) -> None:
+        """Copy the packed scratch and queue the file write."""
+        prefix = self.prefix
+        regions = [
+            type(region)(region.name, bytes(region.data)) for region in prefix.adapter.views()
+        ]
+        record = PrefixRecord(list(prefix.tokens), regions)
+        prefix.dirty = False
+        self._ensure_prefix_writer()
+        self._prefix_queue.put((record, note))
+
+    def _ensure_prefix_writer(self) -> None:
+        writer = self._prefix_writer
+        if writer is not None and writer.is_alive():
+            return
+        self._prefix_queue = queue.Queue()
+
+        def write() -> None:
+            while True:
+                item = self._prefix_queue.get()
+                if item is None:
+                    return
+                record, note = item
+                try:
+                    path = self.prefix.store.save(record)
+                except OSError as exc:
+                    with self._prefix_lock:
+                        self._prefix_errors.append(exc)
+                    path = None
+                if path is not None and note:
+                    with self._prefix_lock:
+                        self._prefix_notes.append(len(record.tokens))
+
+        self._prefix_writer = threading.Thread(target=write, name="gemma4-prefix")
+        self._prefix_writer.start()
+
+    def _finish_prefix_writer(self) -> None:
+        writer = self._prefix_writer
+        if writer is None:
+            return
+        self._prefix_queue.put(None)
+        writer.join()
+        self._prefix_writer = None
+        with self._prefix_lock:
+            errors = self._prefix_errors
+            notes = self._prefix_notes
+            self._prefix_errors = []
+            self._prefix_notes = []
+        for error in errors:
+            self._note("prefix_store_failed", error=error)
+        for tokens in notes:
+            self._note("prefix_store", tokens=tokens)
+
+    def _store_prefix(self, *, note: bool = True, defer: bool = False) -> None:
+        prefix = self.prefix
+        if prefix is None or not prefix.tokens or not prefix.dirty:
+            return
+        if defer:
+            self.session.flush()
+            if not prefix.adapter.encode_pack():
+                return
+            self.session.flush()
+            self._publish_prefix(note=note)
+            return
+        self._finish_prefix_writer()
         session = getattr(self, "session", None)
         if session is not None:
             session.flush()
         try:
-            path = self.prefix.flush()
+            path = prefix.flush()
         except OSError as exc:
             self._note("prefix_store_failed", error=exc)
             return
         if path is not None and note:
-            self._note("prefix_store", tokens=len(self.prefix.tokens))
+            self._note("prefix_store", tokens=len(prefix.tokens))
 
     def _status(self, line: str) -> None:
         console = self.console

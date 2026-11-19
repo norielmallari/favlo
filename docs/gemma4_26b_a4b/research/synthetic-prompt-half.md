@@ -136,3 +136,14 @@ The banner was `kv half mtp off depth 3 thinking off decode 128`, and every meas
 | 10000 | 901.70 tok/s (10000 tok in 11.09 s) | 34.86 tok/s (128 tok in 3.67 s) | 686.18 tok/s (10128 tok in 14.76 s) |
 
 The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "827.65 OR 896.50 OR 1029.61 OR 901.70 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.
+
+19 November 2026. The prefix pack is one command buffer after prefill, and the file write runs beside decode. The same protocol run, nonce `dd22ab43`, recorded:
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 929.52 tok/s (512 tok in 0.55 s) | 43.45 tok/s (128 tok in 2.95 s) | 182.86 tok/s (640 tok in 3.50 s) |
+| 1024 | 922.16 tok/s (1024 tok in 1.11 s) | 44.52 tok/s (128 tok in 2.87 s) | 289.45 tok/s (1152 tok in 3.98 s) |
+| 4096 | 948.49 tok/s (4096 tok in 4.32 s) | 39.39 tok/s (128 tok in 3.25 s) | 557.99 tok/s (4224 tok in 7.57 s) |
+| 10000 | 958.34 tok/s (10000 tok in 10.43 s) | 35.29 tok/s (128 tok in 3.63 s) | 720.34 tok/s (10128 tok in 14.06 s) |
+
+The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "929.52 OR 922.16 OR 948.49 OR 958.34 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.

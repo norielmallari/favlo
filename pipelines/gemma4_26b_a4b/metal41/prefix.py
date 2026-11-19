@@ -103,59 +103,55 @@ class RuntimeAdapter:
 
     def __init__(self, runtime: object) -> None:
         self.runtime = runtime
+        self._packed = None
 
     def capture(self) -> list[Region]:
+        self.encode_pack()
+        if int(self.runtime.filled) < 1:
+            return [Region(LOCAL, b""), Region(GLOBAL, b"")]
+        self.runtime.session.flush()
+        return self.views()
+
+    def encode_pack(self) -> bool:
+        """Pack the filled cache into the prefix scratch. The caller flushes."""
         count = int(self.runtime.filled)
         if count < 1:
-            return [Region(LOCAL, b""), Region(GLOBAL, b"")]
+            self._packed = None
+            return False
         mode = kv_mode(getattr(self.runtime, "kv_cache", "half"))
         local_n = local_nbytes(count, mode)
         global_n = global_nbytes(count, mode)
         scratch = self._scratch(local_n + global_n)
-        cursor = _copy_handles_out(
-            scratch,
-            0,
-            self.runtime.local_k,
-            count,
-            LOCAL_HEADS,
-            LOCAL_DIM,
-            mode,
-            self.runtime.capacity,
-        )
-        cursor = _copy_handles_out(
-            scratch,
-            cursor,
-            self.runtime.local_v,
-            count,
-            LOCAL_HEADS,
-            LOCAL_DIM,
-            mode,
-            self.runtime.capacity,
-        )
-        cursor = _copy_handles_out(
-            scratch,
-            cursor,
-            self.runtime.global_k,
-            count,
-            GLOBAL_HEADS,
-            GLOBAL_DIM,
-            mode,
-            self.runtime.capacity,
-        )
-        _copy_handles_out(
-            scratch,
-            cursor,
-            self.runtime.global_v,
-            count,
-            GLOBAL_HEADS,
-            GLOBAL_DIM,
-            mode,
-            self.runtime.capacity,
-        )
-        return [
-            Region(LOCAL, memory.load(scratch, 0, local_n)),
-            Region(GLOBAL, memory.load(scratch, local_n, global_n)),
-        ]
+        session = self.runtime.session
+        cursor = 0
+        for handles, heads, dim in (
+            (self.runtime.local_k, LOCAL_HEADS, LOCAL_DIM),
+            (self.runtime.local_v, LOCAL_HEADS, LOCAL_DIM),
+            (self.runtime.global_k, GLOBAL_HEADS, GLOBAL_DIM),
+            (self.runtime.global_v, GLOBAL_HEADS, GLOBAL_DIM),
+        ):
+            cursor = _encode_handles_out(
+                session,
+                scratch,
+                cursor,
+                handles,
+                count,
+                heads,
+                dim,
+                mode,
+                self.runtime.capacity,
+            )
+        self._packed = (scratch, local_n, global_n)
+        return True
+
+    def views(self) -> list[Region]:
+        """Views of the packed scratch. The pack must have finished."""
+        packed = self._packed
+        if packed is None:
+            return [Region(LOCAL, b""), Region(GLOBAL, b"")]
+        scratch, local_n, global_n = packed
+        view = memory.map(scratch, 0, local_n + global_n)
+        return [Region(LOCAL, view[:local_n]), Region(GLOBAL, view[local_n:])]
 
     def install(self, header: PrefixHeader) -> bool:
         if not self.accept(header, list(header.tokens) + [0]):
@@ -314,6 +310,59 @@ def fp8_layout(count: int, heads: int, dim: int, *, transposed: bool) -> tuple[i
     k_pad = (active + 127) & ~127
     one = rows * k_pad + rows * (k_pad // 32)
     return rows, k_pad, heads * one
+
+
+def _encode_handles_out(
+    session: object,
+    dest: object,
+    offset: int,
+    handles: list[object],
+    count: int,
+    heads: int,
+    dim: int,
+    mode: str | None,
+    capacity: int,
+) -> int:
+    """One dispatch per plane. A strided half cache gathers each head's filled rows."""
+    nbytes = plane_bytes(count, heads, dim, mode)
+    stride_tokens = capacity if capacity > count else count
+    gather = bool(nbytes) and plain_cache(mode) and stride_tokens != count
+    for handle in handles:
+        if handle is None:
+            continue
+        if nbytes < 1:
+            offset += nbytes
+            continue
+        if nbytes % 4:
+            message = f"prefix plane is {nbytes} bytes"
+            raise RuntimeError(message)
+        if gather:
+            total = heads * count * dim
+            session.encode(
+                "pack_prefix_half",
+                [handle, dest],
+                [
+                    session._u32(heads),
+                    session._u32(dim),
+                    session._u32(count),
+                    session._u32(stride_tokens),
+                ],
+                ((total + 255) // 256, 1, 1),
+                (256, 1, 1),
+                origins=[0, offset],
+            )
+        else:
+            words = nbytes // 4
+            session.encode(
+                "copy_words",
+                [handle, dest],
+                [session._u32(words)],
+                ((words + 255) // 256, 1, 1),
+                (256, 1, 1),
+                origins=[0, offset],
+            )
+        offset += nbytes
+    return offset
 
 
 def _copy_handles_out(
