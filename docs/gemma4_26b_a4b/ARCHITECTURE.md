@@ -272,6 +272,7 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - Any other prompt writes the live sequence and loads the longest stored strict prefix.
 
 - The chat template rendered at request time is the canonical Gemma 4 template published 2026-07-09, stored beside this package.
+- The tokenizer and the compiled template are kept for the process. A request renders the template it already compiled.
 - The copy in the quantized record is not rendered.
 - A request passes its `tools` into that template.
 - OpenAI tool-call arguments arrive as a JSON string and are decoded to an object before render, which is the form the template accepts.

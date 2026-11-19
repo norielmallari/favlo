@@ -53,15 +53,31 @@ _TOOL_RESPONSE_CLOSE = "<tool_response|>"
 _MODEL_TURN = "<|turn>model\n"
 
 
+_LOAD_LOCK = threading.Lock()
 _tokenizers: dict[Path, Tokenizer] = {}
+_compiled: Any = None
 
 
 def load_tokenizer(root: Path) -> Tokenizer:
-    found = _tokenizers.get(root)
-    if found is None:
-        found = Tokenizer.from_file(str(root / "tokenizer.json"))
-        _tokenizers[root] = found
-    return found
+    """The checkpoint tokenizer, loaded once for this process."""
+    with _LOAD_LOCK:
+        found = _tokenizers.get(root)
+        if found is None:
+            found = Tokenizer.from_file(str(root / "tokenizer.json"))
+            _tokenizers[root] = found
+        return found
+
+
+def _chat_template() -> Any:
+    """The package Jinja template, compiled once for this process."""
+    global _compiled
+    with _LOAD_LOCK:
+        found = _compiled
+        if found is None:
+            environment = Environment(autoescape=False, keep_trailing_newline=True)
+            found = environment.from_string(_TEMPLATE.read_text(encoding="utf-8"))
+            _compiled = found
+        return found
 
 
 def _replay_empty_tool_thoughts(text: str) -> str:
@@ -139,9 +155,7 @@ def render_chat(
     A request ``preserve_thinking`` value is not read.
     """
     prepared = _bridge_omitted_assistant(_messages(messages))
-    environment = Environment(autoescape=False, keep_trailing_newline=True)
-    template = environment.from_string(_TEMPLATE.read_text(encoding="utf-8"))
-    rendered = template.render(
+    rendered = _chat_template().render(
         messages=prepared,
         tools=tools,
         add_generation_prompt=True,
@@ -171,6 +185,28 @@ def encode_text(root: Path, text: str) -> list[int]:
 _GENERATION_SUFFIX: dict[Path, tuple[list[int], ...]] = {}
 
 
+def _generation_suffix(root: Path) -> tuple[list[int], ...]:
+    """Closed thought, open thought, and the model turn.
+
+    Those strings do not depend on the request. The ids stay with the tokenizer.
+    """
+    with _LOAD_LOCK:
+        found = _GENERATION_SUFFIX.get(root)
+    if found is not None:
+        return found
+    packed = (
+        encode_text(root, "<|channel>thought\n<channel|>"),
+        encode_text(root, "<|channel>thought\n"),
+        encode_text(root, "<|turn>model\n"),
+    )
+    with _LOAD_LOCK:
+        found = _GENERATION_SUFFIX.get(root)
+        if found is None:
+            _GENERATION_SUFFIX[root] = packed
+            return packed
+        return found
+
+
 def generation_cut(root: Path, prompt: list[int]) -> int | None:
     """Index where the generation suffix starts, when this prompt ends with one.
 
@@ -179,14 +215,7 @@ def generation_cut(root: Path, prompt: list[int]) -> int | None:
     ends at ``<|turn>model``. A follow-up that drops the channel does not
     repeat that suffix, so the tokens before it are the prefix it still shares.
     """
-    pair = _GENERATION_SUFFIX.get(root)
-    if pair is None:
-        pair = (
-            encode_text(root, "<|channel>thought\n<channel|>"),
-            encode_text(root, "<|channel>thought\n"),
-            encode_text(root, "<|turn>model\n"),
-        )
-        _GENERATION_SUFFIX[root] = pair
+    pair = _generation_suffix(root)
     for suffix in pair:
         count = len(suffix)
         if count and len(prompt) > count and prompt[-count:] == suffix:
@@ -495,11 +524,8 @@ def _respond(
     required = required_function(prepared.get("tool_choice")) if emit_tools else None
     lead = _call_lead(runtime, tools, required)
     if lead:
-        prompt = close_model_turn(
-            prompt,
-            encode_text(runtime.root, "<|turn>model\n"),
-            encode_text(runtime.root, "<|channel>thought\n<channel|>"),
-        )
+        suffix = _generation_suffix(runtime.root)
+        prompt = close_model_turn(prompt, suffix[2], suffix[0])
         runtime._body_len = len(prompt)
         prompt = [*prompt, *lead[1]]
     cap = prepared.get("max_output_tokens")

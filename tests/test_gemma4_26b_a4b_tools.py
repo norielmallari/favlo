@@ -194,6 +194,52 @@ def test_a_spent_thought_budget_closes_the_channel() -> None:
     assert (inside, reasoned, inject) == (False, 0, [])
 
 
+def test_chat_template_compiles_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gemma4_26b_a4b.metal41 import chat
+
+    calls = {"n": 0}
+    original = chat.Environment.from_string
+
+    def counting(self: object, source: str, *args: object, **kwargs: object) -> object:
+        calls["n"] += 1
+        return original(self, source, *args, **kwargs)
+
+    monkeypatch.setattr(chat.Environment, "from_string", counting)
+    chat._compiled = None
+    render_chat([{"role": "user", "content": "Hi"}], False)
+    render_chat([{"role": "user", "content": "Hi"}], True)
+    assert calls["n"] == 1
+
+
+def test_tokenizer_loads_once(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from gemma4_26b_a4b.metal41 import chat
+
+    root = Path(str(tmp_path))
+    loads = {"n": 0}
+
+    class _Tokenizer:
+        def encode(self, text: str, add_special_tokens: bool = True) -> object:
+            del text, add_special_tokens
+            return SimpleNamespace(ids=[1])
+
+    def from_file(path: str) -> _Tokenizer:
+        del path
+        loads["n"] += 1
+        return _Tokenizer()
+
+    monkeypatch.setattr(chat.Tokenizer, "from_file", from_file)
+    chat._tokenizers.pop(root, None)
+    chat._GENERATION_SUFFIX.pop(root, None)
+    encode_text(root, "a")
+    encode_text(root, "b")
+    chat._generation_suffix(root)
+    chat._generation_suffix(root)
+    assert loads["n"] == 1
+
+
 def test_thinking_off_closes_the_ghost_channel() -> None:
     text = render_chat([{"role": "user", "content": "Hi"}], False)
     assert text.endswith("<|turn>model\n<|channel>thought\n<channel|>")
