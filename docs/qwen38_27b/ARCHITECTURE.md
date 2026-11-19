@@ -359,6 +359,7 @@ Decode and draft:
 - The opening copies the MTP block and its key/value plane only when that resolved flag is true. A false flag leaves those tensors in the record file.
 - Temperature, penalties, thinking, and the sampling card do not change that flag.
 - The draft length is `mtp_depth`. A request that omits it uses the row. A row that omits `mtp_depth` drafts three tokens.
+- One window drafts in one command buffer. The next draft reads the previous id from device. The host reads those ids once when the chain ends.
 
 Span verify:
 
@@ -366,7 +367,7 @@ Span verify:
 - Gate and up of the first two feeds are `ffn_gate_up_span2`. The third feed reads gate and up again with `ffn_gate_up`. Two feeds use the span2 forms.
 - Each attention mix is the serial decode path, one token at a time.
 - After the window, one command buffer scores every residual through ``lm_head`` and argmax. A feed past the third is one serial step.
-- Twelve language feed-forward layers are fp8 and read those weights twice.
+- Twelve language feed-forward layers are fp8. A three-token window multiplies each gate and up with `span_fp8_m8`, an 8-row `matmul2d`. Five rows are zero. The first three rows are the activations. The down projection stays on `gemv_fp8_x4`, once per token. A two-token window stays on `gemv_fp8_x4`.
 - Temperature 0 keeps a draft while it matches the target argmax.
 - A positive temperature, a penalty, or a logit bias samples that row and keeps the draft while the sample matches.
 - The DeltaNet state and the convolution history are copied into device snap buffers at the start of the span command buffer.

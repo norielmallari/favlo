@@ -222,6 +222,25 @@ def check_fp8_prefill(session: Session) -> None:
     got = _morton_prefill(session, "prefill_fp8_n64_morton", activation, data, scales, 512, 512, 256, 64, 64)
     matrix = dequant_fp8(data, scales, 512, 256)
     _close("fp8 morton", got, (activation.astype(np.float32) @ matrix.T).astype(np.float32), atol=2e-3)
+    rows, cols, inner = 8, 256, 512
+    activation = np.zeros((rows, inner), dtype=np.float16)
+    activation[:3] = rng.normal(scale=0.05, size=(3, inner)).astype(np.float16)
+    weight = rng.normal(scale=0.05, size=(cols, inner)).astype(np.float32)
+    data, scales = quantize_fp8(weight)
+    destination = session.zeros(rows * cols * 4)
+    name = "span_fp8_m8"
+    width = int(session.pipes[name].threadExecutionWidth())
+    session.dispatch(
+        name,
+        [session.upload(np.ascontiguousarray(activation)), session.upload(data), session.upload(scales), destination],
+        [struct.pack("<I", rows), struct.pack("<I", cols), struct.pack("<I", inner)],
+        (cols // 256, 1, 1),
+        (width * 2, 1, 1),
+    )
+    matrix = dequant_fp8(data, scales, cols, inner)
+    expect = activation.astype(np.float32) @ matrix.T
+    got = session.download_f32(destination, rows * cols).reshape(rows, cols)
+    _close("span fp8 m8", got, expect.astype(np.float32), atol=2e-3)
 
 
 def check_fp8_x4(session: Session) -> None:

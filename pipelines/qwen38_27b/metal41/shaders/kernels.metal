@@ -1513,6 +1513,57 @@ kernel void embed_fp4_rows(
     }
 }
 
+// Eight activation rows. The source holds ``count`` rows and the rest are zero.
+kernel void pack_half_m8(
+    device const float* src [[buffer(0)]],
+    device half* dst [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& inner [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint span = inner << 3;
+    if (tid >= span) {
+        return;
+    }
+    uint row = tid / inner;
+    uint col = tid - row * inner;
+    float value = row < count ? src[row * inner + col] : 0.0f;
+    dst[tid] = half(value);
+}
+
+// Eight-row half × fp8 product. The descriptor M is 8, so a shorter span is padded.
+kernel void span_fp8_m8(
+    device half* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant uint& inner [[buffer(6)]],
+    uint gid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation,
+        dextents<int, 2>(int(inner), int(rows)),
+        array<int, 2>{1, int(inner)});
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)},
+        scales_plane(scales));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination,
+        dextents<int, 2>(int(cols), int(rows)),
+        array<int, 2>{1, int(cols)});
+    constexpr auto desc = matmul2d_descriptor(
+        8, 256, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<2>> op;
+    auto tile_left = left.slice(0, 0);
+    auto tile_right = right.slice(0, int(gid) * 256);
+    auto tile_out = out.slice(int(gid) * 256, 0);
+    op.run(tile_left, tile_right, tile_out);
+}
+
 kernel void gather_fp4_row(
     device const uchar* weights [[buffer(0)]],
     device const uchar* scales [[buffer(1)]],
@@ -1521,6 +1572,27 @@ kernel void gather_fp4_row(
     constant uint& inner [[buffer(4)]],
     uint lane [[thread_index_in_simdgroup]])
 {
+    uint blocks = inner >> 5;
+    device const uchar* packed = weights + row * (inner >> 1);
+    device const uchar* row_scale = scales + row * blocks;
+    for (uint block = 0u; block < blocks; ++block) {
+        float factor = e8m0_code(row_scale[block]);
+        uint element = (block << 5) + lane;
+        uchar byte = packed[element >> 1];
+        uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
+        destination[element] = fp4_e2m1(nibble) * factor;
+    }
+}
+
+kernel void gather_fp4_id(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const uint* row_id [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    uint row = row_id[0];
     uint blocks = inner >> 5;
     device const uchar* packed = weights + row * (inner >> 1);
     device const uchar* row_scale = scales + row * blocks;

@@ -849,6 +849,25 @@ class Qwen38Runtime:
             (32, 1, 1),
         )
 
+    def _embed_id(self, ids: Any, offset: int) -> None:
+        buf, base, entry = self.locate(
+            "model.language_model.embed_tokens.weight",
+            "model.embed_tokens.weight",
+        )
+        _rows, inner = entry["stored_shape"]
+        self.session.encode(
+            "gather_fp4_id",
+            [
+                (buf, base),
+                (buf, self.scale_offset(entry, base)),
+                (self.hidden, 0),
+                (ids, offset),
+            ],
+            [_u32(int(inner))],
+            (1, 1, 1),
+            (32, 1, 1),
+        )
+
     def _gdn(self, layer: int) -> None:
         qkv_w, qkv_s = self._pair(self.weight(layer, "linear_attn.in_proj_qkv.weight"))
         z_w, z_s = self._pair(self.weight(layer, "linear_attn.in_proj_z.weight"))
@@ -1163,10 +1182,16 @@ class Qwen38Runtime:
             self.session.finish()
             raise
 
-    def _mtp_body(self, token: int, pos: int) -> None:
-        """MTP layer at ``pos``. ``hidden`` is already the post-norm state. Embeds ``token``."""
+    def _mtp_body(self, token: int, pos: int, *, ids: Any = None, id_off: int = 0) -> None:
+        """MTP layer at ``pos``. ``hidden`` is already the post-norm state.
+
+        ``ids`` reads the token from that device buffer. Otherwise ``token`` is the id.
+        """
         self._rms(self.hidden, "mtp.pre_fc_norm_hidden.weight", self.hold)
-        self._embed(token)
+        if ids is None:
+            self._embed(token)
+        else:
+            self._embed_id(ids, id_off)
         self._rms(self.hidden, "mtp.pre_fc_norm_embedding.weight", self.normed)
         self.session.encode(
             "concat_pair",
@@ -1203,6 +1228,64 @@ class Qwen38Runtime:
         self._encode_argmax()
         self.session.end()
         return self._read_pick()
+
+    def draft_chain(self, token: int, pos: int, depth: int) -> list[int]:
+        """Draft ``depth`` tokens in one command buffer. The host reads the ids once."""
+        depth = int(depth)
+        if depth < 1:
+            return []
+        ids = self._draft_id_buffer(depth)
+        self.session.begin()
+        drafted = 0
+        try:
+            final = self._resolve(
+                "model.language_model.norm.weight",
+                "model.norm.weight",
+            )
+            for index in range(depth):
+                if pos + index + 1 >= self.max_pos:
+                    break
+                if index == 0:
+                    self._rms(self.hidden, final, self.normed)
+                    self._copy_normed()
+                    self._mtp_body(int(token), pos + index)
+                else:
+                    self._mtp_body(0, pos + index, ids=ids, id_off=(index - 1) * 4)
+                self._rms(self.hidden, "mtp.norm.weight", self.normed)
+                self._copy_normed()
+                head_name = self._resolve("lm_head.weight", "model.language_model.lm_head.weight")
+                self._gemv(self.normed, head_name, self.logits)
+                self.session.encode(
+                    "argmax_partial",
+                    [(self.logits, 0), (self.best_v, 0), (self.best_i, 0)],
+                    [_u32(VOCAB)],
+                    (_ARGMAX_GROUPS, 1, 1),
+                    (256, 1, 1),
+                )
+                self.session.encode(
+                    "argmax_final",
+                    [(self.best_v, 0), (self.best_i, 0), (self.pick, 0), (ids, index * 4)],
+                    [_u32(_ARGMAX_GROUPS)],
+                    (1, 1, 1),
+                    (1, 1, 1),
+                )
+                drafted += 1
+            self.session.end()
+        except Exception:
+            self.session.finish()
+            raise
+        if drafted == 0:
+            return []
+        raw = self.session.download(ids, drafted * 4)
+        return [int(item) for item in struct.unpack_from(f"<{drafted}I", raw)]
+
+    def _draft_id_buffer(self, depth: int) -> Any:
+        need = int(depth) * 4
+        buf = getattr(self, "_draft_ids", None)
+        if buf is None or int(getattr(self, "_draft_ids_bytes", 0)) < need:
+            self._draft_ids = self.session.zeros(need)
+            self._draft_ids_bytes = need
+        return self._draft_ids
 
     def generate(
         self,

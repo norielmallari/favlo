@@ -55,6 +55,8 @@ class _Span:
         self.gate = zeros(wide * ATTN_OUT * 4)
         self.out = zeros(wide * HIDDEN * 4)
         self.tape = zeros(LINEAR_LAYERS * _LAYER_FLOATS * 4)
+        self.half8 = zeros(8 * INTERMEDIATE * 2)
+        self.out8 = zeros(8 * INTERMEDIATE * 4)
 
 
 def span_pair(runtime: Any, token0: int, token1: int, pos: int) -> None:
@@ -607,6 +609,8 @@ def _project(runtime: Any, src: Any, width: int, name: str, dest: Any, count: in
 def _gemv_rows(
     runtime: Any, src: Any, src_width: int, name: str, dest: Any, dest_width: int, count: int
 ) -> None:
+    if count == 3 and _fp8_m8(runtime, src, src_width, name, dest, dest_width):
+        return
     for token in range(count):
         _gemv_at(
             runtime,
@@ -616,6 +620,47 @@ def _gemv_rows(
             dest,
             token * dest_width * 4,
         )
+
+
+def _fp8_m8(
+    runtime: Any, src: Any, src_width: int, name: str, dest: Any, dest_width: int
+) -> bool:
+    """One 8-row fp8 ``matmul2d`` for three activations. False keeps the GEMV."""
+    buf, offset, entry = runtime.locate(name)
+    rows, inner = (int(value) for value in entry["stored_shape"])
+    if str(entry.get("dtype", "fp4")) != "fp8":
+        return False
+    if rows % 256 or inner % 128 or int(dest_width) != rows or int(src_width) != inner:
+        return False
+    if rows <= inner:
+        return False
+    if rows > INTERMEDIATE or inner > INTERMEDIATE:
+        return False
+    span = _buffers(runtime)
+    scale = runtime.scale_offset(entry, offset)
+    runtime.session.encode(
+        "pack_half_m8",
+        [(src, 0), (span.half8, 0)],
+        [_u32(3), _u32(inner)],
+        ((8 * inner + 255) // 256, 1, 1),
+        (256, 1, 1),
+    )
+    width = int(runtime.session.pipes["span_fp8_m8"].threadExecutionWidth())
+    runtime.session.encode(
+        "span_fp8_m8",
+        [(span.half8, 0), (buf, offset), (buf, scale), (span.out8, 0)],
+        [_u32(8), _u32(rows), _u32(inner)],
+        (rows // 256, 1, 1),
+        (width * 2, 1, 1),
+    )
+    runtime.session.encode(
+        "copy_f32",
+        [(span.out8, 0), (dest, 0)],
+        [_u32(3 * rows)],
+        ((3 * rows + 255) // 256, 1, 1),
+        (256, 1, 1),
+    )
+    return True
 
 
 def _gemv_at(runtime: Any, act: Any, act_off: int, name: str, dest: Any, dest_off: int) -> None:

@@ -14,6 +14,7 @@ The model cell is `<id>, MTP off`, or `<id>, MTP on, depth <n>`. Weights is the 
 | `gemma4_26b_a4b, MTP off` | fp8-e20 | `half` | 827.65 / 41.40 | 896.50 / 41.43 | 1029.61 / 40.13 | 901.70 / 34.86 | 2026-11-19 | [docs/gemma4_26b_a4b/research/synthetic-prompt-half.md](docs/gemma4_26b_a4b/research/synthetic-prompt-half.md) |
 | `qwen36_35b_a3b, MTP off` | fp8-e30-24h (resident fp8; 3072/10240 experts fp8, rest fp4) | `half` | 691.10 / 71.36 | 998.83 / 71.08 | 1337.47 / 69.31 | 1317.11 / 67.50 | 2026-11-15 | [docs/qwen36_35b_a3b/research/synthetic-prompt-half.md](docs/qwen36_35b_a3b/research/synthetic-prompt-half.md) |
 | `qwen38_27b, MTP off` | fp8-e20 | `half` | 293.68 / 14.37 | 403.33 / 14.82 | 446.84 / 14.00 | 467.09 / 13.77 | 2026-11-16 | [docs/qwen38_27b/research/synthetic-prompt-half.md](docs/qwen38_27b/research/synthetic-prompt-half.md) |
+| `qwen38_27b, MTP on, depth 3` | fp8-e20 | `half` | 298.20 / 15.99 | 396.65 / 17.27 | 487.60 / 15.80 | 467.52 / 15.33 | 2026-11-19 | [docs/qwen38_27b/research/synthetic-prompt-mtp-half.md](docs/qwen38_27b/research/synthetic-prompt-mtp-half.md) |
 
 ## Historical
 

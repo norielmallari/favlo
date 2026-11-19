@@ -42,16 +42,7 @@ def draft_window(
 
 def propose(runtime: Any, token: int, anchor: int, depth: int = DEPTH) -> list[int]:
     """Draft ``depth`` tokens. ``hidden`` is the residual at ``anchor``."""
-    drafts: list[int] = []
-    current = int(token)
-    at = int(anchor)
-    for _ in range(depth):
-        if at + 1 >= int(runtime.max_pos):
-            break
-        drafts.append(int(runtime._draft(current, at, backbone=not drafts)))
-        current = drafts[-1]
-        at += 1
-    return drafts
+    return list(runtime.draft_chain(int(token), int(anchor), int(depth)))
 
 
 def verify(
