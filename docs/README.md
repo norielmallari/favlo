@@ -62,6 +62,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen35_4b/research/coding-text.md](qwen35_4b/research/coding-text.md) | Qwen3.5-4B text coding agent on fp8 keys and values |
 | [qwen35_4b/research/coding-text-cuda.md](qwen35_4b/research/coding-text-cuda.md) | Qwen3.5-4B text coding agent on CUDA int8 keys and values |
 | [qwen35_4b/research/coding-instruct-cuda.md](qwen35_4b/research/coding-instruct-cuda.md) | Qwen3.5-4B instruct coding agent on CUDA |
+| [qwen35_4b/research/coding-vision-cuda.md](qwen35_4b/research/coding-vision-cuda.md) | Qwen3.5-4B vision coding agent on CUDA int8 |
 | [qwen35_4b/research/needle-page-int8.md](qwen35_4b/research/needle-page-int8.md) | Qwen3.5-4B page needle on CUDA int8 keys and values |
 | [qwen35_4b/cuda-ceilings.md](qwen35_4b/cuda-ceilings.md) | Qwen3.5-4B CUDA kernel and bandwidth ceilings |
 | [qwen35_4b/research/synthetic-prompt.md](qwen35_4b/research/synthetic-prompt.md) | Qwen3.5-4B cold 512, 1024, 4096, and 10000-token prompts |

@@ -13,7 +13,7 @@ static int g_scale_limit = 0;
 static cudaStream_t g_stream = nullptr;
 static cudaStream_t g_main = nullptr;
 static cudaStream_t g_side = nullptr;
-static cudaGraphExec_t g_graph[2] = {nullptr, nullptr};
+static cudaGraphExec_t g_graph[4] = {nullptr, nullptr, nullptr, nullptr};
 
 // One fork per paired product inside a capture. Reusing one event in a graph is an error.
 constexpr int kForks = 128;
@@ -1589,6 +1589,209 @@ __global__ void sample_draw(
     counts[picked] += 1;
 }
 
+__device__ float warp_sum32(float value) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value += __shfl_down_sync(0xffffffff, value, offset);
+    }
+    return value;
+}
+
+__global__ void vision_layernorm_kernel(
+    const float* source, const __half* weight, const __half* bias, float* destination, int width, float eps) {
+    int row = blockIdx.x;
+    const float* in = source + static_cast<long long>(row) * width;
+    float* out = destination + static_cast<long long>(row) * width;
+    float sum = 0.0f;
+    for (int i = threadIdx.x; i < width; i += blockDim.x) {
+        sum += in[i];
+    }
+    sum = block_sum(sum);
+    float mean = sum / static_cast<float>(width);
+    float var = 0.0f;
+    for (int i = threadIdx.x; i < width; i += blockDim.x) {
+        float delta = in[i] - mean;
+        var += delta * delta;
+    }
+    var = block_sum(var);
+    float inv = rsqrtf(var / static_cast<float>(width) + eps);
+    for (int i = threadIdx.x; i < width; i += blockDim.x) {
+        out[i] = (in[i] - mean) * inv * __half2float(weight[i]) + __half2float(bias[i]);
+    }
+}
+
+__global__ void vision_bias_kernel(float* rows, const __half* bias, int cols, int count) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = cols * count;
+    if (index >= n) {
+        return;
+    }
+    rows[index] += __half2float(bias[index % cols]);
+}
+
+__global__ void vision_gelu_kernel(float* values, int count, int erf_mode) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) {
+        return;
+    }
+    float x = values[index];
+    if (erf_mode) {
+        float ax = fabsf(x);
+        float t = 1.0f / (1.0f + 0.3275911f * ax);
+        float poly = fmaf(fmaf(fmaf(fmaf(1.061405429f, t, -1.453152027f), t, 1.421413741f), t, -0.284496736f), t, 0.254829592f);
+        poly *= t;
+        float erf = copysignf(1.0f - poly * expf(-ax * ax), x);
+        values[index] = 0.5f * x * (1.0f + erf);
+        return;
+    }
+    if (fabsf(x) >= 8.0f) {
+        values[index] = x > 0.0f ? x : 0.0f;
+        return;
+    }
+    float inner = 0.7978845608028654f * fmaf(0.044715f * x * x, x, x);
+    values[index] = 0.5f * x * (1.0f + tanhf(inner));
+}
+
+__global__ void vision_split_qkv_kernel(
+    const float* packed, float* query, float* key, float* value, int tokens) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int token = blockIdx.y;
+    if (col >= 1024 || token >= tokens) {
+        return;
+    }
+    long long base = static_cast<long long>(token) * 3072 + col;
+    long long out = static_cast<long long>(token) * 1024 + col;
+    query[out] = packed[base];
+    key[out] = packed[base + 1024];
+    value[out] = packed[base + 2048];
+}
+
+__global__ void vision_rope_kernel(
+    float* values, const float* cosv, const float* sinv, int tokens, int heads) {
+    int token = blockIdx.x;
+    if (token >= tokens) {
+        return;
+    }
+    int pairs = heads * 32;
+    for (int index = threadIdx.x; index < pairs; index += blockDim.x) {
+        int head = index / 32;
+        int pair = index - head * 32;
+        float* row = values + (static_cast<long long>(token) * heads + head) * 64;
+        float c = cosv[static_cast<long long>(token) * 64 + pair];
+        float s = sinv[static_cast<long long>(token) * 64 + pair];
+        float x0 = row[pair];
+        float x1 = row[32 + pair];
+        row[pair] = x0 * c - x1 * s;
+        row[32 + pair] = x1 * c + x0 * s;
+    }
+}
+
+__global__ void vision_attend_kernel(
+    const float* query, const float* key, const float* value, float* destination, int tokens, int heads) {
+    int head = blockIdx.x;
+    int qindex = blockIdx.y;
+    int tid = threadIdx.x;
+    if (head >= heads || qindex >= tokens || tid >= 64) {
+        return;
+    }
+    const float* qrow = query + (static_cast<long long>(qindex) * heads + head) * 64;
+    __shared__ float red[2];
+    int lane = tid & 31;
+    int simd = tid >> 5;
+    float running_max = -1.0e30f;
+    float running_sum = 0.0f;
+    for (int token = 0; token < tokens; ++token) {
+        const float* krow = key + (static_cast<long long>(token) * heads + head) * 64;
+        float part = warp_sum32(qrow[tid] * krow[tid]);
+        if (lane == 0) {
+            red[simd] = part;
+        }
+        __syncthreads();
+        float score = (red[0] + red[1]) * 0.125f;
+        __syncthreads();
+        float next = fmaxf(running_max, score);
+        running_sum = running_sum * __expf(running_max - next) + __expf(score - next);
+        running_max = next;
+    }
+    float acc = 0.0f;
+    for (int token = 0; token < tokens; ++token) {
+        const float* krow = key + (static_cast<long long>(token) * heads + head) * 64;
+        const float* vrow = value + (static_cast<long long>(token) * heads + head) * 64;
+        float part = warp_sum32(qrow[tid] * krow[tid]);
+        if (lane == 0) {
+            red[simd] = part;
+        }
+        __syncthreads();
+        float score = (red[0] + red[1]) * 0.125f;
+        __syncthreads();
+        acc += (__expf(score - running_max) / running_sum) * vrow[tid];
+    }
+    destination[(static_cast<long long>(qindex) * heads + head) * 64 + tid] = acc;
+}
+
+__global__ void vision_dequant_kernel(const int8_t* codes, const float* scale, float* destination, int inner, int rows) {
+    int row = blockIdx.x;
+    if (row >= rows) {
+        return;
+    }
+    float factor = scale[row];
+    const int8_t* src = codes + static_cast<long long>(row) * inner;
+    float* dest = destination + static_cast<long long>(row) * inner;
+    for (int i = threadIdx.x; i < inner; i += blockDim.x) {
+        dest[i] = static_cast<float>(src[i]) * factor;
+    }
+}
+
+__global__ void splice_rows_kernel(
+    const float* rows, const unsigned* index, float* hidden, int position0, int count, int width) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y;
+    if (row >= count || col >= width) {
+        return;
+    }
+    unsigned slot = index[position0 + row];
+    if (slot == 0xffffffffu) {
+        return;
+    }
+    hidden[static_cast<long long>(row) * width + col] =
+        rows[static_cast<long long>(slot) * width + col];
+}
+
+__constant__ int k_mrope_axis[32] = {
+    0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1,
+};
+
+__global__ void rope_mrope_kernel(
+    float* data,
+    const unsigned* positions,
+    int heads,
+    int stride,
+    int rope_dim,
+    int position0,
+    int count,
+    int prompt_len,
+    float theta) {
+    int pairs = rope_dim >> 1;
+    int span = heads * pairs;
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= count * span) {
+        return;
+    }
+    int row = gid / span;
+    int local = gid - row * span;
+    int head = local / pairs;
+    int i = local % pairs;
+    unsigned pos = positions[static_cast<long long>(k_mrope_axis[i]) * prompt_len + position0 + row];
+    float freq = powf(theta, -2.0f * static_cast<float>(i) / static_cast<float>(rope_dim));
+    float angle = static_cast<float>(pos) * freq;
+    float c = cosf(angle);
+    float s = sinf(angle);
+    float* rowp = data + (static_cast<long long>(row) * heads + head) * stride;
+    float x0 = rowp[i];
+    float x1 = rowp[i + pairs];
+    rowp[i] = x0 * c - x1 * s;
+    rowp[i + pairs] = x1 * c + x0 * s;
+}
+
 #if defined(_WIN32)
 #define API __declspec(dllexport)
 #else
@@ -1704,7 +1907,7 @@ API void engine_close(void) {
     g_cand_i = nullptr;
     g_code_limit = 0;
     g_scale_limit = 0;
-    for (int slot = 0; slot < 2; ++slot) {
+    for (int slot = 0; slot < 4; ++slot) {
         if (g_graph[slot] != nullptr) {
             cudaGraphExecDestroy(g_graph[slot]);
             g_graph[slot] = nullptr;
@@ -1755,8 +1958,30 @@ API int engine_h2d(void* destination, const void* source, size_t bytes) {
     return check(cudaMemcpy(destination, source, bytes, cudaMemcpyHostToDevice));
 }
 
+API int engine_register(void* pointer, size_t bytes) {
+    if (cudaHostRegister(pointer, bytes, cudaHostRegisterDefault) != cudaSuccess) {
+        cudaGetLastError();
+        return 1;
+    }
+    return 0;
+}
+
+API void engine_unregister(void* pointer) {
+    if (pointer != nullptr) {
+        cudaHostUnregister(pointer);
+    }
+}
+
 API int engine_d2h(void* destination, const void* source, size_t bytes) {
     return check(cudaMemcpy(destination, source, bytes, cudaMemcpyDeviceToHost));
+}
+
+API int engine_copy(void* destination, const void* source, size_t bytes) {
+    if (bytes == 0 || g_stream == nullptr) {
+        return bytes == 0 ? 0 : 1;
+    }
+    return check(cudaMemcpyAsync(
+        destination, source, bytes, cudaMemcpyDeviceToDevice, g_stream));
 }
 
 API int engine_zero(void* pointer, size_t bytes) {
@@ -2077,7 +2302,7 @@ API int engine_set_step(int token, int position, int rope) {
 }
 
 static int graph_slot(int slot) {
-    return slot == 0 || slot == 1 ? 0 : 1;
+    return slot >= 0 && slot < 4 ? 0 : 1;
 }
 
 API int engine_capture_begin(int slot) {
@@ -2162,6 +2387,97 @@ API int engine_sample(
 
 API int engine_sync(void) {
     return check(cudaDeviceSynchronize());
+}
+
+API int engine_vision_layernorm(
+    const float* source, const void* weight, const void* bias, float* destination, int width, float eps, int rows) {
+    if (rows < 1 || width < 1) {
+        return 1;
+    }
+    vision_layernorm_kernel<<<rows, 256, 0, g_stream>>>(
+        source, static_cast<const __half*>(weight), static_cast<const __half*>(bias), destination, width, eps);
+    return check(cudaGetLastError());
+}
+
+API int engine_vision_bias(float* rows, const void* bias, int cols, int count) {
+    int n = cols * count;
+    if (n < 1) {
+        return 0;
+    }
+    vision_bias_kernel<<<(n + 255) / 256, 256, 0, g_stream>>>(rows, static_cast<const __half*>(bias), cols, count);
+    return check(cudaGetLastError());
+}
+
+API int engine_vision_gelu(float* values, int count, int erf_mode) {
+    if (count < 1) {
+        return 0;
+    }
+    vision_gelu_kernel<<<(count + 255) / 256, 256, 0, g_stream>>>(values, count, erf_mode);
+    return check(cudaGetLastError());
+}
+
+API int engine_vision_split_qkv(const float* packed, float* query, float* key, float* value, int tokens) {
+    if (tokens < 1) {
+        return 1;
+    }
+    vision_split_qkv_kernel<<<dim3((1024 + 31) / 32, tokens), 32, 0, g_stream>>>(packed, query, key, value, tokens);
+    return check(cudaGetLastError());
+}
+
+API int engine_vision_rope(float* values, const float* cosv, const float* sinv, int tokens, int heads) {
+    if (tokens < 1 || heads < 1) {
+        return 1;
+    }
+    vision_rope_kernel<<<tokens, 256, 0, g_stream>>>(values, cosv, sinv, tokens, heads);
+    return check(cudaGetLastError());
+}
+
+API int engine_vision_attend(
+    const float* query, const float* key, const float* value, float* destination, int tokens, int heads) {
+    if (tokens < 1 || heads < 1 || tokens > 65535) {
+        return 1;
+    }
+    vision_attend_kernel<<<dim3(heads, tokens), 64, 0, g_stream>>>(query, key, value, destination, tokens, heads);
+    return check(cudaGetLastError());
+}
+
+API int engine_vision_dequant(const void* codes, const float* scale, float* destination, int inner, int rows) {
+    if (rows < 1 || inner < 1) {
+        return 1;
+    }
+    vision_dequant_kernel<<<rows, 256, 0, g_stream>>>(
+        static_cast<const int8_t*>(codes), scale, destination, inner, rows);
+    return check(cudaGetLastError());
+}
+
+API int engine_splice_rows(
+    const float* rows, const unsigned* index, float* hidden, int position0, int count, int width) {
+    if (count < 1 || width < 1) {
+        return 0;
+    }
+    splice_rows_kernel<<<dim3((width + 255) / 256, count), 256, 0, g_stream>>>(
+        rows, index, hidden, position0, count, width);
+    return check(cudaGetLastError());
+}
+
+API int engine_rope_mrope(
+    float* data,
+    const unsigned* positions,
+    int heads,
+    int stride,
+    int rope_dim,
+    int position0,
+    int count,
+    int prompt_len,
+    float theta) {
+    if (count < 1 || rope_dim != 64) {
+        return 1;
+    }
+    int span = heads * (rope_dim >> 1);
+    int n = count * span;
+    rope_mrope_kernel<<<(n + 255) / 256, 256, 0, g_stream>>>(
+        data, positions, heads, stride, rope_dim, position0, count, prompt_len, theta);
+    return check(cudaGetLastError());
 }
 
 }

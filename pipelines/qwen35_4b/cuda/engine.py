@@ -56,10 +56,32 @@ def _bind(lib: ctypes.CDLL) -> None:
     lib.engine_free.argtypes = [void]
     lib.engine_on_device.restype = integer
     lib.engine_on_device.argtypes = [void]
-    for name in ("engine_h2d", "engine_d2h"):
+    for name in ("engine_h2d", "engine_d2h", "engine_copy"):
         fn = getattr(lib, name)
         fn.restype = integer
         fn.argtypes = [void, void, size]
+    lib.engine_register.restype = integer
+    lib.engine_register.argtypes = [void, size]
+    lib.engine_unregister.restype = None
+    lib.engine_unregister.argtypes = [void]
+    lib.engine_vision_layernorm.restype = integer
+    lib.engine_vision_layernorm.argtypes = [void, void, void, void, integer, number, integer]
+    lib.engine_vision_bias.restype = integer
+    lib.engine_vision_bias.argtypes = [void, void, integer, integer]
+    lib.engine_vision_gelu.restype = integer
+    lib.engine_vision_gelu.argtypes = [void, integer, integer]
+    lib.engine_vision_split_qkv.restype = integer
+    lib.engine_vision_split_qkv.argtypes = [void, void, void, void, integer]
+    lib.engine_vision_rope.restype = integer
+    lib.engine_vision_rope.argtypes = [void, void, void, integer, integer]
+    lib.engine_vision_attend.restype = integer
+    lib.engine_vision_attend.argtypes = [void, void, void, void, integer, integer]
+    lib.engine_vision_dequant.restype = integer
+    lib.engine_vision_dequant.argtypes = [void, void, void, integer, integer]
+    lib.engine_splice_rows.restype = integer
+    lib.engine_splice_rows.argtypes = [void, void, void, integer, integer, integer]
+    lib.engine_rope_mrope.restype = integer
+    lib.engine_rope_mrope.argtypes = [void, void, integer, integer, integer, integer, integer, integer, number]
     lib.engine_zero.restype = integer
     lib.engine_zero.argtypes = [void, size]
     lib.engine_gemv.restype = integer
@@ -174,6 +196,89 @@ class Engine:
     def h2d(self, destination: int, host: np.ndarray) -> None:
         raw = np.ascontiguousarray(host)
         self._check("engine_h2d", self.lib.engine_h2d(destination, raw.ctypes.data, raw.nbytes))
+
+    def h2d_ptr(self, destination: int, source: int, nbytes: int) -> None:
+        self._check("engine_h2d", self.lib.engine_h2d(destination, source, int(nbytes)))
+
+    def copy(self, destination: int, source: int, nbytes: int) -> None:
+        self._check("engine_copy", self.lib.engine_copy(destination, source, int(nbytes)))
+
+    def register(self, pointer: int, nbytes: int) -> bool:
+        """Pin existing host bytes. False when the driver refuses."""
+        if not pointer or nbytes < 1:
+            return False
+        return int(self.lib.engine_register(pointer, int(nbytes))) == 0
+
+    def unregister(self, pointer: int) -> None:
+        if pointer:
+            self.lib.engine_unregister(pointer)
+
+    def vision_layernorm(
+        self, source: int, weight: int, bias: int, destination: int, width: int, eps: float, rows: int
+    ) -> None:
+        self._check(
+            "engine_vision_layernorm",
+            self.lib.engine_vision_layernorm(source, weight, bias, destination, width, eps, rows),
+        )
+
+    def vision_bias(self, rows: int, bias: int, cols: int, count: int) -> None:
+        self._check("engine_vision_bias", self.lib.engine_vision_bias(rows, bias, cols, count))
+
+    def vision_gelu(self, values: int, count: int, *, erf: bool) -> None:
+        self._check("engine_vision_gelu", self.lib.engine_vision_gelu(values, count, 1 if erf else 0))
+
+    def vision_split_qkv(self, packed: int, query: int, key: int, value: int, tokens: int) -> None:
+        self._check(
+            "engine_vision_split_qkv",
+            self.lib.engine_vision_split_qkv(packed, query, key, value, tokens),
+        )
+
+    def vision_rope(self, values: int, cosv: int, sinv: int, tokens: int, heads: int) -> None:
+        self._check(
+            "engine_vision_rope",
+            self.lib.engine_vision_rope(values, cosv, sinv, tokens, heads),
+        )
+
+    def vision_attend(
+        self, query: int, key: int, value: int, destination: int, tokens: int, heads: int
+    ) -> None:
+        self._check(
+            "engine_vision_attend",
+            self.lib.engine_vision_attend(query, key, value, destination, tokens, heads),
+        )
+
+    def vision_dequant(self, codes: int, scale: int, destination: int, inner: int, rows: int) -> None:
+        self._check(
+            "engine_vision_dequant",
+            self.lib.engine_vision_dequant(codes, scale, destination, inner, rows),
+        )
+
+    def splice_rows(
+        self, rows: int, index: int, hidden: int, position0: int, count: int, width: int
+    ) -> None:
+        self._check(
+            "engine_splice_rows",
+            self.lib.engine_splice_rows(rows, index, hidden, position0, count, width),
+        )
+
+    def rope_mrope(
+        self,
+        data: int,
+        positions: int,
+        heads: int,
+        stride: int,
+        rope_dim: int,
+        position0: int,
+        count: int,
+        prompt_len: int,
+        theta: float,
+    ) -> None:
+        self._check(
+            "engine_rope_mrope",
+            self.lib.engine_rope_mrope(
+                data, positions, heads, stride, rope_dim, position0, count, prompt_len, theta
+            ),
+        )
 
     def d2h(self, host: np.ndarray, source: int) -> None:
         raw = np.ascontiguousarray(host)

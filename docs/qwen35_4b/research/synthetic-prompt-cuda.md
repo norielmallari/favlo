@@ -61,3 +61,12 @@ The banner prints the loaded plane, MTP, thinking, and the decode cap.
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+19 November 2026. The same instruct banner passed again after the user-turn prefix copy left the prefill clock. A 512-token prompt prefilled at 1504.77 tok/s and decoded 128 tokens at 66.59 tok/s. A 1024-token prompt prefilled at 1815.52 tok/s and decoded at 65.47 tok/s. A 4096-token prompt prefilled at 1999.94 tok/s and decoded at 59.53 tok/s. A 10000-token prompt prefilled at 1600.93 tok/s and decoded at 49.57 tok/s. The end-to-end rates were 283.19, 457.14, 1005.71, and 1147.00 tok/s.
+
+Queries: "1504.77 OR 1815.52 OR 1999.94 OR 1600.93 Qwen3.5-4B tok/s", and "Qwen3.5-4B RTX 3070 prefill 1600.93 OR 1999.94 tokens per second CUDA int8 pp512 2026".
+
+- The [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) card still does not publish this table.
+- [oMLX Qwen3.5-4B-OptiQ-4bit on a 10-core M5](https://omlx.ai/benchmarks/performance/299yxolf) reports 1505 tok/s prefill at 8192 tokens. That is not 1504.77 with 66.59, and it is not this int8 CUDA table.
+- [Token Atlas](https://tokatlas.github.io/models/qwen3-5-4b/) lists other Qwen3.5-4B prefill rates. It does not list 1504.77, 1815.52, 1999.94, or 1600.93.
+- The search did not find 1504.77 and 66.59, 1815.52 and 65.47, 1999.94 and 59.53, or 1600.93 and 49.57 in those sources.

@@ -161,6 +161,7 @@ uv run favlo --qwen35_4b complete
 - [research/coding-agent.md](research/coding-agent.md) — vision coding agent
 - [research/coding-agent-mtp.md](research/coding-agent-mtp.md) — coding agent with MTP
 - [research/coding-text.md](research/coding-text.md) — text coding agent
+- [research/coding-vision-cuda.md](research/coding-vision-cuda.md) — vision coding agent on CUDA int8
 - [research/synthetic-prompt.md](research/synthetic-prompt.md) — cold 512, 1024, 4096, and 10000-token prompts on fp8 weights and `fp8_e4m3` keys and values
 - [research/synthetic-prompt-thinking-cuda.md](research/synthetic-prompt-thinking-cuda.md) — cold 512, 1024, 4096, and 10000-token prompts on CUDA int8 weights and int8 keys and values, thinking on
 - [research/synthetic-prompt-cuda.md](research/synthetic-prompt-cuda.md) — cold 512, 1024, 4096, and 10000-token prompts on CUDA int8 weights and int8 keys and values, thinking off

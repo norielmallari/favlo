@@ -22,6 +22,7 @@ import numpy as np
 from favlo.memory import memory
 from qwen35_4b.cuda import progress
 from qwen35_4b.cuda.closed import RequestClosed
+from qwen35_4b.cuda.disk import alloc_pages, free_pages, read_span
 from qwen35_4b.cuda.engine import Engine
 from qwen35_4b.cuda.layout import (
     ATTN_HEADS,
@@ -88,9 +89,17 @@ class Qwen35Runtime:
         self.max_pos = _MIN_CTX
         self.pos = 0
         self._rope_delta = 0
+        self._rope_device = None
+        self._rope_length = 0
+        self._vision_rows = None
+        self._vision_index = None
+        self._vision_plan = None
+        self._vision_ws = None
         self._owned: list[int] = []
         self._decode_graph = False
         self._prefill_graph = False
+        self._partial_count = 0
+        self._short_count = 0
         self._capturing = False
         self._cache: list[int] = []
         self.engine = Engine()
@@ -144,6 +153,10 @@ class Qwen35Runtime:
             except OSError:
                 pass
             self.prefix = None
+        from qwen35_4b.cuda.vision import release_vision
+
+        release_vision(self)
+        self._vision_ws = None
         engine = getattr(self, "engine", None)
         if engine is not None:
             for pointer in self._cache + self._owned:
@@ -214,6 +227,9 @@ class Qwen35Runtime:
             progress.note(console, "prefix_load", tokens=hit)
         progress.note(console, "cache", hit=hit)
         self._cached_tokens = hit
+        from qwen35_4b.cuda.vision import bind_vision
+
+        bind_vision(self, hit)
         suffix = prompt[hit:]
         uncached = len(suffix)
         boundary = False
@@ -230,6 +246,7 @@ class Qwen35Runtime:
         pending = list(forced or [])
         close_after = bool(stop_after_forced) and bool(pending)
         close_call = int(tool_close) if tool_close is not None and pending else None
+        deferred: list[tuple[list[int], int, int, int, int, bool]] = []
         try:
             done = 0
             from qwen35_4b.cuda.chat import generation_cut
@@ -248,6 +265,8 @@ class Qwen35Runtime:
             # generation suffix instead. Pin it. A tool-step generation cut
             # is stored and not pinned.
             held = stable if isinstance(stable, int) and stable in cuts else gen
+            self._warm_prefill(prompt, hit, cuts)
+            started = time.perf_counter()
             for cut in cuts:
                 if hit >= cut:
                     if cut == held:
@@ -261,10 +280,7 @@ class Qwen35Runtime:
                     done += len(piece)
                     self._prefill_tile([int(token) for token in piece], logits=False)
                     progress.note_prefill(prefill_row, done)
-                self.prefix.note(prompt[:cut])
-                self._store_prefix(note=False)
-                if cut == held:
-                    self._keep_boundary(prompt[:cut])
+                self._defer_boundary(prompt[:cut], pin=cut == held, deferred=deferred)
                 hit = cut
                 suffix = prompt[hit:]
             tail = 0
@@ -372,7 +388,57 @@ class Qwen35Runtime:
                 elapsed = last_sample - decode_started
                 self._decode_seconds = elapsed if elapsed > 0.0 else 0.0
                 progress.end_phase(console, decode_row, "")
+            self._commit_deferred(deferred)
         return list(self._output_ids)
+
+    def _defer_boundary(
+        self,
+        tokens: list[int],
+        *,
+        pin: bool,
+        deferred: list[tuple[list[int], int, int, int, int, bool]],
+    ) -> None:
+        """Copy the live prefix on device and write the file after both clocks.
+
+        The copy has to happen before the generation suffix advances the
+        recurrent state. The host read and the disk write stay outside the
+        prefill and decode clocks.
+        """
+        from qwen35_4b.cuda.prefix import staged_bytes
+
+        self.prefix.note(tokens)
+        count = int(self.pos)
+        nbytes = staged_bytes(count)
+        scratch = self.engine.alloc(nbytes)
+        try:
+            staged = self.prefix.adapter.stage(scratch)
+        except Exception:
+            self.engine.free(scratch)
+            raise
+        if staged != nbytes:
+            self.engine.free(scratch)
+            message = f"staged prefix {staged} is not {nbytes}"
+            raise RuntimeError(message)
+        deferred.append((list(tokens), scratch, nbytes, count, int(self._rope_delta), pin))
+        self.prefix.dirty = False
+
+    def _commit_deferred(
+        self, deferred: list[tuple[list[int], int, int, int, int, bool]]
+    ) -> None:
+        from favlo.prefix import PrefixRecord
+
+        while deferred:
+            tokens, scratch, nbytes, count, rope, pin = deferred.pop(0)
+            path = None
+            try:
+                regions = self.prefix.adapter.capture_staged(scratch, nbytes, count, rope)
+                path = self.prefix.store.save(PrefixRecord(tokens, regions))
+            except OSError as exc:
+                progress.note(self.console, "prefix_store_failed", error=exc)
+            finally:
+                self.engine.free(scratch)
+            if pin and path is not None:
+                self.prefix.store.pin(path)
 
     def _keep_boundary(self, tokens: list[int]) -> None:
         """Pin the stored file for these tokens so eviction leaves it in place."""
@@ -407,6 +473,10 @@ class Qwen35Runtime:
                 self._slot(self.hidden, index, HIDDEN),
                 HIDDEN,
             )
+        rows = self._vision_rows
+        index = self._vision_index
+        if rows and index:
+            self.engine.splice_rows(rows, index, self.hidden, self.pos, count, HIDDEN)
         self._layers(count)
         if logits:
             last = count - 1
@@ -429,31 +499,84 @@ class Qwen35Runtime:
             )
         self.pos += count
 
-    def _tile_graph(self, count: int) -> bool:
-        return count == _TILE and (self._prefill_graph or self._capturing)
+    def _graph_slot(self, count: int) -> int:
+        if count == _TILE:
+            return 1
+        if count >= 32:
+            return 2
+        return 3
 
-    def _layers(self, count: int) -> None:
-        """Run every block. A full 128-token tile is captured once and replayed."""
-        if count != _TILE:
-            for layer in range(LAYERS):
-                self._layer(layer, count)
+    def _graph_ready(self, count: int) -> bool:
+        slot = self._graph_slot(count)
+        if slot == 1:
+            return self._prefill_graph
+        if slot == 2:
+            return self._partial_count == count
+        return self._short_count == count
+
+    def _mark_graph(self, count: int) -> None:
+        slot = self._graph_slot(count)
+        if slot == 1:
+            self._prefill_graph = True
+        elif slot == 2:
+            self._partial_count = count
+        else:
+            self._short_count = count
+
+    def _tile_graph(self, count: int) -> bool:
+        if self._rope_device or count < 2:
+            return False
+        if self._capturing:
+            return True
+        return self._graph_ready(count)
+
+    def _warm_tile(self, count: int) -> None:
+        """Record one tile length before the prefill clock starts."""
+        if count < 2 or self._rope_device or self._graph_ready(count):
             return
-        rope = max(0, self.pos + int(self._rope_delta))
-        self.engine.set_step(0, self.pos, rope)
-        if self._prefill_graph:
-            self.engine.replay(1)
-            return
-        self.engine.reserve(_TILE, INTERMEDIATE)
-        self.engine.capture_begin(1)
+        slot = self._graph_slot(count)
+        self.engine.reserve(count, INTERMEDIATE)
+        self.engine.set_step(0, 0, 0)
+        self.engine.capture_begin(slot)
         self._capturing = True
         try:
             for layer in range(LAYERS):
                 self._layer(layer, count)
         finally:
             self._capturing = False
-            self.engine.capture_end(1)
-        self._prefill_graph = True
-        self.engine.replay(1)
+            self.engine.capture_end(slot)
+        self._mark_graph(count)
+
+    def _warm_prefill(self, prompt: list[int], hit: int, cuts: list[int]) -> None:
+        lengths: set[int] = set()
+        pos = hit
+        for cut in cuts:
+            if pos < cut:
+                full, rem = divmod(cut - pos, _TILE)
+                if full:
+                    lengths.add(_TILE)
+                if rem:
+                    lengths.add(rem)
+                pos = cut
+        full, rem = divmod(len(prompt) - pos, _TILE)
+        if full:
+            lengths.add(_TILE)
+        if rem:
+            lengths.add(rem)
+        for count in sorted(lengths, reverse=True):
+            self._warm_tile(count)
+
+    def _layers(self, count: int) -> None:
+        """Run every block. Each tile length is captured once and replayed."""
+        if count < 2 or self._rope_device:
+            for layer in range(LAYERS):
+                self._layer(layer, count)
+            return
+        if not self._graph_ready(count):
+            self._warm_tile(count)
+        rope = max(0, self.pos + int(self._rope_delta))
+        self.engine.set_step(0, self.pos, rope)
+        self.engine.replay(self._graph_slot(count))
 
     def _step(self, token: int, *, logits: bool) -> None:
         self._check()
@@ -548,8 +671,18 @@ class Qwen35Runtime:
             self.q, q_gain, ATTN_HEADS, HEAD_DIM * 2, HEAD_DIM, RMS_EPS, 1.0, count
         )
         self.engine.head_norm(self.k, k_gain, KV_HEADS, HEAD_DIM, HEAD_DIM, RMS_EPS, 1.0, count)
-        self.engine.rope(self.q, ATTN_HEADS, HEAD_DIM * 2, ROPE_DIM, rope_pos, THETA, count)
-        self.engine.rope(self.k, KV_HEADS, HEAD_DIM, ROPE_DIM, rope_pos, THETA, count)
+        table = self._rope_device
+        length = int(self._rope_length)
+        if table and length > 0 and count > 1:
+            self.engine.rope_mrope(
+                self.q, table, ATTN_HEADS, HEAD_DIM * 2, ROPE_DIM, self.pos, count, length, THETA
+            )
+            self.engine.rope_mrope(
+                self.k, table, KV_HEADS, HEAD_DIM, ROPE_DIM, self.pos, count, length, THETA
+            )
+        else:
+            self.engine.rope(self.q, ATTN_HEADS, HEAD_DIM * 2, ROPE_DIM, rope_pos, THETA, count)
+            self.engine.rope(self.k, KV_HEADS, HEAD_DIM, ROPE_DIM, rope_pos, THETA, count)
         self.engine.store_kv(
             self.k, self.k_data + data, self.k_scale + scale, origin, KV_HEADS, HEAD_DIM, count
         )
@@ -750,15 +883,28 @@ class Qwen35Runtime:
         return self._weight(name) + int(rows) * int(inner)
 
     def _upload(self, path: Path, size: int, row: Any) -> None:
-        mapping = np.memmap(path, dtype=np.uint8, mode="r")
+        hold = min(_CHUNK, max(size, 4096))
+        window = alloc_pages(hold)
+        pinned = self.engine.register(window, hold)
         try:
-            for start in range(0, size, _CHUNK):
-                end = min(size, start + _CHUNK)
-                chunk = np.array(mapping[start:end], dtype=np.uint8, copy=True)
-                self.engine.h2d(self.base + start, chunk)
-                progress.note_load(row, end - start)
+            done = 0
+            aligned = size - (size % 4096)
+            while done < aligned:
+                chunk = min(_CHUNK, aligned - done)
+                read_span(path, done, window, chunk)
+                self.engine.h2d_ptr(self.base + done, window, chunk)
+                done += chunk
+                progress.note_load(row, chunk)
+            if done < size:
+                tail = size - done
+                read_span(path, done, window, tail)
+                self.engine.h2d_ptr(self.base + done, window, tail)
+                progress.note_load(row, tail)
         finally:
-            del mapping
+            self.engine.sync()
+            if pinned:
+                self.engine.unregister(window)
+            free_pages(window)
 
     def _workspace(self) -> None:
         self.hidden = self._f32(HIDDEN * _TILE)

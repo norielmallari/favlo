@@ -100,6 +100,8 @@ def _integer_text(value: str) -> bool:
 
 
 def _supply_key(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if name == "run_shell_command" and arguments.get("action") in {"status", "cancel"}:
+        return {key: value for key, value in arguments.items() if key != "idempotency_key"}
     if not _needs_key(name, arguments):
         return arguments
     current = arguments.get("idempotency_key")

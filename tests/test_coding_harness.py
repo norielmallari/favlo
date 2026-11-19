@@ -424,6 +424,37 @@ def test_an_omitted_idempotency_key_still_writes(tmp_path: Path) -> None:
     assert started["job_id"]
 
 
+def test_status_ignores_an_idempotency_key(tmp_path: Path) -> None:
+    prepare_workspace(tmp_path)
+    session = session_for(tmp_path)
+    try:
+        shell = next(tool for tool in coding_tools(session) if tool.name == "run_shell_command")
+        started = json.loads(
+            asyncio.run(
+                shell.invoke(
+                    arguments={"command": "true", "idempotency_key": "start-one"},
+                    skip_parsing=True,
+                )
+            )
+        )
+        status = json.loads(
+            asyncio.run(
+                shell.invoke(
+                    arguments={
+                        "action": "status",
+                        "job_id": started["job_id"],
+                        "idempotency_key": "",
+                    },
+                    skip_parsing=True,
+                )
+            )
+        )
+    finally:
+        session.close()
+    assert status["job_id"] == started["job_id"]
+    assert "error" not in status
+
+
 def test_a_supplied_idempotency_key_is_kept(tmp_path: Path) -> None:
     prepare_workspace(tmp_path)
     session = session_for(tmp_path)

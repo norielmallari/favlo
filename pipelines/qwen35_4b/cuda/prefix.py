@@ -55,15 +55,42 @@ class CacheAdapter:
 
     def capture(self) -> list[Region]:
         count = int(self.runtime.pos)
-        regions = [
-            Region("history", self.runtime._device_bytes(self.runtime.conv_hist, CONV_BYTES)),
-            Region("state", self.runtime._device_bytes(self.runtime.gdn_state, GDN_STATE_BYTES)),
-            Region("rope", struct.pack("<i", int(self.runtime._rope_delta))),
-        ]
+        return _regions(
+            self,
+            self.runtime._device_bytes(self.runtime.conv_hist, CONV_BYTES),
+            self.runtime._device_bytes(self.runtime.gdn_state, GDN_STATE_BYTES),
+            int(self.runtime._rope_delta),
+            count,
+            None,
+        )
+
+    def stage(self, scratch: int) -> int:
+        """Copy the live prefix into device ``scratch``. Return the byte count."""
+        count = int(self.runtime.pos)
+        engine = self.runtime.engine
+        offset = 0
+
+        def put(source: int, nbytes: int) -> None:
+            nonlocal offset
+            engine.copy(scratch + offset, source, nbytes)
+            offset += nbytes
+
+        put(int(self.runtime.conv_hist), CONV_BYTES)
+        put(int(self.runtime.gdn_state), GDN_STATE_BYTES)
         for slot in range(_SLOTS):
-            regions.append(Region(f"k.{slot}", _pack_slot(self.runtime, slot, count, "key")))
-            regions.append(Region(f"v.{slot}", _pack_slot(self.runtime, slot, count, "value")))
-        return regions
+            for kind in ("key", "value"):
+                data = self.runtime.k_data if kind == "key" else self.runtime.v_data
+                scale = self.runtime.k_scale if kind == "key" else self.runtime.v_scale
+                data_off = slot * self.runtime.max_pos * _data_row()
+                scale_off = slot * self.runtime.max_pos * _scale_row()
+                put(int(data) + data_off, count * _data_row())
+                put(int(scale) + scale_off, count * _scale_row())
+        return offset
+
+    def capture_staged(self, scratch: int, nbytes: int, count: int, rope: int) -> list[Region]:
+        """Read a device copy made by ``stage``."""
+        blob = self.runtime._device_bytes(scratch, nbytes)
+        return _regions(self, b"", b"", rope, count, blob)
 
     def accept(self, header: PrefixHeader, prompt: list[int]) -> bool:
         count = len(header.tokens)
@@ -93,6 +120,58 @@ class CacheAdapter:
     def reset(self) -> None:
         self.runtime._reset_state()
         self.runtime._rope_delta = 0
+
+
+def staged_bytes(count: int) -> int:
+    row = count * _data_row() + count * _scale_row()
+    return CONV_BYTES + GDN_STATE_BYTES + _SLOTS * 2 * row
+
+
+def _regions(
+    adapter: CacheAdapter,
+    history: bytes,
+    state: bytes,
+    rope: int,
+    count: int,
+    staged: bytes | None,
+) -> list[Region]:
+    if staged is None:
+        regions = [
+            Region("history", history),
+            Region("state", state),
+            Region("rope", struct.pack("<i", int(rope))),
+        ]
+        for slot in range(_SLOTS):
+            regions.append(Region(f"k.{slot}", _pack_slot(adapter.runtime, slot, count, "key")))
+            regions.append(Region(f"v.{slot}", _pack_slot(adapter.runtime, slot, count, "value")))
+        return regions
+    view = memoryview(staged)
+    cursor = 0
+
+    def take(nbytes: int) -> bytes:
+        nonlocal cursor
+        end = cursor + nbytes
+        if end > len(view):
+            message = "staged prefix is short"
+            raise RuntimeError(message)
+        piece = bytes(view[cursor:end])
+        cursor = end
+        return piece
+
+    regions = [
+        Region("history", take(CONV_BYTES)),
+        Region("state", take(GDN_STATE_BYTES)),
+        Region("rope", struct.pack("<i", int(rope))),
+    ]
+    row = count * _data_row()
+    scale = count * _scale_row()
+    for slot in range(_SLOTS):
+        regions.append(Region(f"k.{slot}", take(row) + take(scale)))
+        regions.append(Region(f"v.{slot}", take(row) + take(scale)))
+    if cursor != len(view):
+        message = "staged prefix is long"
+        raise RuntimeError(message)
+    return regions
 
 
 def _data_row() -> int:

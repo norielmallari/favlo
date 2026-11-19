@@ -412,12 +412,43 @@ def _coerce(value: str) -> Any:
         return value
 
 
+def _expanded_cut(runtime: Any, text_prompt: list[int], cut: int | None) -> int | None:
+    """Map a text-token cut through the image pads ``prepare_prompt`` expanded."""
+    if cut is None:
+        return None
+    lengths = getattr(runtime, "_image_lengths", None)
+    image_id = getattr(runtime, "_image_token", None)
+    if not isinstance(lengths, list) or not lengths or not isinstance(image_id, int):
+        return cut
+    extra = 0
+    seen = 0
+    for position, token in enumerate(text_prompt):
+        if position >= cut:
+            break
+        if token != image_id:
+            continue
+        if seen >= len(lengths):
+            break
+        extra += int(lengths[seen]) - 1
+        seen += 1
+    return cut + extra
+
+
 class Pipeline(LanguagePipeline):
     """One Responses generation for this package."""
+
+    def has_vision(self) -> bool:
+        return True
 
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         super().on_open(runtime, reply, selection)
         runtime._halted = False
+
+    def on_finish(self, runtime: Any, selection: Any, *, complete: bool) -> None:
+        from qwen35_4b.cuda.vision import release_vision
+
+        release_vision(runtime)
+        super().on_finish(runtime, selection, complete=complete)
 
     def main(self, argv: Sequence[str]) -> int:
         from qwen35_4b.cuda.commands import main as cli_main
@@ -608,13 +639,14 @@ def _respond(
             thinking,
             preserve_thinking=keep_thinking,
         )
+        text_prompt = prompt
         prompt = prepare_prompt(runtime, messages, prompt)
         text_cut = (
             None
             if keep_thinking
             else user_turn_cut(runtime.root, messages, tools or None, thinking)
         )
-        runtime._stable_cut = text_cut
+        runtime._stable_cut = _expanded_cut(runtime, text_prompt, text_cut)
         _prefix_run(runtime, prepared)
     except (RequestError, RuntimeError, TemplateError, OSError, ValueError) as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
