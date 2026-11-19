@@ -105,6 +105,29 @@ _TILE_M = 8
 _TILE_N = 32
 
 
+def _pipeline(result: object) -> tuple[object, str | None]:
+    if not isinstance(result, tuple):
+        return result, None
+    if len(result) >= 3:
+        pipeline, _reflection, error = result[0], result[1], result[2]
+        if error is not None:
+            return None, str(error)
+        return pipeline, None
+    pipeline, second = result
+    if pipeline is None:
+        return None, None if second is None else str(second)
+    return pipeline, None
+
+
+_LIVE = {
+    "embed_fp8": (0, 16),
+    "rope_pairs": (5, 0),
+    "store_kv": (2, 0),
+    "attend_span": (4, 0),
+    "attend_decode": (4, 0),
+}
+
+
 def _pair(result: object) -> tuple[object, str | None]:
     if isinstance(result, tuple) and len(result) == 2:
         value, error = result
@@ -147,8 +170,13 @@ class Session:
                 if function is None:
                     message = f"{name} is not in the shader library"
                     raise RuntimeError(message)
-                pipeline, pipe_error = _pair(
-                    device.newComputePipelineStateWithFunction_error_(function, None)
+                descriptor = self.metal.MTLComputePipelineDescriptor.alloc().init()
+                descriptor.setComputeFunction_(function)
+                descriptor.setSupportIndirectCommandBuffers_(True)
+                pipeline, pipe_error = _pipeline(
+                    device.newComputePipelineStateWithDescriptor_options_reflection_error_(
+                        descriptor, 0, None, None
+                    )
                 )
                 if pipeline is None:
                     message = f"{name} pipeline failed: {pipe_error}"
@@ -157,6 +185,13 @@ class Session:
         self._command = None
         self._encoder = None
         self._inflight: deque[object] = deque()
+        self._recording = False
+        self._icb = None
+        self._icb_count = 0
+        self._icb_params = None
+        self._icb_arena = None
+        self._icb_cursor = 0
+        self._icb_heaps: set[object] = set()
 
     def zeros(self, nbytes: int) -> object:
         return device_buffer(self.owner, nbytes, zero=True)
@@ -186,6 +221,9 @@ class Session:
         origins: list[int] | None = None,
     ) -> None:
         """Record one dispatch. The device runs it when :meth:`flush` commits."""
+        if self._recording:
+            self._encode_icb(name, handles, constants, groups, threads, origins)
+            return
         self._open()
         encoder = self._encoder
         encoder.setComputePipelineState_(self.pipes[name])
@@ -199,6 +237,90 @@ class Session:
             self.metal.MTLSizeMake(groups[0], groups[1], groups[2]),
             self.metal.MTLSizeMake(threads[0], threads[1], threads[2]),
         )
+
+    def begin_icb(self, params: object) -> None:
+        """Start a replayable decode step. The next encodes are recorded, not submitted."""
+        if self._icb_arena is not None:
+            memory.release(self._icb_arena)
+        descriptor = self.metal.MTLIndirectCommandBufferDescriptor.alloc().init()
+        descriptor.setCommandTypes_(1 << 5)
+        descriptor.setInheritPipelineState_(False)
+        descriptor.setInheritBuffers_(False)
+        descriptor.setMaxKernelBufferBindCount_(16)
+        icb = self.device.newIndirectCommandBufferWithDescriptor_maxCommandCount_options_(
+            descriptor, 2048, 0
+        )
+        if icb is None:
+            message = "indirect command buffer failed"
+            raise RuntimeError(message)
+        self._icb = icb
+        self._icb_count = 0
+        self._icb_params = params
+        self._icb_arena = self.zeros(2048 * 128)
+        self._icb_cursor = 0
+        self._icb_heaps = set()
+        self._recording = True
+
+    def end_icb(self) -> None:
+        self._recording = False
+
+    def execute_icb(self) -> None:
+        """Run the recorded decode step in the open command buffer."""
+        self._open()
+        encoder = self._encoder
+        for heap in self._icb_heaps:
+            if heap is not None:
+                encoder.useHeap_(heap)
+        import Foundation
+
+        encoder.executeCommandsInBuffer_withRange_(
+            self._icb, Foundation.NSMakeRange(0, self._icb_count)
+        )
+
+    def _resolve(self, handle: object, offset: int) -> tuple[object, int]:
+        span = memory._lookup(handle)
+        if span is None:
+            return handle, int(offset)
+        self._icb_heaps.add(span.segment.heap)
+        return span.segment.buffer, span.offset + int(offset)
+
+    def _encode_icb(
+        self,
+        name: str,
+        handles: list[object],
+        constants: list[bytes],
+        groups: tuple[int, int, int],
+        threads: tuple[int, int, int],
+        origins: list[int] | None,
+    ) -> None:
+        if self._icb_count >= 2048:
+            message = "decode replay is larger than the indirect buffer"
+            raise RuntimeError(message)
+        command = self._icb.indirectComputeCommandAtIndex_(self._icb_count)
+        command.setComputePipelineState_(self.pipes[name])
+        for index, handle in enumerate(handles):
+            origin = 0 if origins is None else origins[index]
+            buffer, offset = self._resolve(handle, origin)
+            command.setKernelBuffer_offset_atIndex_(buffer, offset, index)
+        base = len(handles)
+        live = _LIVE.get(name)
+        for index, blob in enumerate(constants):
+            slot = base + index
+            if live is not None and index == live[0]:
+                buffer, offset = self._resolve(self._icb_params, live[1])
+                command.setKernelBuffer_offset_atIndex_(buffer, offset, slot)
+                continue
+            aligned = (self._icb_cursor + 15) & ~15
+            memory.store(self._icb_arena, aligned, blob)
+            buffer, offset = self._resolve(self._icb_arena, aligned)
+            command.setKernelBuffer_offset_atIndex_(buffer, offset, slot)
+            self._icb_cursor = aligned + max(len(blob), 16)
+        command.concurrentDispatchThreadgroups_threadsPerThreadgroup_(
+            self.metal.MTLSizeMake(groups[0], groups[1], groups[2]),
+            self.metal.MTLSizeMake(threads[0], threads[1], threads[2]),
+        )
+        command.setBarrier()
+        self._icb_count += 1
 
     def split(self) -> None:
         """End this encoder so the next one can indirect-dispatch a buffer it wrote."""

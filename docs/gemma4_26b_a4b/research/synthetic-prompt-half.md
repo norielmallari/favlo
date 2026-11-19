@@ -125,3 +125,14 @@ The banner was `kv half mtp off depth 3 thinking off decode 128`, and every meas
 | 10000 | 902.08 tok/s (10000 tok in 11.09 s) | 29.28 tok/s (128 tok in 4.37 s) | 655.11 tok/s (10128 tok in 15.46 s) |
 
 The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "860.83 OR 898.65 OR 956.07 OR 902.08 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.
+
+19 November 2026. A greedy decode step is recorded once and replayed. The same protocol run, nonce `58aee63e`, recorded:
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 827.65 tok/s (512 tok in 0.62 s) | 41.40 tok/s (128 tok in 3.09 s) | 172.51 tok/s (640 tok in 3.71 s) |
+| 1024 | 896.50 tok/s (1024 tok in 1.14 s) | 41.43 tok/s (128 tok in 3.09 s) | 272.34 tok/s (1152 tok in 4.23 s) |
+| 4096 | 1029.61 tok/s (4096 tok in 3.98 s) | 40.13 tok/s (128 tok in 3.19 s) | 589.12 tok/s (4224 tok in 7.17 s) |
+| 10000 | 901.70 tok/s (10000 tok in 11.09 s) | 34.86 tok/s (128 tok in 3.67 s) | 686.18 tok/s (10128 tok in 14.76 s) |
+
+The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "827.65 OR 896.50 OR 1029.61 OR 901.70 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.

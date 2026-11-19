@@ -195,6 +195,7 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - The host does not walk the completion.
 - A command buffer is opened through the shared memory helper, which drains the autorelease pool, and is retired after it finishes.
 - A decode step encodes the thirty layers and the logits in one command buffer.
+- A greedy step records that buffer once and replays it. The host writes the position and the token, then reads the next id.
 - The host reads the sampled token id after that buffer.
 - The prefix flush stays on this thread, outside the prefill and decode clocks, so the next request can align against that file.
 - The stop-id check stays in the sampler.

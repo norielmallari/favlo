@@ -297,6 +297,7 @@ class Gemma4Runtime:
         self.prompt_tokens = 0
         self._vision = None
         self.capacity = 256
+        self._replay_key = None
         self.atlas = None
         self.prefix = None
         resident_bytes = (path / "resident.bin").stat().st_size
@@ -342,6 +343,7 @@ class Gemma4Runtime:
     def reset(self) -> None:
         self.filled = 0
         self._stop = False
+        self._replay_key = None
 
     def generate(
         self,
@@ -468,11 +470,23 @@ class Gemma4Runtime:
             inside = bool(channel_open)
             reasoned = 0
             halted = False
+            pending: int | None = None
+            replay = (
+                temperature == 0.0
+                and not presence
+                and not halt_at
+                and not channel_open
+                and not visual
+            )
             for _ in range(limit):
                 if self._stop or len(drawn) >= limit:
                     halted = True
                     break
-                token = self._draw(temperature, top_p, top_k, presence, rng)
+                if pending is None:
+                    token = self._draw(temperature, top_p, top_k, presence, rng)
+                else:
+                    token = pending
+                    pending = None
                 if token in _STOP and not fill:
                     halted = True
                     break
@@ -482,7 +496,10 @@ class Gemma4Runtime:
                     on_token(token)
                 if decode_row is not None:
                     publish_count(self.console, decode_row, len(drawn))
-                self._step(token)
+                if replay:
+                    pending = self._replay(token, presence)
+                else:
+                    self._step(token)
                 if stopped:
                     halted = True
                     break
@@ -495,6 +512,8 @@ class Gemma4Runtime:
                         open_ids=open_ids,
                         close_ids=close_ids,
                     )
+                    if inject:
+                        pending = None
                     for piece in inject:
                         if len(drawn) >= limit or (piece in _STOP and not fill):
                             break
@@ -653,6 +672,31 @@ class Gemma4Runtime:
             self._block(self.layers[layer], layer)
         self.filled += 1
         self._logits()
+
+    def _replay(self, token: int, presence: float) -> int:
+        """Run one greedy step from the recorded buffer and return the next id."""
+        self._ensure(self.filled + 1)
+        if self._replay_key != (self.capacity, presence):
+            self._record_replay(presence)
+            self._replay_key = (self.capacity, presence)
+        memory.store(self._step_params, 0, struct.pack("<I", self.filled))
+        memory.store(self._step_params, 16, struct.pack("<I", token))
+        self.session.execute_icb()
+        self.filled += 1
+        return struct.unpack("<I", self._bytes(self._kept_ids, 4))[0]
+
+    def _record_replay(self, presence: float) -> None:
+        self.session.begin_icb(self._step_params)
+        try:
+            self._embed(0)
+            for layer in range(LAYERS):
+                self._block(self.layers[layer], layer)
+            self._logits()
+            self._penalize(presence)
+            self._reduce_top(self.out, VOCAB, 1, 1.0)
+            self._bump(self._kept_ids, presence)
+        finally:
+            self.session.end_icb()
 
     def _prefill(self, tokens: list[int], *, finish: bool = True) -> None:
         if self._stop or not tokens:
@@ -1880,6 +1924,7 @@ class Gemma4Runtime:
         self.pick_score = [session.zeros(_PICK * 4), session.zeros(_PICK * 4)]
         self.pick_id = [session.zeros(_PICK * 4), session.zeros(_PICK * 4)]
         self.chosen = session.zeros(4)
+        self._step_params = session.zeros(32)
         self.token_counts = session.zeros(VOCAB * 4)
         self._counts_fresh = True
 
