@@ -83,6 +83,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [voxcpm2/references.md](voxcpm2/references.md) | Papers and specifications for the VoxCPM2 pipeline |
 | [ace_step_15_turbo/research/dit-mlp-fp4-error.md](ace_step_15_turbo/research/dit-mlp-fp4-error.md) | ACE-Step XL Turbo DiT MLP fp4 error ranking |
 | [wan22_i2v/research/clip-ceiling.md](wan22_i2v/research/clip-ceiling.md) | Wan 2.2 I2V 9-frame kernel sum |
+| [wan22_i2v/research/five-second-clip.md](wan22_i2v/research/five-second-clip.md) | Wan 2.2 I2V 81-frame printed stage times |
 | [wan22_i2v/research/block-fp4-error.md](wan22_i2v/research/block-fp4-error.md) | Wan 2.2 I2V fp8 block ranking |
 | [wan22_i2v/research/int8-weight-error.md](wan22_i2v/research/int8-weight-error.md) | Wan 2.2 I2V int8 weight error |
 | [wan22_ti2v_5b/research/int8-weight-error.md](wan22_ti2v_5b/research/int8-weight-error.md) | Wan 2.2 TI2V-5B int8 weight error |

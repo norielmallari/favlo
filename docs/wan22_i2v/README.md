@@ -30,6 +30,7 @@ uv run favlo media --pipeline wan22_i2v --model Wan2.2-I2V-A14B-int8 --out pack.
 - [research/int8-weight-error.md](research/int8-weight-error.md) — DiT and umT5 int8 pack error
 - [research/block-fp4-error.md](research/block-fp4-error.md) — fp8 block rankings
 - [research/clip-ceiling.md](research/clip-ceiling.md) — isolated 9-frame clip sum
+- [research/five-second-clip.md](research/five-second-clip.md) — printed 81-frame stage times
 
 ## Setup
 
