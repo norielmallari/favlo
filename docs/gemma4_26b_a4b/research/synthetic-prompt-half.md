@@ -147,3 +147,14 @@ The banner was `kv half mtp off depth 3 thinking off decode 128`, and every meas
 | 10000 | 958.34 tok/s (10000 tok in 10.43 s) | 35.29 tok/s (128 tok in 3.63 s) | 720.34 tok/s (10128 tok in 14.06 s) |
 
 The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "929.52 OR 922.16 OR 948.49 OR 958.34 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. The published rows are different packs, machines, and prompt lengths.
+
+19 November 2026. The same protocol run, nonce `71d69416`, recorded:
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 875.00 tok/s (512 tok in 0.59 s) | 40.77 tok/s (128 tok in 3.14 s) | 171.58 tok/s (640 tok in 3.73 s) |
+| 1024 | 926.78 tok/s (1024 tok in 1.10 s) | 41.58 tok/s (128 tok in 3.08 s) | 275.60 tok/s (1152 tok in 4.18 s) |
+| 4096 | 1048.20 tok/s (4096 tok in 3.91 s) | 38.62 tok/s (128 tok in 3.31 s) | 585.04 tok/s (4224 tok in 7.22 s) |
+| 10000 | 953.59 tok/s (10000 tok in 10.49 s) | 33.09 tok/s (128 tok in 3.87 s) | 705.29 tok/s (10128 tok in 14.36 s) |
+
+The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "875.00 OR 926.78 OR 1048.20 OR 953.59 gemma-4-26B-A4B prefill tok/s half" did not find those four prefill rates. A listing of 1048.0 tok/s is an NVFP4 top speed on another machine, not this table. The published rows are different packs, machines, and prompt lengths.

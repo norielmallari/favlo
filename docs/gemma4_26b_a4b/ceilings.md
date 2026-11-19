@@ -147,7 +147,7 @@ The 90% test uses the packed step, measured on 3 November 2026. One decode step 
 
 Context 1 is 21.675 ms, 46.14 tok/s. Context 1024 is 24.641 ms, 40.58 tok/s. Context 65536 is 46.195 ms, 21.65 tok/s. Context 131072 is 67.564 ms, 14.80 tok/s.
 
-The greedy synthetic decode on 19 November 2026, half cache, is 44.52 tok/s at 1,024 prompt tokens. That is the wall-clock rate. The packed figure above remains the kernel ceiling.
+The greedy synthetic decode on 19 November 2026, half cache, is 41.58 tok/s at 1,024 prompt tokens. That is the wall-clock rate. The packed figure above remains the kernel ceiling.
 
 The rows below time each projection kernel in its own command buffer, on 2 November 2026. They are not added into the packed step. A sum of those rows counts a command-buffer gap on every dispatch, and the live step is faster than that sum.
 

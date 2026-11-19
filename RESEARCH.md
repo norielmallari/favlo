@@ -11,7 +11,7 @@ The model cell is `<id>, MTP off`, or `<id>, MTP on, depth <n>`. Weights is the 
 | Model | Weights | KV | 512 | 1024 | 4096 | 10000 | Measured | Note |
 |---|---|---|---|---|---|---|---|---|
 | `qwen35_4b, MTP off` | fp8 | `fp8_e4m3` | 1322.13 / 40.37 | 1457.07 / 36.19 | 1278.14 / 23.41 | 874.93 / 13.61 | 2026-11-15 | [docs/qwen35_4b/research/synthetic-prompt.md](docs/qwen35_4b/research/synthetic-prompt.md) |
-| `gemma4_26b_a4b, MTP off` | fp8-e20 | `half` | 929.52 / 43.45 | 922.16 / 44.52 | 948.49 / 39.39 | 958.34 / 35.29 | 2026-11-19 | [docs/gemma4_26b_a4b/research/synthetic-prompt-half.md](docs/gemma4_26b_a4b/research/synthetic-prompt-half.md) |
+| `gemma4_26b_a4b, MTP off` | fp8-e20 | `half` | 875.00 / 40.77 | 926.78 / 41.58 | 1048.20 / 38.62 | 953.59 / 33.09 | 2026-11-19 | [docs/gemma4_26b_a4b/research/synthetic-prompt-half.md](docs/gemma4_26b_a4b/research/synthetic-prompt-half.md) |
 | `qwen36_35b_a3b, MTP off` | fp8-e30-24h (resident fp8; 3072/10240 experts fp8, rest fp4) | `half` | 691.10 / 71.36 | 998.83 / 71.08 | 1337.47 / 69.31 | 1317.11 / 67.50 | 2026-11-15 | [docs/qwen36_35b_a3b/research/synthetic-prompt-half.md](docs/qwen36_35b_a3b/research/synthetic-prompt-half.md) |
 | `qwen38_27b, MTP off` | fp8-e20 | `half` | 293.68 / 14.37 | 403.33 / 14.82 | 446.84 / 14.00 | 467.09 / 13.77 | 2026-11-16 | [docs/qwen38_27b/research/synthetic-prompt-half.md](docs/qwen38_27b/research/synthetic-prompt-half.md) |
 | `qwen38_27b, MTP on, depth 3` | fp8-e20 | `half` | 298.20 / 15.99 | 396.65 / 17.27 | 487.60 / 15.80 | 467.52 / 15.33 | 2026-11-19 | [docs/qwen38_27b/research/synthetic-prompt-mtp-half.md](docs/qwen38_27b/research/synthetic-prompt-mtp-half.md) |
