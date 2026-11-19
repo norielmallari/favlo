@@ -123,3 +123,13 @@ Queries the same day: "Wan2.2-I2V-A14B int8 3.91 seconds 576x320 9 frames Metal"
 - [Morphic](https://morphic.com/blog/boosting-wan2-2-i2v-56-faster) reports 170.24 s for int8 weight-only at 1280×720 on 8×H100.
 
 Those figures are other engines, other quants, and other frame counts.
+
+19 November 2026. DiT attention for head dimension 128 is `attend_flash`. Sixteen queries share a key tile of 48. Query, key, and value are half, and the destination stays float. SageAttention and FlashAttention-3 remain CUDA kernels for Ampere, Ada, and Hopper. They are not a Metal dispatch.
+
+- The self-attention median is 8.214 ms. The cross-attention median is 2.028 ms.
+- The half casts are 0.237 ms at 2160×5120 and 0.096 ms at 512×5120.
+- The DiT sum is 23.832 s. The kernel sum is 33.658 s.
+- The attention bandwidth ceiling is 4.343 s at 277.04 GB/s.
+- A printed 9-frame 576×320 clip was 14.98 s: umT5 0.79 s, encode 2.72 s, steps 1.86 s, 1.84 s, 1.85 s, 1.85 s, decode 4.07 s.
+
+Queries the same day: "Wan2.2 I2V 576x320 9 frames 33.658 seconds attend_flash Metal half". The returned notes are the predecessors already listed. A search on 19 November 2026 did not find the 33.658 s sum.

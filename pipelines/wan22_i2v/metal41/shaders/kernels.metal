@@ -684,6 +684,142 @@ kernel void attend_q4(
     }
 }
 
+// FlashAttention for head dim 128. Sixteen queries share a key tile of 48.
+// Q, K, and V are half. The running softmax is Milakov's max and sum, and the
+// destination stays float. shape is q_len, kv_len, heads, and the query-tile
+// origin. tiles is how many query tiles this grid covers, head-major.
+constant int AQ = 16;
+constant int AK = 48;
+constant int FD = 128;
+
+kernel void attend_flash(
+    device half* query [[buffer(0)]],
+    device half* key [[buffer(1)]],
+    device half* value [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint4& shape [[buffer(4)]],
+    constant float& scale [[buffer(5)]],
+    constant uint& tiles [[buffer(6)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    uint q_len = shape.x;
+    uint kv_len = shape.y;
+    uint heads = shape.z;
+    uint origin = shape.w;
+    uint head = tgid.x / tiles;
+    uint q0 = (origin + (tgid.x - head * tiles)) * uint(AQ);
+    if (head >= heads || q0 >= q_len || kv_len == 0u || tiles == 0u) {
+        return;
+    }
+    threadgroup half ph[AQ * AK];
+    threadgroup float scores[AQ * AK];
+    threadgroup float accum[AQ * FD];
+    threadgroup float mrun[AQ];
+    threadgroup float lrun[AQ];
+    threadgroup float alpha_row[AQ];
+    int stride = int(heads * uint(FD));
+    device half* qbase = query + head * uint(FD);
+    device half* kbase = key + head * uint(FD);
+    device half* vbase = value + head * uint(FD);
+    tensor<device half, dextents<int, 2>, tensor_inline> queries(
+        qbase, dextents<int, 2>(FD, int(q_len)), array<int, 2>{1, stride});
+    tensor<device half, dextents<int, 2>, tensor_inline> keys(
+        kbase, dextents<int, 2>(FD, int(kv_len)), array<int, 2>{1, stride});
+    tensor<device half, dextents<int, 2>, tensor_inline> values(
+        vbase, dextents<int, 2>(FD, int(kv_len)), array<int, 2>{1, stride});
+    tensor<threadgroup half, dextents<int, 2>, tensor_inline> probs(
+        ph, dextents<int, 2>(AK, AQ), array<int, 2>{1, AK});
+    tensor<threadgroup float, dextents<int, 2>, tensor_inline> running(
+        accum, dextents<int, 2>(FD, AQ), array<int, 2>{1, FD});
+    auto tile_q = queries.slice(0, int(q0));
+    auto tile_p = probs.slice(0, 0);
+    auto tile_o = running.slice(0, 0);
+    constexpr auto qk_desc = matmul2d_descriptor(AQ, AK, FD, false, true, false);
+    matmul2d<qk_desc, execution_simdgroups<4>> qk_op;
+    constexpr auto pv_desc = matmul2d_descriptor(
+        AQ, FD, AK, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<pv_desc, execution_simdgroups<4>> pv_op;
+    for (uint i = tid; i < uint(AQ) * uint(FD); i += 128u) {
+        accum[i] = 0.0f;
+    }
+    if (tid < uint(AQ)) {
+        mrun[tid] = -INFINITY;
+        lrun[tid] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint k0 = 0u; k0 < kv_len; k0 += uint(AK)) {
+        auto tile_k = keys.slice(0, int(k0));
+        auto score_tile = qk_op.get_destination_cooperative_tensor<
+            decltype(tile_q), decltype(tile_k), float>();
+        qk_op.run(tile_q, tile_k, score_tile);
+        for (uint16_t i = 0u; i < score_tile.get_capacity(); ++i) {
+            if (!score_tile.is_valid_element(i)) {
+                continue;
+            }
+            auto ix = score_tile.get_multidimensional_index(i);
+            uint c = uint(ix[0]);
+            uint r = uint(ix[1]);
+            uint q = q0 + r;
+            uint key_index = k0 + c;
+            float dot = -INFINITY;
+            bool live = r < uint(AQ) && c < uint(AK) && q < q_len && key_index < kv_len;
+            if (live) {
+                dot = score_tile[i] * scale;
+            }
+            scores[r * uint(AK) + c] = dot;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < uint(AQ)) {
+            float row_max = -INFINITY;
+            for (uint c = 0u; c < uint(AK); ++c) {
+                row_max = max(row_max, scores[tid * uint(AK) + c]);
+            }
+            float next = max(mrun[tid], row_max);
+            float rescale = 0.0f;
+            if (mrun[tid] != -INFINITY) {
+                rescale = exp(mrun[tid] - next);
+            }
+            alpha_row[tid] = rescale;
+            float sum = 0.0f;
+            for (uint c = 0u; c < uint(AK); ++c) {
+                float weight = 0.0f;
+                float dot = scores[tid * uint(AK) + c];
+                if (dot != -INFINITY) {
+                    weight = exp(dot - next);
+                }
+                ph[tid * uint(AK) + c] = half(weight);
+                sum += weight;
+            }
+            lrun[tid] = lrun[tid] * rescale + sum;
+            mrun[tid] = next;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = tid; i < uint(AQ) * uint(FD); i += 128u) {
+            uint r = i / uint(FD);
+            accum[i] *= alpha_row[r];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        auto tile_v = values.slice(0, int(k0));
+        pv_op.run(tile_p, tile_v, tile_o);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint i = tid; i < uint(AQ) * uint(FD); i += 128u) {
+        uint r = i / uint(FD);
+        uint d = i - r * uint(FD);
+        uint q = q0 + r;
+        if (q >= q_len) {
+            continue;
+        }
+        device float* out = destination + (q * heads + head) * uint(FD) + d;
+        if (lrun[r] == 0.0f) {
+            *out = 0.0f;
+        } else {
+            *out = accum[i] / lrun[r];
+        }
+    }
+}
+
 
 kernel void patch_embed(
     device const float* volume [[buffer(0)]],

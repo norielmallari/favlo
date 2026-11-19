@@ -16,6 +16,9 @@ import objc
 from favlo.memory import device_buffer, memory
 from wan22_i2v.metal41.formats import INT8_TILE_N, K_ALIGN, TILE_M, TILE_N, LinearPack, pad_to
 
+# Queries that share one key tile. Matches the shader's AQ.
+_FLASH_Q = 16
+
 
 class BufferView:
     """A byte window of a span. Dispatches bind ``offset`` inside ``base``."""
@@ -46,6 +49,7 @@ _NAMES = (
     "rope3d",
     "attend",
     "attend_q4",
+    "attend_flash",
     "patch_embed",
     "conv3d",
     "conv_pack",
@@ -116,6 +120,12 @@ class Gpu:
         self._kept: set[int] = set()
         self._factors: Any = None
         self._factor_rows = 0
+        self._hq: Any = None
+        self._hq_n = 0
+        self._hk: Any = None
+        self._hk_n = 0
+        self._hv: Any = None
+        self._hv_n = 0
         self._conv_pack: dict[tuple, Any] = {}
         self._conv_col: tuple[Any, int] | None = None
         self._conv_tile: tuple[Any, int] | None = None
@@ -549,15 +559,25 @@ class Gpu:
     ) -> None:
         scale = float(dim) ** -0.5
         if dim == 128:
+            # FlashAttention: one key tile is shared by 16 queries. The matmul is
+            # half. The destination stays float so the output projection is unchanged.
+            query_half = self._half_kept("_hq", q_len * heads * dim)
+            key_half = self._half_kept("_hk", kv_len * heads * dim)
+            value_half = self._half_kept("_hv", kv_len * heads * dim)
+            self.cast_half(query, query_half, q_len * heads * dim)
+            self.cast_half(key, key_half, kv_len * heads * dim)
+            self.cast_half(value, value_half, kv_len * heads * dim)
+            tiles = (q_len + _FLASH_Q - 1) // _FLASH_Q
             self._dispatch(
-                "attend_q4",
-                [query, key, value, dest],
+                "attend_flash",
+                [query_half, key_half, value_half, dest],
                 [
                     struct.pack("IIII", q_len, kv_len, heads, 0),
                     struct.pack("f", scale),
+                    struct.pack("I", tiles),
                 ],
-                (heads, (q_len + 3) // 4, 1),
-                (32, 1, 1),
+                (tiles * heads, 1, 1),
+                (128, 1, 1),
             )
             return
         self._dispatch(
@@ -706,6 +726,19 @@ class Gpu:
             (cols // TILE_N, rows // TILE_M, 1),
             self._matmul_threads,
         )
+
+    def _half_kept(self, slot: str, count: int) -> Any:
+        need = int(count) * 2
+        held = int(getattr(self, f"{slot}_n"))
+        current = getattr(self, slot)
+        if current is not None and held >= need:
+            return current
+        if current is not None:
+            self.unkeep(current)
+        fresh = self.keep(self.empty(need))
+        setattr(self, slot, fresh)
+        setattr(self, f"{slot}_n", need)
+        return fresh
 
     def cast_half(self, source: Any, dest: Any, count: int) -> None:
         self._count("cast_half", [source, dest], self._u(count), count)

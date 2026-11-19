@@ -45,6 +45,7 @@ On the packed int8 record that sum is:
 
 - The step scratch is the residual, the norm, the half workspace, and one slab.
 - Query, key, and the attention output are lanes of that slab.
+- Self-attention and cross-attention cast those lanes to half and run `attend_flash`. Sixteen queries share a key tile of 48. The destination stays float.
 - The value projection reuses the norm.
 - The FFN hidden reuses the slab.
 - The decode keeps every frame on device when the remainder covers that volume.

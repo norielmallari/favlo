@@ -35,8 +35,8 @@ Four steps and forty layers.
 | `matmul_fp4` | 64×5120, K 5120 | 4 | 0.305 |
 | `matmul_fp4` | 64×30720, K 5120 | 4 | 1.742 |
 | `matmul_fp4` | 2176×64, K 5120 | 4 | 0.170 |
-| `attend_q4` | 2160×2160, 40×128 | 160 | 51.875 |
-| `attend_q4` | 2160×512, 40×128 | 160 | 10.664 |
+| `attend_flash` | 2160×2160, 40×128 | 160 | 8.214 |
+| `attend_flash` | 2160×512, 40×128 | 160 | 2.028 |
 
 - The 512-row `matmul_fp4` with K 5120 counts the cross k and v projections and the second text embedding.
 - The K 4096 row is the first text embedding.
@@ -69,15 +69,17 @@ Four steps and forty layers.
 | `gelu_tanh` | 13824 | 160 | 0.864 |
 | `add_half` | 6×5120 | 160 | 0.002 |
 | `copy_f32` | 5120 | 1124 | 0.002 |
+| `cast_half` | 2160×5120 | 640 | 0.237 |
+| `cast_half` | 512×5120 | 320 | 0.096 |
 | `patch_embed` | 36×3×40×72 | 4 | 2.490 |
 | `zero_bytes` | token rows | 4 | 0.199 |
 
-The gather, rescale, and bias for the text, time, and head projections, plus `gelu_tanh` on the text rows, `silu`, `add_embed_half`, `sinusoid`, `unpatchify`, `condition36`, and `axpy`, add 0.002 s. The unrounded median sum for the DiT is 32.017 s.
+The gather, rescale, and bias for the text, time, and head projections, plus `gelu_tanh` on the text rows, `silu`, `add_embed_half`, `sinusoid`, `unpatchify`, `condition36`, and `axpy`, add 0.002 s. The unrounded median sum for the DiT is 23.832 s.
 
-`attend_q4` reads each query once and writes the destination once. It walks each key and each value once for every group of four queries.
+`attend_flash` reads each query once and writes the destination once. Query, key, and value are half. It walks each key and each value once for every group of sixteen queries. The three `cast_half` calls that feed one attention are in the table above.
 
-- One self-attention call is 47,864,217,600 bytes. One hundred sixty calls are 27.643 s at 277.04 GB/s. The measured self-attention is 8.300 s.
-- One cross-attention call is 11,413,094,400 bytes. One hundred sixty calls are 6.591 s at the same bandwidth. The measured cross-attention is 1.706 s.
+- One self-attention call is 6,038,323,200 bytes. One hundred sixty calls are 3.487 s at 277.04 GB/s. The measured self-attention is 1.314 s.
+- One cross-attention call is 1,481,932,800 bytes. One hundred sixty calls are 0.856 s at the same bandwidth. The measured cross-attention is 0.324 s.
 
 ## umT5
 
@@ -127,13 +129,13 @@ The channel RMS, clipped SiLU, causal cache, resample, and the latent affine are
 
 ## Clip
 
-The DiT, the 9-token encoder, and the VAE sum to 41.843 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 34.234 s. The expert pack read and the AVI pack are outside the kernel sum.
+The DiT, the 9-token encoder, and the VAE sum to 33.658 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 4.343 s. The expert pack read and the AVI pack are outside the kernel sum.
 
 A 9-frame 576×320 smoke printed:
 
-- umT5 2.42 s
-- VAE encode 2.61 s
-- four steps 8.01 s, 8.02 s, 8.00 s, and 8.04 s
-- VAE decode 3.96 s
+- umT5 0.79 s
+- VAE encode 2.72 s
+- four steps 1.86 s, 1.84 s, 1.85 s, and 1.85 s
+- VAE decode 4.07 s
 
-Those stages sum to 41.06 s, within 41.843 s / 0.9.
+Those stages sum to 14.98 s, within 33.658 s / 0.9.
