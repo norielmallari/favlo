@@ -190,6 +190,7 @@ uv run favlo --qwen36_35b_a3b delete qwen36_35b_a3b
 - [research/needle-page.md](research/needle-page.md) — page needle on `half`
 - [research/coding-agent.md](research/coding-agent.md) — coding agent with vision on `fp8_e4m3`
 - [research/coding-agent-half.md](research/coding-agent-half.md) — coding agent with vision on `half`
+- [research/coding-text.md](research/coding-text.md) — text coding agent on `half`
 - [research/synthetic-prompt.md](research/synthetic-prompt.md) — cold 512- and 10000-token prompts
 - [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md) — cold 512-, 1024-, 4096-, and 10000-token prompts on `half`
 - [research/fp16-peak-restore.md](research/fp16-peak-restore.md) — float16 peak-restore bound

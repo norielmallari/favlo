@@ -339,6 +339,9 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - A BF16 layer has not accepted them.
 
 - The chat template is the checkout's `chat_template.jinja`.
+- That file is compiled once per checkpoint for the process, and `tokenizer.json` is loaded once for that checkpoint.
+- A request renders the compiled template.
+- The think and tool-call marker ids are kept with that load.
 - The official card exposes thinking only as `enable_thinking` on or off.
 - Every listed `reasoning.effort` is accepted.
 - Supported names are `none` and `high`.

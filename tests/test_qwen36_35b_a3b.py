@@ -478,6 +478,56 @@ def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
     assert follow[: len(previous)] == previous
 
 
+def test_the_chat_codec_loads_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import WhitespaceSplit
+
+    from qwen36_35b_a3b.metal41 import chat
+
+    vocab = {
+        "[UNK]": 0,
+        "Hello": 1,
+        "there": 2,
+        "<think>": 3,
+        "</think>": 4,
+        "<tool_call>": 5,
+        "</tool_call>": 6,
+    }
+    codec = Tokenizer(WordLevel(vocab, unk_token="[UNK]"))
+    codec.pre_tokenizer = WhitespaceSplit()
+    codec.save(str(tmp_path / "tokenizer.json"))
+    (tmp_path / "chat_template.jinja").write_text("{{ messages[0].content }}", encoding="utf-8")
+    key = str(tmp_path)
+    chat._TOKENIZERS.pop(key, None)
+    chat._TEMPLATES.pop(key, None)
+    chat._MARKERS.pop(key, None)
+    loads = {"n": 0}
+    reads = {"n": 0}
+    real_open = Tokenizer.from_file
+    real_read = Path.read_text
+
+    def counting_open(path: str) -> Tokenizer:
+        loads["n"] += 1
+        return real_open(path)
+
+    def counting_read(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "chat_template.jinja":
+            reads["n"] += 1
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(chat.Tokenizer, "from_file", staticmethod(counting_open))
+    monkeypatch.setattr(Path, "read_text", counting_read)
+    first = chat.encode_chat(tmp_path, [{"role": "user", "content": "Hello"}], None, False)
+    second = chat.encode_chat(tmp_path, [{"role": "user", "content": "Hello there"}], None, True)
+    assert first != second
+    chat.think_open_id(tmp_path)
+    chat.think_close_ids(tmp_path)
+    chat.tool_call_forbid(tmp_path)
+    assert loads["n"] == 1
+    assert reads["n"] == 1
+
+
 def test_a_passed_reasoning_effort_is_not_rendered(tmp_path: Path) -> None:
     source = Path("models/Qwen3.6-35B-A3B-fp4/tokenizer.json")
     if not source.is_file():

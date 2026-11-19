@@ -39,6 +39,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen36_35b_a3b/research/needle-page.md](qwen36_35b_a3b/research/needle-page.md) | Qwen3.6-35B-A3B page needle on half keys and values |
 | [qwen36_35b_a3b/research/coding-agent.md](qwen36_35b_a3b/research/coding-agent.md) | Qwen3.6-35B-A3B coding agent on fp8 keys and values |
 | [qwen36_35b_a3b/research/coding-agent-half.md](qwen36_35b_a3b/research/coding-agent-half.md) | Qwen3.6-35B-A3B coding agent on half keys and values |
+| [qwen36_35b_a3b/research/coding-text.md](qwen36_35b_a3b/research/coding-text.md) | Qwen3.6-35B-A3B text coding agent on half keys and values |
 | [qwen36_35b_a3b/research/synthetic-prompt.md](qwen36_35b_a3b/research/synthetic-prompt.md) | Qwen3.6-35B-A3B cold 512-token and 10000-token prompts |
 | [qwen36_35b_a3b/research/synthetic-prompt-half.md](qwen36_35b_a3b/research/synthetic-prompt-half.md) | Qwen3.6-35B-A3B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e30-24h pack with half keys and values |
 | [qwen36_35b_a3b/performance.md](qwen36_35b_a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |

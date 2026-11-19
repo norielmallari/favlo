@@ -156,8 +156,64 @@ def completion_limit(max_position: int, prompt_tokens: int, requested: int | Non
     return max(0, min(int(requested), room))
 
 
+_LOAD_LOCK = threading.Lock()
+_TOKENIZERS: dict[str, Tokenizer] = {}
+_TEMPLATES: dict[str, Any] = {}
+_MARKERS: dict[str, tuple[int, tuple[int, ...], int, int, int]] = {}
+
+
 def load_tokenizer(root: Path) -> Tokenizer:
-    return Tokenizer.from_file(str(root / "tokenizer.json"))
+    """The checkpoint tokenizer, loaded once for this process."""
+    key = str(root)
+    with _LOAD_LOCK:
+        found = _TOKENIZERS.get(key)
+        if found is None:
+            found = Tokenizer.from_file(str(root / "tokenizer.json"))
+            _TOKENIZERS[key] = found
+        return found
+
+
+def _chat_template(root: Path) -> Any:
+    """The checkpoint Jinja template, compiled once for this process."""
+    key = str(root)
+    with _LOAD_LOCK:
+        found = _TEMPLATES.get(key)
+        if found is None:
+            env = Environment()
+            env.globals["raise_exception"] = _raise
+            found = env.from_string((root / "chat_template.jinja").read_text())
+            _TEMPLATES[key] = found
+        return found
+
+
+def _marker_ids(root: Path) -> tuple[int, tuple[int, ...], int, int, int]:
+    """Think open, think close, think end, tool open, and tool close.
+
+    The strings do not depend on the request. The ids stay with the tokenizer.
+    """
+    key = str(root)
+    with _LOAD_LOCK:
+        found = _MARKERS.get(key)
+    if found is not None:
+        return found
+    opened = encode_text(root, "<think>")
+    if len(opened) != 1:
+        raise RuntimeError("the think open is not one token")
+    close = encode_text(root, "\n</think>\n\n")
+    end = encode_text(root, "</think>")
+    if len(end) != 1 or end[0] not in close:
+        raise RuntimeError("the think close is not one token")
+    tool_open = encode_text(root, "<tool_call>")
+    tool_close = encode_text(root, "</tool_call>")
+    if len(tool_open) != 1 or len(tool_close) != 1:
+        raise RuntimeError("the tool call markers are not one token each")
+    packed = (opened[0], tuple(close), end[0], tool_open[0], tool_close[0])
+    with _LOAD_LOCK:
+        found = _MARKERS.get(key)
+        if found is None:
+            _MARKERS[key] = packed
+            return packed
+        return found
 
 
 def _preserve_flag(value: Any) -> bool | None:
@@ -236,9 +292,6 @@ def encode_chat(
     prepared = normalize_messages(messages)
     if preserve_thinking:
         prepared = _bridge_omitted_assistant(prepared)
-    template = (root / "chat_template.jinja").read_text()
-    env = Environment()
-    env.globals["raise_exception"] = _raise
     rendered_args: dict[str, Any] = {
         "messages": prepared,
         "tools": tools or None,
@@ -247,7 +300,7 @@ def encode_chat(
         "add_vision_id": False,
         "preserve_thinking": preserve_thinking,
     }
-    rendered = env.from_string(template).render(**rendered_args)
+    rendered = _chat_template(root).render(**rendered_args)
     return list(load_tokenizer(root).encode(rendered).ids)
 
 
@@ -257,10 +310,7 @@ def encode_text(root: Path, text: str) -> list[int]:
 
 def think_open_id(root: Path) -> int:
     """Token id of ``<think>``. Instruct forbids drawing it again."""
-    opened = encode_text(root, "<think>")
-    if len(opened) != 1:
-        raise RuntimeError("the think open is not one token")
-    return opened[0]
+    return _marker_ids(root)[0]
 
 
 _GENERATION_SUFFIX: dict[Path, tuple[list[int], list[int]]] = {}
@@ -346,20 +396,14 @@ def instruct_forbid(root: Path) -> set[int]:
 
 def tool_call_forbid(root: Path) -> set[int]:
     """Tool markup. ``tool_choice`` ``none`` keeps those tokens out of the reply."""
-    opened = encode_text(root, "<tool_call>")
-    closed = encode_text(root, "</tool_call>")
-    if len(opened) != 1 or len(closed) != 1:
-        raise RuntimeError("the tool call markers are not one token each")
-    return {opened[0], closed[0]}
+    _open, _close, _end, tool_open, tool_close = _marker_ids(root)
+    return {tool_open, tool_close}
 
 
 def think_close_ids(root: Path) -> tuple[list[int], int]:
     """Token ids of the template close ``\\n</think>\\n\\n``, and the ``</think>`` id."""
-    close = encode_text(root, "\n</think>\n\n")
-    end = encode_text(root, "</think>")
-    if len(end) != 1 or end[0] not in close:
-        raise RuntimeError("the think close is not one token")
-    return close, end[0]
+    _open, close, end, _tool_open, _tool_close = _marker_ids(root)
+    return list(close), end
 
 
 def _forced_call(root: Path, tools: Any, required: str | None) -> tuple[list[int], bool]:
