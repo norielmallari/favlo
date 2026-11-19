@@ -72,6 +72,9 @@ _NAMES = (
     "silu_clip",
     "spatial_attend",
     "spatial_attend_lane",
+    "attend_flash_wide",
+    "pack_qkv",
+    "unpack_qkv",
     "end_pad",
     "nearest2",
     "concat_time",
@@ -129,6 +132,10 @@ class Gpu:
         self._conv_pack: dict[tuple, Any] = {}
         self._conv_col: tuple[Any, int] | None = None
         self._conv_tile: tuple[Any, int] | None = None
+        self._sq: tuple[Any, int] | None = None
+        self._sk: tuple[Any, int] | None = None
+        self._sv: tuple[Any, int] | None = None
+        self._sd: tuple[Any, int] | None = None
         width = int(self.pipes["matmul_fp4"].threadExecutionWidth())
         self._matmul_threads = (width * 4, 1, 1)
 
@@ -838,10 +845,42 @@ class Gpu:
     def silu_clip(self, source: Any, dest: Any, count: int) -> None:
         self._count("silu_clip", [source, dest], self._u(count), count)
 
+    def _spatial_flash(
+        self, qkv: Any, dest: Any, channels: int, time: int, height: int, width: int
+    ) -> None:
+        """One head per frame. ``qkv`` is channel-major and ``dest`` matches it."""
+        spatial = height * width
+        count = spatial * time * channels
+        query = self._fit_conv("_sq", count * 4)
+        key = self._fit_conv("_sk", count * 4)
+        value = self._fit_conv("_sv", count * 4)
+        scratch = self._fit_conv("_sd", count * 4)
+        self.zero(scratch, count * 4)
+        threads = 256
+        groups = (count + threads - 1) // threads
+        shape = self._u(channels, time, height, width)
+        self._dispatch("pack_qkv", [qkv, query, key, value], shape, (groups, 1, 1), (threads, 1, 1))
+        scale = float(channels) ** -0.5
+        tiles = (spatial + 31) // 32
+        self._dispatch(
+            "attend_flash_wide",
+            [query, key, value, scratch],
+            [
+                struct.pack("IIII", spatial, spatial, time, 0),
+                struct.pack("f", scale),
+            ],
+            (time, tiles, 1),
+            (128, 1, 1),
+        )
+        self._dispatch("unpack_qkv", [scratch, dest], shape, (groups, 1, 1), (threads, 1, 1))
+
     def spatial_attend(
         self, qkv: Any, dest: Any, channels: int, time: int, height: int, width: int
     ) -> None:
         spatial = height * width
+        if channels == 384 and spatial > 0:
+            self._spatial_flash(qkv, dest, channels, time, height, width)
+            return
         if channels % 32 == 0 and 0 < channels // 32 <= 12 and spatial > 0:
             self._dispatch(
                 "spatial_attend_lane",
@@ -960,7 +999,7 @@ class Gpu:
             raise ValueError(message)
         spatial = tout * hout * wout
         k_raw = cin * kt * kh * kw
-        if cout >= 32 and spatial >= 1024 and k_raw >= 64:
+        if spatial > 0 and k_raw > 0:
             dest = self._alloc(cout * spatial * 4)
             self._conv_gemm(
                 source,
@@ -1018,7 +1057,7 @@ class Gpu:
         pad: tuple[int, int, int],
         k_raw: int,
     ) -> None:
-        """im2col tiles plus half ``matmul2d``. ``conv3d`` covers the smaller shapes."""
+        """im2col tiles plus half ``matmul2d``. Narrow kernels are zero-padded to the tile."""
         cin, tin, hin, win = source_shape
         cout, tout, hout, wout = out_shape
         kt, kh, kw = kernel

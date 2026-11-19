@@ -691,6 +691,9 @@ kernel void attend_q4(
 constant int AQ = 16;
 constant int AK = 48;
 constant int FD = 128;
+constant int FQ = 32;
+constant int FK = 32;
+constant int WIDE = 384;
 
 kernel void attend_flash(
     device half* query [[buffer(0)]],
@@ -1300,6 +1303,214 @@ kernel void silu_clip(
     }
     float value = clamp(source[gid], -60.0f, 60.0f);
     destination[gid] = value / (1.0f + exp(-value));
+}
+
+// 384-channel attention. Three matmul2d chunks of 128 make one dot product.
+// Query tiles are 32 and key tiles are 32. shape is q_len, kv_len, heads,
+// and the query-tile origin. The destination is token-major and must start at 0.
+kernel void attend_flash_wide(
+    device float* query [[buffer(0)]],
+    device float* key [[buffer(1)]],
+    device float* value [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint4& shape [[buffer(4)]],
+    constant float& scale [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    uint q_len = shape.x;
+    uint kv_len = shape.y;
+    uint heads = shape.z;
+    uint origin = shape.w;
+    uint head = tgid.x;
+    uint q0 = (origin + tgid.y) * uint(FQ);
+    if (head >= heads || q0 >= q_len || kv_len == 0u) {
+        return;
+    }
+    threadgroup float scores[FQ * FK];
+    threadgroup float prob[FQ * FK];
+    threadgroup float mrun[FQ];
+    threadgroup float lrun[FQ];
+    threadgroup float alpha_row[FQ];
+    if (tid < uint(FQ)) {
+        mrun[tid] = -INFINITY;
+        lrun[tid] = 0.0f;
+    }
+    int stride = int(heads * uint(WIDE));
+    constexpr auto qk_desc = matmul2d_descriptor(FQ, FK, FD, false, true, false);
+    matmul2d<qk_desc, execution_simdgroups<4>> qk_op;
+    constexpr auto pv_desc = matmul2d_descriptor(FQ, FD, FK, false, false, false);
+    matmul2d<pv_desc, execution_simdgroups<4>> pv_op;
+    tensor<threadgroup float, dextents<int, 2>, tensor_inline> tile_p(
+        prob, dextents<int, 2>(FK, FQ));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint k0 = 0u; k0 < kv_len; k0 += uint(FK)) {
+        if (tid < uint(FQ)) {
+            for (uint c = 0u; c < uint(FK); ++c) {
+                scores[tid * uint(FK) + c] = -INFINITY;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint chunk = 0u; chunk < 3u; ++chunk) {
+            device float* qbase = query + head * uint(WIDE) + chunk * uint(FD);
+            device float* kbase = key + head * uint(WIDE) + chunk * uint(FD);
+            tensor<device float, dextents<int, 2>, tensor_inline> queries(
+                qbase, dextents<int, 2>(FD, int(q_len)), array<int, 2>{1, stride});
+            tensor<device float, dextents<int, 2>, tensor_inline> keys(
+                kbase, dextents<int, 2>(FD, int(kv_len)), array<int, 2>{1, stride});
+            auto tile_q = queries.slice(0, int(q0));
+            auto tile_k = keys.slice(0, int(k0));
+            auto score_tile = qk_op.get_destination_cooperative_tensor<
+                decltype(tile_q), decltype(tile_k), float>();
+            qk_op.run(tile_q, tile_k, score_tile);
+            for (uint16_t i = 0u; i < score_tile.get_capacity(); ++i) {
+                if (!score_tile.is_valid_element(i)) {
+                    continue;
+                }
+                auto ix = score_tile.get_multidimensional_index(i);
+                uint c = uint(ix[0]);
+                uint r = uint(ix[1]);
+                uint q = q0 + r;
+                uint key_index = k0 + c;
+                bool live = r < uint(FQ) && c < uint(FK) && q < q_len && key_index < kv_len;
+                if (!live) {
+                    continue;
+                }
+                uint at = r * uint(FK) + c;
+                if (chunk == 0u) {
+                    scores[at] = score_tile[i];
+                } else {
+                    scores[at] += score_tile[i];
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        if (tid < uint(FQ)) {
+            for (uint c = 0u; c < uint(FK); ++c) {
+                float raw = scores[tid * uint(FK) + c];
+                if (raw != -INFINITY) {
+                    scores[tid * uint(FK) + c] = raw * scale;
+                }
+            }
+            float row_max = -INFINITY;
+            for (uint c = 0u; c < uint(FK); ++c) {
+                row_max = max(row_max, scores[tid * uint(FK) + c]);
+            }
+            float next = max(mrun[tid], row_max);
+            float rescale = 0.0f;
+            if (mrun[tid] != -INFINITY) {
+                rescale = exp(mrun[tid] - next);
+            }
+            alpha_row[tid] = rescale;
+            float sum = 0.0f;
+            for (uint c = 0u; c < uint(FK); ++c) {
+                float weight = 0.0f;
+                float dot = scores[tid * uint(FK) + c];
+                if (dot != -INFINITY) {
+                    weight = exp(dot - next);
+                }
+                prob[tid * uint(FK) + c] = weight;
+                sum += weight;
+            }
+            lrun[tid] = lrun[tid] * rescale + sum;
+            mrun[tid] = next;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint chunk = 0u; chunk < 3u; ++chunk) {
+            device float* vbase = value + head * uint(WIDE) + chunk * uint(FD);
+            tensor<device float, dextents<int, 2>, tensor_inline> values(
+                vbase, dextents<int, 2>(FD, int(kv_len)), array<int, 2>{1, stride});
+            auto tile_v = values.slice(0, int(k0));
+            auto mixed = pv_op.get_destination_cooperative_tensor<
+                decltype(tile_p), decltype(tile_v), float>();
+            pv_op.run(tile_p, tile_v, mixed);
+            for (uint16_t i = 0u; i < mixed.get_capacity(); ++i) {
+                if (!mixed.is_valid_element(i) || i >= 32u) {
+                    continue;
+                }
+                auto ix = mixed.get_multidimensional_index(i);
+                uint c = uint(ix[0]);
+                uint r = uint(ix[1]);
+                uint q = q0 + r;
+                if (q >= q_len || c >= uint(FD)) {
+                    continue;
+                }
+                device float* slot = destination + (q * heads + head) * uint(WIDE) + chunk * uint(FD) + c;
+                *slot = (*slot) * alpha_row[r] + mixed[i];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    device float* vbase0 = value + head * uint(WIDE);
+    tensor<device float, dextents<int, 2>, tensor_inline> values0(
+        vbase0, dextents<int, 2>(FD, int(kv_len)), array<int, 2>{1, stride});
+    auto tile_v0 = values0.slice(0, 0);
+    auto layout = pv_op.get_destination_cooperative_tensor<decltype(tile_p), decltype(tile_v0), float>();
+    for (uint16_t i = 0u; i < layout.get_capacity(); ++i) {
+        if (!layout.is_valid_element(i) || i >= 32u) {
+            continue;
+        }
+        auto ix = layout.get_multidimensional_index(i);
+        uint c = uint(ix[0]);
+        uint r = uint(ix[1]);
+        uint q = q0 + r;
+        if (q >= q_len || c >= uint(FD) || lrun[r] == 0.0f) {
+            continue;
+        }
+        float denom = lrun[r];
+        for (uint chunk = 0u; chunk < 3u; ++chunk) {
+            device float* slot = destination + (q * heads + head) * uint(WIDE) + chunk * uint(FD) + c;
+            *slot = (*slot) / denom;
+        }
+    }
+}
+
+kernel void pack_qkv(
+    device const float* qkv [[buffer(0)]],
+    device float* query [[buffer(1)]],
+    device float* key [[buffer(2)]],
+    device float* value [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& time [[buffer(5)]],
+    constant uint& height [[buffer(6)]],
+    constant uint& width [[buffer(7)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint spatial = height * width;
+    uint count = spatial * time * channels;
+    if (gid >= count || spatial == 0u) {
+        return;
+    }
+    uint c = gid % channels;
+    uint rest = gid / channels;
+    uint t = rest % time;
+    uint q = rest / time;
+    uint plane = time * spatial;
+    uint pix = t * spatial + q;
+    query[gid] = qkv[c * plane + pix];
+    key[gid] = qkv[(channels + c) * plane + pix];
+    value[gid] = qkv[(2u * channels + c) * plane + pix];
+}
+
+kernel void unpack_qkv(
+    device const float* packed [[buffer(0)]],
+    device float* destination [[buffer(1)]],
+    constant uint& channels [[buffer(2)]],
+    constant uint& time [[buffer(3)]],
+    constant uint& height [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint spatial = height * width;
+    uint count = spatial * time * channels;
+    if (gid >= count || spatial == 0u) {
+        return;
+    }
+    uint c = gid % channels;
+    uint rest = gid / channels;
+    uint t = rest % time;
+    uint q = rest / time;
+    destination[c * (time * spatial) + t * spatial + q] = packed[gid];
 }
 
 kernel void spatial_attend(

@@ -211,11 +211,11 @@ Both edges are multiples of 16.
 - The DiT text MLP still runs.
 
 - The VAE uploads weights only while encode or decode runs.
-- A convolution of at least 32 output channels, 1024 outputs, and 64 taps is an im2col tile and a half `matmul2d`.
-- Smaller convolutions stay on the float `conv3d` kernel.
+- Every convolution is an im2col tile and a half `matmul2d`. The kernel width and the channel count stay the checkpoint's. A narrow layer is padded with zeros out to the matrix tile.
+- The 384-channel mid-block attention packs each frame into a token-major matrix and runs `attend_flash_wide`. Three `matmul2d` chunks of 128 form one dot product. The softmax stays between that product and the value mix.
 - The encoder and decoder commit once per block.
 - Each DiT block commits before the next one is recorded.
-- The 1×1 projections, the channel RMS, the clipped SiLU, and both mid-block attentions are kernels.
+- The 1×1 projections, the channel RMS, and the clipped SiLU are kernels. Both mid-block attentions are `attend_flash_wide`.
 - The causal cache is a device buffer.
 - The Euler step adds the velocity on device.
 - The host sees the latent again at the decoder, then reads the uint8 frames for the AVI.

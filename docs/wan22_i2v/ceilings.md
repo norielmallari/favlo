@@ -105,9 +105,9 @@ The token-row read from the checkpoint is outside this sum.
 
 Encode walks the first pixel frame, then two groups of four. Decode walks the three latent frames.
 
-- A convolution of at least 32 output channels, 1024 outputs, and 64 taps is `conv_pack` once, then `conv_im2col`, half `matmul_f16`, and `conv_scatter` for each 4096-row tile.
+- Every convolution is `conv_pack` once, then `conv_im2col`, half `matmul_f16`, and `conv_scatter` for each 4096-row tile.
+- A narrow layer is padded with zeros out to that tile.
 - That dispatch is one command buffer.
-- Smaller convolutions stay on float `conv3d`.
 
 The shapes at or above 0.25 s in aggregate:
 
@@ -121,21 +121,21 @@ The shapes at or above 0.25 s in aggregate:
 | 384×3×80×144 | 384×384×3×3×3 | 8 | 45.172 |
 | 384×4×80×144 | 384×384×3×3×3 | 8 | 60.824 |
 
-The other 49 shapes are 143 calls and add 1.074 s. All 207 calls sum to 6.733 s.
+The other 49 shapes are 143 calls. They were timed on float `conv3d` at 1.074 s. They now use the same half matmul. All 207 calls on that earlier timing sum to 6.733 s.
 
-`spatial_attend_lane` runs six times at 384 channels over 40×72. Median 419.941 ms. Total 2.520 s.
+`attend_flash_wide` runs six times at 384 channels over 40×72. Median 12.022 ms. Total 0.072 s.
 
-The channel RMS, clipped SiLU, causal cache, resample, and the latent affine are 859 calls and add 0.524 s. The VAE sum is 9.777 s.
+The channel RMS, clipped SiLU, causal cache, resample, and the latent affine are 859 calls and add 0.524 s. The VAE sum is 7.329 s.
 
 ## Clip
 
-The DiT, the 9-token encoder, and the VAE sum to 33.658 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 4.343 s. The expert pack read and the AVI pack are outside the kernel sum.
+The DiT, the 9-token encoder, and the VAE sum to 31.210 s. The 90% test uses that kernel ceiling. The attention bandwidth ceiling is 4.343 s. The expert pack read and the AVI pack are outside the kernel sum.
 
 A 9-frame 576×320 smoke printed:
 
-- umT5 0.79 s
-- VAE encode 2.72 s
-- four steps 1.86 s, 1.84 s, 1.85 s, and 1.85 s
-- VAE decode 4.07 s
+- umT5 0.84 s
+- VAE encode 2.52 s
+- four steps 1.87 s, 1.86 s, 1.87 s, and 1.86 s
+- VAE decode 4.03 s
 
-Those stages sum to 14.98 s, within 33.658 s / 0.9.
+Those stages sum to 14.85 s, within 31.210 s / 0.9.
