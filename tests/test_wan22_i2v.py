@@ -247,6 +247,51 @@ def test_mask_marks_the_first_latent_frame() -> None:
     assert np.all(mask[:, 1] == 0)
 
 
+def test_mask_marks_the_last_latent_group() -> None:
+    short = mask_latent(5, end=True)
+    assert list(short[:, 0]) == [1, 1, 1, 1]
+    assert list(short[:, 1]) == [0, 0, 0, 1]
+    long = mask_latent(81, end=True)
+    assert list(long[:, 0]) == [1, 1, 1, 1]
+    assert list(long[:, -1]) == [0, 0, 0, 1]
+    assert np.all(long[:, 1:-1] == 0)
+
+
+def test_stride_encode_keeps_the_end_still_in_the_last_chunk() -> None:
+    from wan22_i2v.metal41.latent import stride_encode
+
+    start = np.zeros((16, 16, 3), dtype=np.uint8)
+    end = np.full((16, 16, 3), 255, dtype=np.uint8)
+    plain = stride_encode(start, 5)
+    ended = stride_encode(start, 5, end)
+    assert ended.shape == plain.shape
+    assert np.allclose(ended[:, 0], plain[:, 0])
+    assert not np.allclose(ended[:3, -1], plain[:3, -1])
+
+
+def test_split_lands_on_a_whole_number_of_windows() -> None:
+    from wan22_i2v.metal41.schedule import apply_split, latent_windows, window_weights
+
+    assert apply_split(81, None, 1) == (81, None)
+    assert apply_split(81, 1, 1) == (81, None)
+    frames, context = apply_split(81, 2, 1)
+    assert (frames, context) == (81, 41)
+    plan = latent_windows(21, context, 1)
+    assert plan == (11, [0, 10])
+    frames, context = apply_split(81, 3, 1)
+    assert (frames, context) == (73, 25)
+    plan = latent_windows(1 + (frames - 1) // 4, context, 1)
+    assert plan is not None and len(plan[1]) == 3
+    covered = np.zeros(1 + (frames - 1) // 4, dtype=np.int32)
+    for start in plan[1]:
+        covered[start : start + plan[0]] += 1
+    assert np.all(covered > 0)
+    weights = window_weights(11, 1, 1)
+    assert weights[0] == np.float32(0.5)
+    assert weights[-1] == np.float32(0.5)
+    assert np.all(weights[1:-1] == 1)
+
+
 def test_unpatchify_is_spatial_patch_then_channel() -> None:
     tokens = np.zeros((1, 64), dtype=np.float32)
     tokens[0, 0] = 3.0
@@ -447,6 +492,8 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
     assert short.negative_prompt == ""
     assert short.guidance == (1.0, 1.0)
     assert short.steps == 4
+    assert short.last_image is None
+    assert short.split is None
     guided = video_fields(
         {
             "prompt": "move",
@@ -485,6 +532,53 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
         raise AssertionError("quality was accepted")
     assert _seconds_label(FIVE_SEC_FRAMES) == "5.0625"
     assert _seconds_label(9) == "0.5625"
+
+
+def test_video_request_accepts_a_last_still_and_a_split() -> None:
+    encoded = _png()
+    end = base64.b64encode(encode_png(np.full((4, 4, 3), 255, dtype=np.uint8))).decode("ascii")
+    fields = video_fields(
+        {
+            "prompt": "move",
+            "image": encoded,
+            "last_image": end,
+            "frames": 81,
+            "size": "576x320",
+            "split": 3,
+        }
+    )
+    assert fields.frames == 73
+    assert fields.split == 3
+    assert fields.overlap == 1
+    assert fields.last_image is not None
+    assert fields.last_image.shape == (320, 576, 3)
+    described = handle_video.describe(fields)
+    assert described["split"] == 3
+    assert described["last_image"] is True
+    other = video_fields(
+        {"prompt": "move", "image": encoded, "frames": 81, "size": "576x320", "split": 3}
+    )
+    assert handle_video.identity(fields) != handle_video.identity(other)
+    try:
+        video_fields({"prompt": "move", "image": encoded, "frames": 81, "overlap": 2})
+    except VideoRequestError as exc:
+        assert exc.param == "overlap"
+    else:
+        raise AssertionError("overlap was accepted")
+    try:
+        video_fields({"prompt": "move", "image": encoded, "frames": 5, "context": 41})
+    except VideoRequestError as exc:
+        assert exc.param == "context"
+    else:
+        raise AssertionError("context was accepted")
+    try:
+        video_fields(
+            {"prompt": "move", "image": encoded, "last_image": end, "frames": 1, "size": "16x16"}
+        )
+    except VideoRequestError as exc:
+        assert exc.param == "last_image"
+    else:
+        raise AssertionError("a one-frame last still was accepted")
 
 
 class _Reply:
@@ -628,6 +722,9 @@ def test_video_job_passes_guidance_into_generate(tmp_path) -> None:
         "negative_prompt": "blur",
         "guidance": (1.0, 3.5),
         "steps": 6,
+        "last_image": None,
+        "split": None,
+        "overlap": None,
     }
     assert handler.payload["guidance_scale"] == [1.0, 3.5]
     assert handler.payload["steps"] == 6
@@ -1116,7 +1213,7 @@ def test_a_short_ledger_keeps_the_requested_clip(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(runtime, "_room", lambda: 1)
     lat_t, lat_h, lat_w, tokens = geometry(5, 320, 576)
     with pytest.raises(RuntimeError, match="5 frames at 576x320"):
-        runtime._reserve(5, 576, 320, lat_t, lat_h, lat_w, tokens)
+        runtime._reserve(5, 576, 320, lat_t, lat_h, lat_w, tokens, lat_t)
 
 
 def test_decode_keeps_one_latent_frame_when_the_volume_does_not_fit() -> None:

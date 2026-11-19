@@ -1,7 +1,8 @@
 """Stride latent used when ``Wan2.1_VAE.pth`` is not on disk.
 
-The first pixel frame is the image. Later frames are zeros. Each 4×8×8 cell
-averages into the latent grid, then the published channel affine is applied.
+The first pixel frame is the image. Later frames are zeros. A last still, when
+one is passed, is the final pixel. Each 4×8×8 cell averages into the latent
+grid, then the published channel affine is applied.
 """
 
 from __future__ import annotations
@@ -11,13 +12,18 @@ import numpy as np
 from wan22_i2v.metal41.schedule import LATENT_MEAN, LATENT_STD, geometry, mask_latent
 
 
-def stride_encode(image: np.ndarray, frames: int) -> np.ndarray:
+def stride_encode(
+    image: np.ndarray, frames: int, end: np.ndarray | None = None
+) -> np.ndarray:
     """uint8 HWC image to the 16-channel latent ``[16, T, H, W]``."""
     height, width = image.shape[:2]
     lat_t, lat_h, lat_w, _ = geometry(frames, height, width)
     pixels = image.astype(np.float32) / np.float32(127.5) - np.float32(1.0)
     video = np.zeros((3, frames, height, width), dtype=np.float32)
     video[:, 0] = np.transpose(pixels, (2, 0, 1))
+    if end is not None:
+        last = end.astype(np.float32) / np.float32(127.5) - np.float32(1.0)
+        video[:, -1] = np.transpose(last, (2, 0, 1))
     latent = np.zeros((16, lat_t, lat_h, lat_w), dtype=np.float32)
     for time in range(lat_t):
         if time == 0:
@@ -47,9 +53,11 @@ def stride_decode(latent: np.ndarray, frames: int) -> np.ndarray:
     return np.transpose(uint8, (0, 2, 3, 1))
 
 
-def condition_volume(noise: np.ndarray, latent: np.ndarray, frames: int) -> np.ndarray:
+def condition_volume(
+    noise: np.ndarray, latent: np.ndarray, frames: int, *, end: bool = False
+) -> np.ndarray:
     """36 channels: noise, the packed mask, then the VAE latent."""
-    mask = mask_latent(frames)
+    mask = mask_latent(frames, end=end)
     spatial = np.broadcast_to(mask[:, :, None, None], (4, *noise.shape[1:]))
     return np.concatenate((noise, np.ascontiguousarray(spatial), latent), axis=0).astype(np.float32)
 

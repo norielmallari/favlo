@@ -180,15 +180,20 @@ Clips come from `favlo media` only.
 A video client can also call `wan22_i2v__generate_video`.
 
 - The still is an image id from `generate_image`, a PNG block, a `file://` URI, or a filename in `images`.
+- `last_image` is an optional end still in the same forms. The clip then opens on the first still and closes on the second.
 - `size` is required.
 - Landscape and portrait sizes for 240p, 320p, 480p, and 720p are accepted.
 - An omitted duration is 81 frames.
 - A frame count is `4n+1`.
 - The shortest moving clip is 5 frames.
+- A last still needs at least 5 frames. On this 4-step record, use 81. Five frames is one latent step between the stills, and the middle goes flat.
 - The default step count is 4.
+- `split` is the number of DiT calls inside one Euler step. Omit it, or pass 1, for one call.
+- `overlap` is the shared latent frames. It defaults to 1 when `split` is set.
 
 ```text
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5
+uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png last_image=file:///absolute/end.png size=576x320 frames=81 split=2 overlap=1
 ```
 
 - `favlo media` does not start the listener.

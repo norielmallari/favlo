@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import base64
+import hashlib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -17,6 +17,7 @@ from wan22_i2v.metal41.hold import ClipHold
 from wan22_i2v.metal41.png import decode_png, resize_rgb
 from wan22_i2v.metal41.progress import ClipProgress, clip_label
 from wan22_i2v.metal41.schedule import (
+    apply_split,
     frames_from_duration,
     FIVE_SEC_FRAMES,
     FPS,
@@ -46,6 +47,9 @@ class VideoFields(NamedTuple):
     negative_prompt: str
     guidance: tuple[float, float]
     steps: int
+    last_image: np.ndarray | None = None
+    split: int | None = None
+    overlap: int | None = None
 
 
 def handle_chat(
@@ -72,7 +76,7 @@ class Pipeline(BulkMediaPipeline):
         return video_fields(body)
 
     def describe(self, request: VideoFields) -> dict[str, Any]:
-        return {
+        fields: dict[str, Any] = {
             "prompt": request.prompt,
             "seconds": _seconds_label(request.frames),
             "size": f"{request.width}x{request.height}",
@@ -82,6 +86,12 @@ class Pipeline(BulkMediaPipeline):
             "guidance_scale": [request.guidance[0], request.guidance[1]],
             "steps": request.steps,
         }
+        if request.last_image is not None:
+            fields["last_image"] = True
+        if request.split is not None:
+            fields["split"] = request.split
+            fields["overlap"] = request.overlap
+        return fields
 
     def identity(self, request: VideoFields) -> tuple[Any, ...]:
         return (
@@ -93,6 +103,9 @@ class Pipeline(BulkMediaPipeline):
             request.negative_prompt,
             (request.guidance[0], request.guidance[1]),
             request.steps,
+            _still_mark(request.last_image),
+            request.split,
+            request.overlap,
         )
 
     def matches(self, request: VideoFields, identity: Any) -> bool:
@@ -129,6 +142,9 @@ class Pipeline(BulkMediaPipeline):
                 negative_prompt=request.negative_prompt,
                 guidance=request.guidance,
                 steps=request.steps,
+                last_image=request.last_image,
+                split=request.split,
+                overlap=request.overlap,
             )
         checkpoint(stop, ClipHold(stage="pack", avi=avi, done=progress.done))
         return avi
@@ -203,6 +219,9 @@ class Pipeline(BulkMediaPipeline):
                         "negative_prompt": {"type": "string", "description": "Empty uses the sample negative."},
                         "guidance_scale": {"description": "Number or [low, high]; default 1."},
                         "steps": {"type": "integer", "description": "Euler 1-40; 0 uses 4."},
+                        "last_image": {"description": "Optional end still, same forms as image."},
+                        "split": {"type": "integer", "description": "DiT calls per step. Omit for one."},
+                        "overlap": {"type": "integer", "description": "Shared latent frames. Default 1."},
                     },
                     "required": ["prompt", "size", "image"],
                 },
@@ -227,6 +246,13 @@ def video_fields(body: dict[str, Any]) -> VideoFields:
         raise VideoRequestError("input_reference must be a PNG", "input_reference") from exc
     width, height = _size(body.get("size"))
     frames = _frames(body)
+    split, overlap = _split(body)
+    share = 1 if overlap is None else overlap
+    try:
+        frames, _context = apply_split(frames, split, share)
+    except ValueError as exc:
+        param = "overlap" if str(exc).startswith("overlap") else "split"
+        raise VideoRequestError(str(exc), param) from exc
     seed = body.get("seed", 0)
     if isinstance(seed, str) and seed.lstrip("-").isdigit():
         seed = int(seed)
@@ -237,6 +263,7 @@ def video_fields(body: dict[str, Any]) -> VideoFields:
     except ValueError as exc:
         raise VideoRequestError(str(exc), "frames") from exc
     resized = resize_rgb(image, height, width)
+    last = _last_image(body, height, width, frames)
     return VideoFields(
         prompt.strip(),
         resized,
@@ -248,6 +275,9 @@ def video_fields(body: dict[str, Any]) -> VideoFields:
         _negative(body),
         _guidance(body),
         _steps(body),
+        last,
+        split,
+        overlap,
     )
 
 
@@ -266,23 +296,75 @@ def _quality(body: dict[str, Any]) -> str:
         raise VideoRequestError(str(exc), "quality") from exc
 
 
+def _still_mark(image: np.ndarray | None) -> str | None:
+    if image is None:
+        return None
+    raw = np.ascontiguousarray(image).tobytes()
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _last_image(body: dict[str, Any], height: int, width: int, frames: int) -> np.ndarray | None:
+    raw = body.get("last_image")
+    if raw in (None, ""):
+        raw = body.get("end_image")
+    if raw in (None, ""):
+        return None
+    try:
+        image = decode_png(_png_bytes(raw, "last_image"))
+    except VideoRequestError:
+        raise
+    except (ValueError, TypeError) as exc:
+        raise VideoRequestError("last_image must be a PNG", "last_image") from exc
+    if frames < 5:
+        raise VideoRequestError("a last frame needs at least 5 frames", "last_image")
+    return resize_rgb(image, height, width)
+
+
+def _split(body: dict[str, Any]) -> tuple[int | None, int | None]:
+    if body.get("context") is not None:
+        raise VideoRequestError("pass split instead of context", "context")
+    raw = body.get("split")
+    if raw is None:
+        if body.get("overlap") is not None:
+            raise VideoRequestError("overlap needs a split", "overlap")
+        return None, None
+    if isinstance(raw, str) and raw.lstrip("-").isdigit():
+        raw = int(raw)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise VideoRequestError("split must be an integer", "split")
+    if raw < 1:
+        raise VideoRequestError(f"split must be at least 1, got {raw}", "split")
+    overlap = body.get("overlap", 1)
+    if isinstance(overlap, str) and overlap.lstrip("-").isdigit():
+        overlap = int(overlap)
+    if isinstance(overlap, bool) or not isinstance(overlap, int):
+        raise VideoRequestError("overlap must be an integer", "overlap")
+    if overlap < 1:
+        raise VideoRequestError(f"overlap must be at least 1, got {overlap}", "overlap")
+    return raw, overlap
+
+
 def _image_bytes(body: dict[str, Any]) -> bytes:
     ref = body.get("input_reference", body.get("image"))
+    return _png_bytes(ref, "input_reference")
+
+
+def _png_bytes(ref: Any, param: str) -> bytes:
     if isinstance(ref, dict):
         url = ref.get("image_url")
         if isinstance(url, dict):
             url = url.get("url")
         ref = url
     if not isinstance(ref, str) or not ref:
-        raise VideoRequestError("input_reference is required", "input_reference")
+        raise VideoRequestError(f"{param} is required", param)
     if ref.startswith("file://"):
         from favlo.local_uri import read_file_uri
 
         try:
             return read_file_uri(ref)
         except (OSError, ValueError) as exc:
-            raise VideoRequestError("input_reference must be a PNG", "input_reference") from exc
-    named = _named_file(ref)
+            raise VideoRequestError(f"{param} must be a PNG", param) from exc
+    named = _named_file(ref, param)
     if named is not None:
         return named
     if ref.startswith("data:"):
@@ -290,16 +372,16 @@ def _image_bytes(body: dict[str, Any]) -> bytes:
     try:
         return base64.b64decode(ref)
     except (ValueError, TypeError) as exc:
-        raise VideoRequestError("input_reference must be a PNG", "input_reference") from exc
+        raise VideoRequestError(f"{param} must be a PNG", param) from exc
 
 
-def _named_file(value: str) -> bytes | None:
+def _named_file(value: str, param: str) -> bytes | None:
     from favlo.media_name import MissingMediaFile, read_plain_filename
 
     try:
         return read_plain_filename(value)
     except MissingMediaFile as exc:
-        raise VideoRequestError(str(exc), "input_reference") from exc
+        raise VideoRequestError(str(exc), param) from exc
 
 
 def _frames(body: dict[str, Any]) -> int:

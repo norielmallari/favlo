@@ -238,11 +238,108 @@ def promote_count(layers: int, percent: int = PROMOTE_PERCENT) -> int:
     return (percent * layers) // 100
 
 
-def mask_latent(frames: int) -> np.ndarray:
-    """Four mask channels. The first latent time is the condition frame."""
+def mask_latent(frames: int, *, end: bool = False) -> np.ndarray:
+    """Four mask channels. The first latent time is the condition frame.
+
+    ``end`` marks the last pixel as well. The first pixel is repeated four
+    times, then the rest of the pixels are grouped by four. The last group
+    of an ended clip is ``[0, 0, 0, 1]``.
+    """
     lat_t = 1 + (frames - 1) // 4
-    first = np.ones(4, dtype=np.float32)
-    rest = np.zeros(frames - 1, dtype=np.float32)
-    packed = np.concatenate((first, rest))
+    pixel = np.zeros(frames, dtype=np.float32)
+    pixel[0] = np.float32(1)
+    if end:
+        pixel[-1] = np.float32(1)
+    packed = np.concatenate((np.ones(4, dtype=np.float32), pixel[1:]))
     time_major = packed.reshape(lat_t, 4)
     return np.transpose(time_major, (1, 0))
+
+
+def apply_split(
+    frames: int, split: int | None, overlap: int = 1
+) -> tuple[int, int | None]:
+    """Return ``(frames, context)`` for ``split`` calls that share ``overlap`` latents.
+
+    ``None`` and ``1`` keep every frame and return no window. A larger split
+    shortens the clip until the latent length lands exactly, then returns the
+    window length in ``4n+1`` pixel frames. ``overlap`` defaults to 1.
+    """
+    if split is None or split == 1:
+        return frames, None
+    if split < 1:
+        message = f"split must be at least 1, got {split}"
+        raise ValueError(message)
+    if overlap < 1:
+        message = f"overlap must be at least 1, got {overlap}"
+        raise ValueError(message)
+    lat = 1 + (frames - 1) // 4
+    min_lat = split + overlap
+    if lat < min_lat:
+        need = 1 + 4 * (min_lat - 1)
+        message = (
+            f"split {split} with overlap {overlap} needs at least {need} frames, "
+            f"got {frames}"
+        )
+        raise ValueError(message)
+    while lat >= min_lat:
+        if (lat - overlap) % split == 0:
+            win = (lat + (split - 1) * overlap) // split
+            if win > overlap:
+                context = 1 + (win - 1) * 4
+                plan = latent_windows(lat, context, overlap)
+                if plan is not None and len(plan[1]) == split:
+                    return 1 + (lat - 1) * 4, context
+        lat -= 1
+    message = f"split {split} with overlap {overlap} does not land on the clip"
+    raise ValueError(message)
+
+
+def windows(lat: int, win: int, overlap: int) -> list[int]:
+    """Latent starts that cover ``lat`` frames with a window of ``win`` and ``overlap`` shared."""
+    if win < 2 or win > lat:
+        message = f"a window must fit in the clip, got {win} of {lat}"
+        raise ValueError(message)
+    if overlap < 1 or overlap >= win:
+        message = f"overlap must be from 1 to {win - 1}, got {overlap}"
+        raise ValueError(message)
+    stride = win - overlap
+    starts: list[int] = []
+    start = 0
+    while start + win <= lat:
+        starts.append(start)
+        start += stride
+    last = lat - win
+    if starts[-1] != last:
+        starts.append(last)
+    return starts
+
+
+def latent_windows(lat: int, context: int | None, overlap: int) -> tuple[int, list[int]] | None:
+    """``(window, starts)`` when ``context`` splits the clip. One call returns ``None``."""
+    if context is None:
+        return None
+    win = 1 + (context - 1) // 4
+    if win >= lat:
+        return None
+    return win, windows(lat, win, overlap)
+
+
+def window_weights(length: int, head: int, tail: int) -> np.ndarray:
+    """Ramp across the real overlap. Each shared frame keeps a positive weight.
+
+    The frame at the outer edge of an overlap of ``n`` weighs ``1 / (n + 1)``,
+    and the neighbor carries the rest, so the pair sums to 1. An overlap of 1
+    is a half-and-half blend of that one latent frame.
+    """
+    weights = np.ones(length, dtype=np.float32)
+    if head > 0:
+        span = np.float32(head + 1)
+        for index in range(head):
+            weights[index] = np.float32(index + 1) / span
+    if tail > 0:
+        span = np.float32(tail + 1)
+        for distance in range(tail):
+            slot = length - 1 - distance
+            share = np.float32(distance + 1) / span
+            weights[slot] = np.float32(min(float(weights[slot]), float(share)))
+    return weights

@@ -159,12 +159,15 @@ Accepted sizes are:
 Both edges are multiples of 16.
 
 - The image is the first pixel frame.
-- A still that is not the clip size is resized to that size.
-- The other frames are zeros.
+- `last_image` is the last pixel frame. Both stills are resized to the clip size.
+- The frames between them are zeros. The mask marks that last pixel only, so the last latent group is `[0, 0, 0, 1]`.
+- Five frames leaves one latent step between the stills. The 4-step record is built for 81 frames.
+- A clip with no last still leaves those frames, including the last one, at zero.
 
 `Wan2.1_VAE.pth` is the causal encoder and decoder.
 
 - `vae.weights.bin` and `vae.planes.json` beside that file are the float tensors in the order encode and decode upload them, after the reshape the convolution uses.
+- `conv1` and `conv2` are in that span. Encode applies `conv1` after the encoder head. Decode applies `conv2` before the decoder.
 - Serve reads that file into one shared span when both are present and does not unpickle the checkpoint.
 - The span is released with the other VAE device weights.
 - When either file is missing, the loader unpickles `Wan2.1_VAE.pth`.
@@ -179,7 +182,15 @@ Both edges are multiples of 16.
 - The latent the DiT sees is `(μ − mean) / std` with the published 16-channel vectors.
 - The decoder inverts that affine and clamps to `[−1, 1]`.
 - The four mask channels are 1 on the first latent time and 0 after that.
+- A last still marks the last pixel. The first pixel is repeated four times, then the remaining pixels are grouped by four, so the last latent time is `[0, 0, 0, 1]`.
+- That still is written into the last pixel of the causal chunk that contains it. It is not encoded as its own latent and pasted over the last time.
 - The DiT input is 16 noise channels, the four mask channels, then the 16-channel latent.
+- `split` omitted, or `split` 1, is one DiT call per Euler step.
+- A larger `split` shortens the clip until the latent length lands on that many windows. `overlap` latent frames are shared. The default overlap is 1.
+- Each Euler step slices the noise, the mask, and the latent, runs the window, and blends the velocities with a linear ramp. One update follows the blend.
+- The first latent stays on the window that contains it. It is not copied into later windows.
+- RoPE starts at 0 on each window, because the grid is the window.
+- DiT scratch is the window. The noise, the mask, and the condition latent stay the full clip.
 - The head's 64 outputs are one time patch, a 2×2 spatial patch, then the 16 latent channels.
 - Without that file, each 4×8×8 cell is averaged into the latent and the decoder repeats each cell.
 
@@ -275,8 +286,10 @@ uv run favlo media --pipeline wan22_i2v --model Wan2.2-I2V-A14B-int8 --out pack.
 
 - `prompt`, `image` (or `input_reference`), and `size` are required.
 - `image` is a `file://` URI, a base64 PNG, an image id, or a filename in `images`.
+- `last_image` is optional and uses the same forms.
 - `size` is one of the accepted resolutions.
 - `frames` defaults to 81.
+- `split` and `overlap` are optional. `overlap` requires `split`. A field named `context` is rejected.
 - This is the command that writes the clip.
 - The pipeline command does not.
 

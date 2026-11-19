@@ -223,6 +223,8 @@ def iter_vae_planes(
 
     encoder()
     encoder()
+    conv("conv1")
+    conv("conv2")
     decoder()
     decoder()
     return planes
@@ -380,8 +382,13 @@ class WanVAE:
         on_pipeline: Callable[[], None] | None = None,
         on_block: Callable[[], None] | None = None,
         gpu: Gpu | None = None,
+        end: np.ndarray | None = None,
     ) -> Any:
-        """uint8 HWC image to a kept device latent ``[16, T, H, W]``."""
+        """uint8 HWC image to a kept device latent ``[16, T, H, W]``.
+
+        ``end`` is the last pixel of the clip. The causal walk still owns that
+        latent; the still is not encoded on its own and pasted over the last time.
+        """
         height, width = int(image.shape[0]), int(image.shape[1])
         lat_t, lat_h, lat_w, _ = geometry(frames, height, width)
         started = time.perf_counter()
@@ -391,7 +398,7 @@ class WanVAE:
             starts = [0, *range(1, frames, 4)]
             for start in starts:
                 count = 1 if start == 0 else min(4, frames - start)
-                chunk = self._chunk(image, height, width, start, count)
+                chunk = self._chunk(image, height, width, start, count, frames, end)
                 encoded = self._encoder(chunk)
                 self._free(chunk)
                 stats = self._project(encoded, "conv1.weight", "conv1.bias")
@@ -527,12 +534,22 @@ class WanVAE:
         self._own = False
 
     def _chunk(
-        self, image: np.ndarray, height: int, width: int, start: int, count: int
+        self,
+        image: np.ndarray,
+        height: int,
+        width: int,
+        start: int,
+        count: int,
+        frames: int,
+        end: np.ndarray | None,
     ) -> _Vol:
         video = np.zeros((3, count, height, width), dtype=np.float32)
         if start == 0:
             pixels = image.astype(np.float32) / np.float32(127.5) - np.float32(1.0)
             video[:, 0] = np.transpose(pixels, (2, 0, 1))
+        if end is not None and start + count == frames:
+            last = end.astype(np.float32) / np.float32(127.5) - np.float32(1.0)
+            video[:, -1] = np.transpose(last, (2, 0, 1))
         return self._host(video)
 
     def _host(self, array: np.ndarray) -> _Vol:
