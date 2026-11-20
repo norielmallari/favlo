@@ -8,7 +8,7 @@ As-built detail for the `gemma4_26b_a4b` package. [README.md](README.md) is the 
 - Clients reach this pipeline through `favlo serve`.
 - `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/responses` loads it.
 - `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`.
-- That flag loads `gemma4_26b_a4b.metal41`.
+- Windows loads `gemma4_26b_a4b.cuda`. Every other host loads `gemma4_26b_a4b.metal41`.
 
 - The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it).
 - Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license).
@@ -36,6 +36,27 @@ As-built detail for the `gemma4_26b_a4b` package. [README.md](README.md) is the 
 - Decode reads those in `embed_fp8` and `gemv_fp8`, and the routed experts in `gemv_fp4_at` and `gemv_fp8_at`.
 - Prefill restores each dense projection into an int8 stage for the chunk tile.
 - Prefill reads a chunk of 1024 tokens.
+
+## CUDA
+
+Windows serves this pipeline from `pipelines/gemma4_26b_a4b/cuda`. The packed folder is `models/gemma-4-26B-A4B-it-int8-e10`.
+
+- Dense language matrices are int8, one fp32 scale per row.
+- Every routed expert is int4.
+- The expert images sit in one write-combined pinned span. A miss copies from that span on the copy engine.
+- Leftover VRAM is an S3-FIFO of those images. A new image enters the small queue. A second use promotes it. A ghost key that returns enters the main queue.
+- Expert down K is stored as 768. The 64 extra code columns are zero.
+- The hot path is fp16: the residual, the norms, the router product, attention, the cache, and the logits before the soft cap.
+- Weights are dequantized in the kernel. A prefill product is a 64 by 64 tile: 64 columns of the product land in shared memory, then `mma.sync.aligned.m16n8k16` runs with fp16 operands and an fp32 accumulator. Decode is a GEMV with one warp per row. The block converts the activation once into shared memory and every row of that block reuses it.
+- Prefill rotary, the cache store, and attention each launch once for the tile. A query reads keys up to its own position. A local layer keeps the 1024-token window.
+- Decode attention splits that span across the multiprocessors. Each warp keeps its own running score, and one block per head joins those scores.
+- A full 512-token tile and a decode step replay two graphs per layer. The position lives in one device word, so a replay is not tied to the step that recorded it. Routing stays outside the graph. An int4 miss copies on a side stream. The shared projection runs while those copies move, and each expert product waits for its own copy.
+- The text record does not pack the vision tower.
+- With no `--src`, `quantize` reads the Hugging Face snapshot of `google/gemma-4-26B-A4B-it` and leaves that cache in place.
+- `kernels` compiles the step and checks one fp16 product, one int4 nibble, and one pinned copy.
+- Prefill runs a tile of 512 tokens. Each routed expert in that tile is copied once and applied to every token that selected it.
+- The key/value cache opens at 2048 tokens and grows in steps of 2048. A growth that needs the bytes drops int4 slots first.
+- The cache tag is `half`. A stored prefix as long as the prompt is not sampled again.
 
 ## Registry
 

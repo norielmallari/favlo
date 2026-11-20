@@ -4,14 +4,16 @@ Summary for the `gemma4_26b_a4b` language pipeline. Kernels, the packed record, 
 
 - `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
 - After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
-- `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`, which loads `gemma4_26b_a4b.metal41`.
+- `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`.
+- Windows loads `gemma4_26b_a4b.cuda`. Every other host loads `gemma4_26b_a4b.metal41`.
 
 - The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it).
 - Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license).
 - A bare `gemma4_26b_a4b` uses the thinking card unless the request names instruct.
 - Registration sets `kv_cache` to `half`.
 - The served window stops at 131072 tokens.
-- The default packed record is `gemma-4-26B-A4B-it-fp8-e20`.
+- The Metal record is `gemma-4-26B-A4B-it-fp8-e20`.
+- The CUDA record is `gemma-4-26B-A4B-it-int8-e10`. Dense matrices are int8. Routed experts are int4.
 - `quantize` does not download.
 
 After changing an open-time registry field, unload the resident model:
@@ -142,6 +144,8 @@ uv run favlo --gemma4_26b_a4b complete
 - [research/coding-agent.md](research/coding-agent.md) — vision coding-agent rates on fp8 keys and values
 - [research/coding-agent-half.md](research/coding-agent-half.md) — vision coding-agent rates on the fp8-e20 pack with half keys and values
 - [research/coding-text.md](research/coding-text.md) — text coding-agent rate
+- [research/coding-text-cuda.md](research/coding-text-cuda.md) — text coding-agent rate on CUDA with int4 experts and half keys and values
 - [research/needle-page.md](research/needle-page.md) — page-needle rate
 - [research/synthetic-prompt.md](research/synthetic-prompt.md) — cold synthetic prompts on fp8 keys and values
 - [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md) — cold 512, 1024, 4096, and 10000-token prompts on the fp8-e20 pack with half keys and values
+- [research/synthetic-prompt-cuda.md](research/synthetic-prompt-cuda.md) — cold 512, 1024, 4096, and 10000-token prompts on CUDA with int4 experts and half keys and values
