@@ -189,13 +189,15 @@ A video client can also call `wan22_i2v__generate_video`.
 - The shortest moving clip is 5 frames.
 - A last still needs at least 5 frames. On this 4-step record, use 81. Five frames is one latent step between the stills, and the middle goes flat.
 - The default step count is 4.
-- `split` is the number of DiT calls inside one Euler step. Omit it, or pass 1, for one call.
-- `overlap` is the shared latent frames. It defaults to 1 when `split` is set.
-- A later chunk copies the finished tail latents into its condition and starts at the low-noise expert from the last of those latents. Each step puts that opening back on the current noise level. Those latents are not decoded or encoded again. A larger overlap passes more of that tail in. The VAE decodes the joined latent once.
+- `split` is how many full denoises the clip is cut into. Omit it, or pass 1, for one denoise of the whole clip.
+- `overlap` is the shared latent frames. It defaults to 1 when `split` is set. `0` places the slices end to end. The last frame of one slice is the opening of the next, so that frame is decoded twice, and those two copies are averaged into one frame.
+- A later chunk is its own full run. Overlap 0 opens it on the previous slice's last frame. A larger overlap opens it on the first shared frame, encoded the same way as a fresh still. Each run is decoded on its own. A larger overlap crossfades the shared frames, and a longer overlap makes that fade longer.
+- `social=true` pads to 1080p, motion-interpolates to 30 fps, and encodes H.264 High for short-form upload. Omit it, or pass false, for the default CRF encode at the AVI size and rate.
 
 ```text
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png last_image=file:///absolute/end.png size=576x320 frames=81 split=2 overlap=1
+uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=720x1280 frames=81 split=2 overlap=0 social=true
 ```
 
 - `favlo media` does not start the listener.

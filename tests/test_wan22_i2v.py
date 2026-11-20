@@ -43,7 +43,7 @@ from wan22_i2v.metal41.source import (
 from wan22_i2v.metal41.text import tokenizer_path
 from wan22_i2v.metal41.umt5_pack import shared_pack_dir
 from wan22_i2v.metal41.vae import vae_path
-from wan22_i2v.metal41.video import avi_meta, write_avi, write_mp4
+from wan22_i2v.metal41.video import avi_meta, social_frame, write_avi, write_mp4
 
 from favlo.media_pipeline import MediaPaused
 
@@ -315,6 +315,38 @@ def test_split_lands_on_a_whole_number_of_windows() -> None:
         covered[start : start + plan[0]] += 1
     assert np.all(covered > 0)
     assert chunk_overlap([0, 10], 11) == 1
+    frames, context = apply_split(81, 2, 0)
+    assert (frames, context) == (77, 37)
+    plan = latent_windows(1 + (frames - 1) // 4, context, 0)
+    assert plan == (10, [0, 10])
+    assert chunk_overlap(plan[1], plan[0]) == 0
+    covered = np.zeros(1 + (frames - 1) // 4, dtype=np.int32)
+    for start in plan[1]:
+        covered[start : start + plan[0]] += 1
+    assert np.all(covered == 1)
+
+
+def test_blend_pair_averages_the_doubled_frame() -> None:
+    from wan22_i2v.metal41.latent import blend_pair
+
+    left = np.zeros((2, 2, 3), dtype=np.uint8)
+    right = np.full((2, 2, 3), 100, dtype=np.uint8)
+    assert np.array_equal(blend_pair(left, right), np.full((2, 2, 3), 50, dtype=np.uint8))
+
+
+def test_crossfade_keeps_the_ends_and_mixes_the_middle() -> None:
+    from wan22_i2v.metal41.latent import crossfade
+    from wan22_i2v.metal41.schedule import overlap_origin
+
+    assert overlap_origin(0) == 0
+    assert overlap_origin(9) == 33
+    assert overlap_origin(10) == 37
+    left = np.zeros((3, 1, 1, 3), dtype=np.uint8)
+    right = np.full((3, 1, 1, 3), 100, dtype=np.uint8)
+    faded = crossfade(left, right)
+    assert np.array_equal(faded[0], left[0])
+    assert np.array_equal(faded[2], right[2])
+    assert np.array_equal(faded[1], np.full((1, 1, 3), 50, dtype=np.uint8))
 
 
 def test_known_opening_stays_on_the_noise_schedule() -> None:
@@ -577,6 +609,7 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
     assert short.steps == 4
     assert short.last_image is None
     assert short.split is None
+    assert short.social is False
     guided = video_fields(
         {
             "prompt": "move",
@@ -613,6 +646,14 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
         assert exc.param == "quality"
     else:
         raise AssertionError("quality was accepted")
+    assert video_fields({**level, "social": True}).social is True
+    assert video_fields({**level, "social": "true"}).social is True
+    try:
+        video_fields({**level, "social": "maybe"})
+    except VideoRequestError as exc:
+        assert exc.param == "social"
+    else:
+        raise AssertionError("social was accepted")
     assert _seconds_label(FIVE_SEC_FRAMES) == "5.0625"
     assert _seconds_label(9) == "0.5625"
 
@@ -633,6 +674,18 @@ def test_video_request_accepts_a_last_still_and_a_split() -> None:
     assert fields.frames == 73
     assert fields.split == 3
     assert fields.overlap == 1
+    abutted = video_fields(
+        {
+            "prompt": "move",
+            "image": encoded,
+            "frames": 81,
+            "size": "576x320",
+            "split": 2,
+            "overlap": 0,
+        }
+    )
+    assert abutted.frames == 77
+    assert abutted.overlap == 0
     assert fields.last_image is not None
     assert fields.last_image.shape == (320, 576, 3)
     described = handle_video.describe(fields)
@@ -722,6 +775,39 @@ def test_max_quality_asks_for_crf_14(tmp_path, monkeypatch) -> None:
     write_mp4(source, "max")
     command = seen["command"]
     assert command[command.index("-crf") + 1] == "14"
+
+
+def test_social_frame_keeps_orientation() -> None:
+    assert social_frame(720, 1280) == (1080, 1920)
+    assert social_frame(1280, 720) == (1920, 1080)
+    assert social_frame(720, 720) == (1080, 1080)
+
+
+def test_social_encode_pads_and_minterpolates(tmp_path, monkeypatch) -> None:
+    frames = np.zeros((3, 32, 16, 3), dtype=np.uint8)
+    source = tmp_path / "social.avi"
+    source.write_bytes(write_avi(frames, fps=16))
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(command, **_kwargs):
+        seen["command"] = list(command)
+        tmp_path.joinpath("social.tmp.mp4").write_bytes(b"mp4")
+
+        class _Result:
+            returncode = 0
+            stderr = b""
+
+        return _Result()
+
+    monkeypatch.setattr("wan22_i2v.metal41.video.subprocess.run", fake_run)
+    write_mp4(source, "high", social=True)
+    command = seen["command"]
+    assert command[command.index("-profile:v") + 1] == "high"
+    assert command[command.index("-b:v") + 1] == "8M"
+    assert command[command.index("-r") + 1] == "30"
+    video_filter = command[command.index("-vf") + 1]
+    assert "pad=1080:1920" in video_filter
+    assert "minterpolate=fps=30" in video_filter
 
 
 def test_two_content_qualities_share_one_avi(tmp_path) -> None:

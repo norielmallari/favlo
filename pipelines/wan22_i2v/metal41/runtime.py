@@ -23,7 +23,7 @@ from favlo.memory import memory
 from wan22_i2v.metal41.dit import Forward, drop_expert, forward_bytes
 from wan22_i2v.metal41.formats import TILE_M, pad_to
 from wan22_i2v.metal41.hold import ClipHold, reload_quietly
-from wan22_i2v.metal41.latent import pin_opening, stride_decode, stride_encode
+from wan22_i2v.metal41.latent import blend_pair, crossfade, stride_decode, stride_encode
 from wan22_i2v.metal41.metal import _NAMES, Gpu
 from wan22_i2v.metal41.png import resize_rgb
 from wan22_i2v.metal41.progress import ClipProgress, clip_label
@@ -50,6 +50,7 @@ from wan22_i2v.metal41.schedule import (
     velocity_walks,
     chunk_overlap,
     commit_span,
+    overlap_origin,
 )
 from wan22_i2v.metal41.text import _LAYERS, encode_prompt, tokenizer_path
 from wan22_i2v.metal41.vae import (
@@ -350,6 +351,7 @@ class Runtime:
                 count = 16 * lat_t * lat_h * lat_w
                 spare_count = 16 * scratch_t * lat_h * lat_w
                 spare = gpu.keep(gpu.empty(spare_count * 4)) if cfg else None
+                self._split_pixels = None
                 if plan is None:
                     loaded = self._denoise_clip(
                         gpu,
@@ -404,6 +406,7 @@ class Runtime:
                         resume,
                         loaded,
                         seed,
+                        vae,
                     )
                 latent = gpu.read_f32(noise, count).reshape(noise_shape)
                 if not np.isfinite(latent).all():
@@ -435,7 +438,11 @@ class Runtime:
                         ),
                     )
 
-                if vae is not None:
+                if self._split_pixels is not None:
+                    pixels = self._split_pixels
+                    if vae is not None:
+                        vae.release_host()
+                elif vae is not None:
                     self._fit_vae_decode(frames, width, height, lat_t, lat_h, lat_w)
                     decode_room = self._ledger_room()
                     pixels = vae.decode(
@@ -751,6 +758,63 @@ class Runtime:
             )
         return loaded
 
+    def _decode_host(
+        self,
+        gpu: Gpu,
+        vae: WanVAE | None,
+        latent: np.ndarray,
+        tokens: int,
+        volume_size: int,
+    ) -> np.ndarray:
+        """Decode one latent volume. The expert is dropped first."""
+        self._release_resident(gpu)
+        gpu.reclaim()
+        shape = tuple(int(v) for v in latent.shape)
+        frames = 1 + (shape[1] - 1) * 4
+        if vae is None:
+            return stride_decode(np.ascontiguousarray(latent), frames)
+        height, width = shape[2] * 8, shape[3] * 8
+        try:
+            self._fit_vae_decode(frames, width, height, shape[1], shape[2], shape[3])
+        except RuntimeError:
+            self._drop_forward()
+            gpu.reclaim()
+            self._fit_vae_decode(frames, width, height, shape[1], shape[2], shape[3])
+        buf = gpu.keep(gpu.upload(np.ascontiguousarray(latent)))
+        try:
+            pixels = vae.decode(buf, shape, gpu=gpu)
+        finally:
+            gpu.drop(buf)
+        if self._forward is None:
+            with objc.autorelease_pool():
+                self._forward = Forward(gpu, self.config, tokens, volume_size)
+        gpu.reclaim()
+        return pixels
+
+    def _encode_opening(
+        self,
+        gpu: Gpu,
+        vae: WanVAE | None,
+        image: np.ndarray,
+        frames: int,
+        tokens: int,
+        volume_size: int,
+    ) -> np.ndarray:
+        """Encode one still as the opening latent of a fresh clip."""
+        self._release_resident(gpu)
+        gpu.reclaim()
+        if vae is None:
+            return stride_encode(image, frames)
+        encoded = vae.encode(image, frames, gpu=gpu)
+        lat_t, lat_h, lat_w, _ = geometry(frames, int(image.shape[0]), int(image.shape[1]))
+        opening = _volume(gpu, encoded, (16, lat_t, lat_h, lat_w))
+        gpu.drop(encoded)
+        if self._forward is None:
+            with objc.autorelease_pool():
+                self._forward = Forward(gpu, self.config, tokens, volume_size)
+        gpu.reclaim()
+        return opening
+
     def _continue_chunks(
         self,
         gpu: Gpu,
@@ -778,12 +842,15 @@ class Runtime:
         resume: int,
         loaded: str | None,
         seed: int,
+        vae: WanVAE | None,
     ) -> str | None:
-        """Denoise one chunk to the end, then start the next from its tail.
+        """Run each chunk end to end. The next chunk opens on one frame of the previous slice.
 
-        The finished tail latents are the next chunk's condition. A later
-        chunk starts at the low-noise expert from the last of those latents.
-        They are not decoded. The joined latent is decoded once.
+        Overlap 0 uses the previous slice's last frame. A larger overlap uses
+        the first shared frame. That frame is encoded with the same still
+        encode as a fresh clip. Each run is decoded on its own. Overlap 0
+        averages the two copies of the boundary frame. A larger overlap
+        crossfades the shared frames.
         """
         if hold is not None and hold.seed_noise is not None:
             seed_host = hold.seed_noise
@@ -793,48 +860,53 @@ class Runtime:
             seed_host = None
         cond_host = _volume(gpu, cond, noise_shape)
         mask_host = _volume(gpu, mask, mask_shape)
+        tokens = forward.tokens
+        volume_size = 36 * win * lat_h * lat_w
+        chunk_frames = 1 + (win - 1) * 4
         share = chunk_overlap(starts, win)
         n_steps = len(times) - 1
+        opening_latent: np.ndarray | None = None
+        head_pixels: np.ndarray | None = None
+        shown: np.ndarray | None = None
+        kept: list[np.ndarray] = []
+        pending: np.ndarray | None = None
         for chunk, start in enumerate(starts):
             base = chunk * n_steps
             if resume >= base + n_steps:
                 continue
             local = max(0, resume - base)
+            continued = start != 0
             prefix = 0 if start == 0 else share
             if local > 0:
                 if hold is None or hold.chunk_noise is None:
                     message = "the paused chunk is missing its latent"
                     raise RuntimeError(message)
                 work_host = hold.chunk_noise
+            elif continued:
+                work_host = np.random.default_rng(seed + start).standard_normal(
+                    (noise_shape[0], win, lat_h, lat_w)
+                ).astype(np.float32)
             elif seed_host is not None:
                 work_host = np.array(seed_host[:, start : start + win], copy=True)
             else:
                 work_host = np.random.default_rng(seed + start).standard_normal(
                     (noise_shape[0], win, lat_h, lat_w)
                 ).astype(np.float32)
-            work_mask = np.array(mask_host[:, start : start + win], copy=True)
-            work_cond = np.array(cond_host[:, start : start + win], copy=True)
-            if prefix:
-                assembled = _volume(gpu, noise, noise_shape)
-                # The tail stays the latents produced at these positions.
-                work_cond[:, :prefix] = assembled[:, start : start + prefix]
-                work_mask[:, :prefix] = np.float32(1)
-                if seed_host is not None:
-                    prefix_noise = np.array(seed_host[:, start : start + prefix], copy=True)
-                else:
-                    prefix_noise = np.array(work_host[:, :prefix], copy=True)
-                low_at = 0
-                for step_index, step_time in enumerate(times[:-1]):
-                    if float(step_time) < boundary:
-                        low_at = step_index
-                        break
-                sigma = np.float32(knots[low_at])
-                last = work_cond[:, prefix - 1 : prefix]
-                carried = np.repeat(last, win, axis=1)
-                work_host = (np.float32(1.0) - sigma) * carried + sigma * work_host
-                local = max(local, low_at)
+            if continued:
+                if opening_latent is None:
+                    message = "the next chunk is missing its opening frame"
+                    raise RuntimeError(message)
+                if opening_latent.shape != (noise_shape[0], win, lat_h, lat_w):
+                    message = (
+                        f"the opening encode is {opening_latent.shape}, "
+                        f"expected {(noise_shape[0], win, lat_h, lat_w)}"
+                    )
+                    raise RuntimeError(message)
+                work_cond = np.array(opening_latent, copy=True)
+                work_mask = mask_latent(chunk_frames)
             else:
-                prefix_noise = None
+                work_mask = np.array(mask_host[:, start : start + win], copy=True)
+                work_cond = np.array(cond_host[:, start : start + win], copy=True)
             work_shape = (noise_shape[0], win, lat_h, lat_w)
             work_count = int(np.prod(work_shape))
             work = gpu.keep(gpu.upload(np.ascontiguousarray(work_host)))
@@ -844,15 +916,6 @@ class Runtime:
                 for index, timestep in enumerate(times[:-1]):
                     if index < local:
                         continue
-                    if prefix:
-                        self._pin_prefix(
-                            gpu,
-                            work,
-                            work_shape,
-                            work_cond[:, :prefix],
-                            prefix_noise,
-                            float(knots[index]),
-                        )
                     loaded = self._euler(
                         gpu,
                         forward,
@@ -886,15 +949,6 @@ class Runtime:
                         seed_host,
                         f"chunk {chunk} step {index}",
                     )
-                if prefix:
-                    self._pin_prefix(
-                        gpu,
-                        work,
-                        work_shape,
-                        work_cond[:, :prefix],
-                        prefix_noise,
-                        float(knots[-1]),
-                    )
                 done = _volume(gpu, work, work_shape)
             finally:
                 gpu.drop(work)
@@ -904,21 +958,60 @@ class Runtime:
             assembled = _volume(gpu, noise, noise_shape)
             assembled[:, write_at : write_at + owned] = done[:, win - owned :]
             gpu.store_f32(noise, np.ascontiguousarray(assembled))
+            if chunk + 1 < len(starts):
+                nxt = starts[chunk + 1]
+                if share == 0:
+                    shown = self._decode_host(
+                        gpu, vae, np.array(done, copy=True), tokens, volume_size
+                    )
+                    forward = self._forward
+                    loaded = None
+                    if pending is not None:
+                        kept.append(blend_pair(pending, shown[0])[None, ...])
+                        if int(shown.shape[0]) > 2:
+                            kept.append(np.array(shown[1:-1], copy=True))
+                    else:
+                        kept.append(np.array(shown[:-1], copy=True))
+                    pending = np.ascontiguousarray(shown[-1])
+                    opening_latent = self._encode_opening(
+                        gpu, vae, pending, chunk_frames, tokens, volume_size
+                    )
+                else:
+                    shown = self._decode_host(
+                        gpu,
+                        vae,
+                        np.ascontiguousarray(assembled[:, : start + win]),
+                        tokens,
+                        volume_size,
+                    )
+                    forward = self._forward
+                    loaded = None
+                    origin = overlap_origin(nxt)
+                    head_pixels = shown[:origin]
+                    opening_latent = self._encode_opening(
+                        gpu, vae, shown[origin], chunk_frames, tokens, volume_size
+                    )
+                forward = self._forward
+            elif continued and (pending is not None or head_pixels is not None):
+                second = self._decode_host(gpu, vae, np.array(done, copy=True), tokens, volume_size)
+                forward = self._forward
+                loaded = None
+                if share == 0:
+                    if pending is None:
+                        message = "the next slice is missing the doubled frame"
+                        raise RuntimeError(message)
+                    mixed = blend_pair(pending, second[0])
+                    self._split_pixels = np.concatenate((*kept, mixed[None, ...], second[1:]), axis=0)
+                else:
+                    if shown is None:
+                        message = "the next slice is missing the previous frames"
+                        raise RuntimeError(message)
+                    overlap = shown.shape[0] - overlap_origin(start)
+                    fade = crossfade(shown[-overlap:], second[:overlap])
+                    self._split_pixels = np.concatenate(
+                        (shown[:-overlap], fade, second[overlap:]), axis=0
+                    )
         return loaded
-
-    def _pin_prefix(
-        self,
-        gpu: Gpu,
-        work: Any,
-        shape: tuple[int, ...],
-        clean: np.ndarray,
-        noise: np.ndarray,
-        sigma: float,
-    ) -> None:
-        """Keep the conditioned latents on this knot. The step cannot repaint them."""
-        current = _volume(gpu, work, shape)
-        current[:, : clean.shape[1]] = pin_opening(sigma, clean, noise)
-        gpu.store_f32(work, np.ascontiguousarray(current))
 
     def _euler(
         self,

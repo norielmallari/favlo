@@ -186,12 +186,13 @@ Both edges are multiples of 16.
 - A last still marks the last pixel. The first pixel is repeated four times, then the remaining pixels are grouped by four, so the last latent time is `[0, 0, 0, 1]`.
 - That still is written into the last pixel of the causal chunk that contains it. It is not encoded as its own latent and pasted over the last time.
 - The DiT input is 16 noise channels, the four mask channels, then the 16-channel latent.
-- `split` omitted, or `split` 1, is one DiT call per Euler step.
-- A larger `split` shortens the clip until that many chunks tile it. `overlap` is the finished tail passed into the next chunk. The default overlap is 1.
+- `split` omitted, or `split` 1, denoises the whole clip once.
+- A larger `split` shortens the clip until that many chunks tile it. `overlap` is how many latent frames the chunks share. The default is 1. `0` places the chunks end to end.
 - Each chunk runs every Euler step before the next chunk starts.
 - The first chunk is conditioned on the still. Its sample is noise on every frame, including the conditioned one.
-- A later chunk copies the finished tail latents into its condition. It starts at the low-noise expert, from the last of those latents, and each step puts that opening back on the current noise level. Those latents are not decoded or encoded again.
-- The new latents are written after the tail. The tail stays the frame the earlier chunk produced. The VAE decodes the joined latent once.
+- A later chunk is its own full run. Overlap 0 opens it on the previous slice's last frame. A larger overlap opens it on the first shared frame. That frame is encoded with the same still encode as a fresh clip. Each run is decoded on its own.
+- Overlap 0 averages the two copies of that boundary frame, then keeps the rest of the next run. A larger overlap crossfades the shared frames from the previous run to the next one.
+- The noise buffer still records the latents each chunk owns. The delivered frames come from those separate decodes.
 - DiT scratch is one chunk. The noise, the mask, and the condition latent of the whole clip stay allocated.
 - The head's 64 outputs are one time patch, a 2×2 spatial patch, then the 16 latent channels.
 - Without that file, each 4×8×8 cell is averaged into the latent and the decoder repeats each cell.
@@ -285,6 +286,7 @@ save_registry(data)
 ```text
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5
 uv run favlo media --pipeline wan22_i2v --model Wan2.2-I2V-A14B-int8 --out pack.json prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5
+uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=720x1280 frames=81 split=2 overlap=0 social=true
 ```
 
 - `prompt`, `image` (or `input_reference`), and `size` are required.
@@ -293,6 +295,7 @@ uv run favlo media --pipeline wan22_i2v --model Wan2.2-I2V-A14B-int8 --out pack.
 - `size` is one of the accepted resolutions.
 - `frames` defaults to 81.
 - `split` and `overlap` are optional. `overlap` requires `split`. A field named `context` is rejected.
+- `social` is optional. `true` pads to 1080p, interpolates to 30 fps, and encodes H.264 High for short-form upload.
 - This is the command that writes the clip.
 - The pipeline command does not.
 
@@ -373,6 +376,8 @@ The MP4 stored for the job uses that reported level.
 `resources/read` returns that file.
 
 There is no later call that re-encodes another level.
+
+`social` defaults to false. When true, the pack pads the AVI into the matching 1080p canvas (1080×1920, 1920×1080, or 1080×1080), motion-interpolates to 30 fps (`minterpolate` mci/aobmc), and encodes H.264 High `yuv420p` at about 8 Mbps for `high` (4/6/8/10/12 Mbps across the five reported levels), closed GOP, `+faststart`. That path is for TikTok, Instagram Reels, Facebook Reels, and YouTube Shorts. The AVI size and rate stay the CRF path when `social` is omitted or false.
 
 - `seed` defaults to 0.
 - `negative_prompt` defaults to empty.

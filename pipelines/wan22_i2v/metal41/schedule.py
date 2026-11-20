@@ -263,15 +263,16 @@ def apply_split(
     ``None`` and ``1`` keep every frame and return no window. A larger split
     shortens the clip until the chunks tile it, then returns one chunk's length
     in ``4n+1`` pixel frames. The overlap is the finished tail of one chunk and
-    the conditioned start of the next. ``overlap`` defaults to 1.
+    the conditioned start of the next. ``0`` places the chunks end to end.
+    ``overlap`` defaults to 1.
     """
     if split is None or split == 1:
         return frames, None
     if split < 1:
         message = f"split must be at least 1, got {split}"
         raise ValueError(message)
-    if overlap < 1:
-        message = f"overlap must be at least 1, got {overlap}"
+    if overlap < 0:
+        message = f"overlap must be at least 0, got {overlap}"
         raise ValueError(message)
     lat = 1 + (frames - 1) // 4
     min_lat = split + overlap
@@ -285,7 +286,7 @@ def apply_split(
     while lat >= min_lat:
         if (lat - overlap) % split == 0:
             win = (lat + (split - 1) * overlap) // split
-            if win > overlap:
+            if win > overlap and win >= 2:
                 context = 1 + (win - 1) * 4
                 plan = latent_windows(lat, context, overlap)
                 if plan is not None and len(plan[1]) == split:
@@ -300,8 +301,8 @@ def windows(lat: int, win: int, overlap: int) -> list[int]:
     if win < 2 or win > lat:
         message = f"a window must fit in the clip, got {win} of {lat}"
         raise ValueError(message)
-    if overlap < 1 or overlap >= win:
-        message = f"overlap must be from 1 to {win - 1}, got {overlap}"
+    if overlap < 0 or overlap >= win:
+        message = f"overlap must be from 0 to {win - 1}, got {overlap}"
         raise ValueError(message)
     stride = win - overlap
     starts: list[int] = []
@@ -337,12 +338,19 @@ def handoff_frames(overlap: int) -> int:
     return 1 + (overlap - 1) * 4
 
 
+def overlap_origin(latent_index: int) -> int:
+    """First pixel of a latent. Latent 0 is pixel 0. Later latents are groups of four."""
+    if latent_index <= 0:
+        return 0
+    return 1 + (latent_index - 1) * 4
+
+
 def chunk_overlap(starts: list[int], win: int) -> int:
     """Latent tail one chunk hands to the next. One chunk shares nothing."""
     if len(starts) < 2:
         return 0
     share = win - (starts[1] - starts[0])
-    if share < 1 or share >= win:
+    if share < 0 or share >= win:
         message = f"overlap must sit inside the chunk, got {share} of {win}"
         raise ValueError(message)
     return share

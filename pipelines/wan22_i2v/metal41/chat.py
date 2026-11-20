@@ -50,6 +50,7 @@ class VideoFields(NamedTuple):
     last_image: np.ndarray | None = None
     split: int | None = None
     overlap: int | None = None
+    social: bool = False
 
 
 def handle_chat(
@@ -91,6 +92,8 @@ class Pipeline(BulkMediaPipeline):
         if request.split is not None:
             fields["split"] = request.split
             fields["overlap"] = request.overlap
+        if request.social:
+            fields["social"] = True
         return fields
 
     def identity(self, request: VideoFields) -> tuple[Any, ...]:
@@ -106,6 +109,7 @@ class Pipeline(BulkMediaPipeline):
             _still_mark(request.last_image),
             request.split,
             request.overlap,
+            request.social,
         )
 
     def matches(self, request: VideoFields, identity: Any) -> bool:
@@ -163,7 +167,11 @@ class Pipeline(BulkMediaPipeline):
         progress = call.progress
         if progress is not None:
             progress.stage("mp4")
-        write_mp4(store_source(job["id"], result, home=home), request.quality)
+        write_mp4(
+            store_source(job["id"], result, home=home),
+            request.quality,
+            social=request.social,
+        )
         sweep_videos(table, home=home)
         return None
 
@@ -220,8 +228,15 @@ class Pipeline(BulkMediaPipeline):
                         "guidance_scale": {"description": "Number or [low, high]; default 1."},
                         "steps": {"type": "integer", "description": "Euler 1-40; 0 uses 4."},
                         "last_image": {"description": "Optional end still, same forms as image."},
-                        "split": {"type": "integer", "description": "DiT calls per step. Omit for one."},
-                        "overlap": {"type": "integer", "description": "Shared latent frames. Default 1."},
+                        "split": {"type": "integer", "description": "How many full denoises. Omit for one."},
+                        "overlap": {
+                            "type": "integer",
+                            "description": "Shared latent frames. 0 abuts the slices and averages the doubled boundary frame. Default 1.",
+                        },
+                        "social": {
+                            "type": "boolean",
+                            "description": "Pad to 1080p, 30 fps minterpolate, H.264 High for short-form upload.",
+                        },
                     },
                     "required": ["prompt", "size", "image"],
                 },
@@ -278,7 +293,23 @@ def video_fields(body: dict[str, Any]) -> VideoFields:
         last,
         split,
         overlap,
+        _social(body),
     )
+
+
+def _social(body: dict[str, Any]) -> bool:
+    value = body.get("social")
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off", ""):
+            return False
+    raise VideoRequestError("social must be a boolean", "social")
 
 
 def _quality(body: dict[str, Any]) -> str:
@@ -339,8 +370,8 @@ def _split(body: dict[str, Any]) -> tuple[int | None, int | None]:
         overlap = int(overlap)
     if isinstance(overlap, bool) or not isinstance(overlap, int):
         raise VideoRequestError("overlap must be an integer", "overlap")
-    if overlap < 1:
-        raise VideoRequestError(f"overlap must be at least 1, got {overlap}", "overlap")
+    if overlap < 0:
+        raise VideoRequestError(f"overlap must be at least 0, got {overlap}", "overlap")
     return raw, overlap
 
 

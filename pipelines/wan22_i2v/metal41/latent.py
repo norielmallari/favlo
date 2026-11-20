@@ -65,6 +65,38 @@ def stride_encode_clip(pixels: np.ndarray) -> np.ndarray:
     return (latent - mean) / std
 
 
+def blend_pair(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Average two copies of one frame.
+
+    Overlap 0 uses the last frame of a slice as the opening of the next slice,
+    so that moment is decoded twice. The average is the one frame that remains.
+    """
+    if left.shape != right.shape:
+        message = f"a blend needs two equal frames, got {left.shape} and {right.shape}"
+        raise ValueError(message)
+    mixed = (left.astype(np.float32) + right.astype(np.float32)) * np.float32(0.5)
+    return np.clip(np.rint(mixed), 0, 255).astype(np.uint8)
+
+
+def crossfade(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Linear fade from ``left`` to ``right`` across the shared frames.
+
+    Both clips are already decoded. The first shared frame stays ``left``.
+    The last shared frame is ``right``.
+    """
+    count = int(left.shape[0])
+    if count != int(right.shape[0]):
+        message = f"a crossfade needs two equal spans, got {count} and {right.shape[0]}"
+        raise ValueError(message)
+    if count == 1:
+        return np.array(right, copy=True)
+    out = np.empty(left.shape, dtype=np.float32)
+    for index in range(count):
+        weight = index / (count - 1)
+        out[index] = (1.0 - weight) * left[index] + weight * right[index]
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+
 def pin_opening(sigma: float, clean: np.ndarray, noise: np.ndarray) -> np.ndarray:
     """Known frames at one flow knot: ``(1-σ) clean + σ noise``."""
     level = np.float32(sigma)

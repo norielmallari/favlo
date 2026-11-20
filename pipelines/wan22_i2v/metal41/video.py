@@ -1,11 +1,26 @@
-"""Uncompressed AVI. The caller passes RGB. The DIB stores bottom-up BGR."""
+"""Uncompressed AVI and the served MP4. The caller passes RGB. The DIB stores bottom-up BGR."""
 
 from __future__ import annotations
 
 import struct
+import subprocess
 from pathlib import Path
 
 import numpy as np
+
+# Shared short-form delivery: TikTok, Instagram Reels, Facebook Reels, YouTube Shorts.
+# TikTok API: MP4/H.264, 23–60 fps, 360–4096 px. Practical 1080×1920 @ 30 fps ~8–10 Mbps.
+# Instagram Graph API: H.264/HEVC, closed GOP, 4:2:0, 23–60 fps, 9:16 recommended, ≤25 Mbps.
+# Facebook Reels API: 1080×1920 recommended, 24–60 fps, H.264, closed GOP 2–5 s, AAC 48 kHz.
+# YouTube: H.264 High, progressive, closed GOP, 1080p SDR ~8 Mbps at 24–30 fps.
+_SOCIAL_FPS = 30
+_SOCIAL_BITRATE = {
+    "low": "4M",
+    "medium": "6M",
+    "high": "8M",
+    "xhigh": "10M",
+    "max": "12M",
+}
 
 
 def write_avi(frames: np.ndarray, fps: int = 16) -> bytes:
@@ -68,11 +83,109 @@ def write_avi(frames: np.ndarray, fps: int = 16) -> bytes:
     return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
-def write_mp4(source: Path, quality: str = "high") -> Path:
-    """H.264 MP4 beside one saved AVI. The served file is the MP4."""
+def social_frame(width: int, height: int) -> tuple[int, int]:
+    """1080p canvas that keeps the AVI orientation."""
+    if width < 1 or height < 1:
+        message = f"AVI size must be positive, got {width}x{height}"
+        raise ValueError(message)
+    if height > width:
+        return 1080, 1920
+    if width > height:
+        return 1920, 1080
+    return 1080, 1080
+
+
+def write_mp4(source: Path, quality: str = "high", *, social: bool = False) -> Path:
+    """H.264 MP4 beside one saved AVI. The served file is the MP4.
+
+    ``social`` pads into the matching 1080p frame, motion-interpolates to 30 fps,
+    and encodes H.264 High for TikTok, Instagram Reels, Facebook Reels, and
+    YouTube Shorts. Otherwise the shared CRF encode keeps the AVI size and rate.
+    """
+    if social:
+        return _write_social_mp4(source, quality)
     from favlo.videos import encode_mp4
 
     return encode_mp4(source, quality)
+
+
+def _write_social_mp4(source: Path, quality: str) -> Path:
+    from favlo.videos import reported_quality
+
+    _count, width, height = avi_meta(_avi_head(source))
+    out_w, out_h = social_frame(width, height)
+    level = reported_quality(quality)
+    bitrate = _SOCIAL_BITRATE[level]
+    target = source.with_suffix(".mp4")
+    temporary = target.with_name(target.stem + ".tmp.mp4")
+    video_filter = (
+        f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease:"
+        f"flags=lanczos,"
+        f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,"
+        f"setsar=1,"
+        f"minterpolate=fps={_SOCIAL_FPS}:mi_mode=mci:mc_mode=aobmc:"
+        f"me_mode=bidir:vsbmc=1"
+    )
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-an",
+            "-vf",
+            video_filter,
+            "-r",
+            str(_SOCIAL_FPS),
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.1",
+            "-pix_fmt",
+            "yuv420p",
+            "-b:v",
+            bitrate,
+            "-maxrate",
+            bitrate,
+            "-bufsize",
+            "16M",
+            "-g",
+            str(_SOCIAL_FPS * 2),
+            "-keyint_min",
+            str(_SOCIAL_FPS * 2),
+            "-sc_threshold",
+            "0",
+            "-bf",
+            "2",
+            "-movflags",
+            "+faststart",
+            str(temporary),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0 or not temporary.is_file():
+        temporary.unlink(missing_ok=True)
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        message = detail or "ffmpeg failed"
+        raise RuntimeError(message)
+    temporary.replace(target)
+    return target
+
+
+def _avi_head(path: Path) -> bytes:
+    """Enough of the AVI for ``avi_meta`` without reading every frame."""
+    with path.open("rb") as handle:
+        head = handle.read(1 << 20)
+    if len(head) < 12:
+        message = "AVI signature is missing"
+        raise ValueError(message)
+    return head
 
 
 def avi_meta(blob: bytes) -> tuple[int, int, int]:
