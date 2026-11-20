@@ -191,6 +191,7 @@ A video client can also call `wan22_i2v__generate_video`.
 - The default step count is 4.
 - `split` is the number of DiT calls inside one Euler step. Omit it, or pass 1, for one call.
 - `overlap` is the shared latent frames. It defaults to 1 when `split` is set.
+- A later chunk copies the finished tail latents into its condition and starts at the low-noise expert from the last of those latents. Each step puts that opening back on the current noise level. Those latents are not decoded or encoded again. A larger overlap passes more of that tail in. The VAE decodes the joined latent once.
 
 ```text
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5

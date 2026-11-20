@@ -485,6 +485,7 @@ kernel void rope3d(
     constant uint& axis_h [[buffer(8)]],
     constant uint& axis_w [[buffer(9)]],
     constant float& theta [[buffer(10)]],
+    constant uint* time_index [[buffer(11)]],
     uint token [[threadgroup_position_in_grid]],
     uint lane [[thread_position_in_threadgroup]])
 {
@@ -507,7 +508,7 @@ kernel void rope3d(
         uint axis;
         uint local;
         if (d < axis_t) {
-            pos = float(t);
+            pos = float(time_index[t]);
             axis = axis_t;
             local = d;
         } else if (d < axis_t + axis_h) {

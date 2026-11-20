@@ -38,6 +38,57 @@ def stride_encode(
     return (latent - mean) / std
 
 
+def stride_encode_clip(pixels: np.ndarray) -> np.ndarray:
+    """uint8 ``[frames, height, width, 3]`` to the 16-channel latent.
+
+    ``frames`` is ``4n+1``. Latent 0 is the first pixel only. Each later latent
+    is the next four pixels. This is the stride stand-in for a causal re-encode.
+    """
+    frames, height, width = (int(pixels.shape[0]), int(pixels.shape[1]), int(pixels.shape[2]))
+    if frames < 1 or (frames - 1) % 4:
+        message = f"a clip encode needs 4n+1 frames, got {frames}"
+        raise ValueError(message)
+    lat_t, lat_h, lat_w, _ = geometry(frames, height, width)
+    values = pixels.astype(np.float32) / np.float32(127.5) - np.float32(1.0)
+    video = np.transpose(values, (3, 0, 1, 2))
+    latent = np.zeros((16, lat_t, lat_h, lat_w), dtype=np.float32)
+    for time in range(lat_t):
+        if time == 0:
+            chunk = video[:, :1]
+        else:
+            start = 1 + 4 * (time - 1)
+            chunk = video[:, start : start + 4]
+        pooled = chunk.reshape(3, chunk.shape[1], lat_h, 8, lat_w, 8).mean(axis=(1, 3, 5))
+        latent[:3, time] = pooled
+    mean = LATENT_MEAN[:, None, None, None]
+    std = LATENT_STD[:, None, None, None]
+    return (latent - mean) / std
+
+
+def pin_opening(sigma: float, clean: np.ndarray, noise: np.ndarray) -> np.ndarray:
+    """Known frames at one flow knot: ``(1-σ) clean + σ noise``."""
+    level = np.float32(sigma)
+    return (np.float32(1.0) - level) * clean + level * noise
+
+
+def match_opening_color(pixels: np.ndarray) -> np.ndarray:
+    """Give every later frame the first frame's per-channel mean and spread."""
+    if int(pixels.shape[0]) < 2:
+        return pixels
+    ref = pixels[0].astype(np.float32)
+    ref_mean = ref.mean(axis=(0, 1))
+    ref_std = ref.std(axis=(0, 1))
+    matched = np.empty_like(pixels)
+    matched[0] = pixels[0]
+    for index in range(1, int(pixels.shape[0])):
+        frame = pixels[index].astype(np.float32)
+        mean = frame.mean(axis=(0, 1))
+        std = np.maximum(frame.std(axis=(0, 1)), np.float32(1.0e-6))
+        scaled = (frame - mean) / std * ref_std + ref_mean
+        matched[index] = np.clip(np.rint(scaled), 0, 255).astype(np.uint8)
+    return matched
+
+
 def stride_decode(latent: np.ndarray, frames: int) -> np.ndarray:
     """16-channel latent to uint8 ``[frames, height, width, 3]``."""
     restored = latent * LATENT_STD[:, None, None, None] + LATENT_MEAN[:, None, None, None]

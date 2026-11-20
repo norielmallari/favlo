@@ -231,15 +231,20 @@ class Forward:
         timestep: float,
         grid: tuple[int, int, int],
         on_layer: Callable[[], None] | None = None,
+        frame_times: list[int] | None = None,
     ) -> None:
         """Predict the flow velocity into ``vel``. ``prepare`` filled the volume."""
         patch_grid = (grid[0], grid[1] // 2, grid[2] // 2)
+        seq = patch_grid[0] * patch_grid[1] * patch_grid[2]
+        if seq > self.tokens:
+            message = f"the window is {seq} tokens and the scratch holds {self.tokens}"
+            raise RuntimeError(message)
         self._text(resident, embed)
         self._time(resident, timestep)
         self._patch(resident, grid)
         self.gpu.commit()
         for layer in range(int(self.config["layers"])):
-            self._block(resident, layer, patch_grid)
+            self._block(resident, layer, patch_grid, seq, frame_times)
             self.gpu.commit()
             if on_layer is not None:
                 on_layer()
@@ -293,12 +298,19 @@ class Forward:
             self.dim,
         )
 
-    def _block(self, resident: Resident, layer: int, grid: tuple[int, int, int]) -> None:
+    def _block(
+        self,
+        resident: Resident,
+        layer: int,
+        grid: tuple[int, int, int],
+        seq: int,
+        frame_times: list[int] | None,
+    ) -> None:
         prefix = f"blocks.{layer}"
         self.gpu.add_half(
             self.wide, resident.halves[f"{prefix}.modulation"], self.mixed, 6 * self.dim
         )
-        self._self_attn(resident, prefix, grid)
+        self._self_attn(resident, prefix, grid, seq, frame_times)
         self.gpu.layernorm_affine(
             self.x,
             resident.halves[f"{prefix}.norm3.weight"],
@@ -308,7 +320,7 @@ class Forward:
             self.dim,
             self.eps,
         )
-        self._cross(resident, prefix)
+        self._cross(resident, prefix, seq)
         self.gpu.layernorm(self.x, self.nrm, self.rows, self.dim, self.eps)
         self._bind(3, 4)
         self.gpu.modulate(self.nrm, self.shift, self.scale, self.rows, self.dim, self.dim)
@@ -320,7 +332,14 @@ class Forward:
         self._bind_gate(5)
         self.gpu.gate(self.x, self.nrm, self.gate, self.rows, self.dim, self.dim)
 
-    def _self_attn(self, resident: Resident, prefix: str, grid: tuple[int, int, int]) -> None:
+    def _self_attn(
+        self,
+        resident: Resident,
+        prefix: str,
+        grid: tuple[int, int, int],
+        seq: int,
+        frame_times: list[int] | None,
+    ) -> None:
         self.gpu.layernorm(self.x, self.nrm, self.rows, self.dim, self.eps)
         self._bind(0, 1)
         self.gpu.modulate(self.nrm, self.shift, self.scale, self.rows, self.dim, self.dim)
@@ -330,16 +349,20 @@ class Forward:
         self._linear(self.nrm, self.dim, self.rows, f"{stem}.v.weight", self.nrm, resident)
         self._rms(self.q, resident.halves[f"{stem}.norm_q.weight"], self.rows)
         self._rms(self.k, resident.halves[f"{stem}.norm_k.weight"], self.rows)
-        self.gpu.rope(self.q, self.tokens, self.heads, self.head_dim, grid, self.axes)
-        self.gpu.rope(self.k, self.tokens, self.heads, self.head_dim, grid, self.axes)
+        self.gpu.rope(
+            self.q, seq, self.heads, self.head_dim, grid, self.axes, frame_times
+        )
+        self.gpu.rope(
+            self.k, seq, self.heads, self.head_dim, grid, self.axes, frame_times
+        )
         self.gpu.attend(
-            self.q, self.k, self.nrm, self.attn, self.tokens, self.tokens, self.heads, self.head_dim
+            self.q, self.k, self.nrm, self.attn, seq, seq, self.heads, self.head_dim
         )
         self._linear(self.attn, self.dim, self.rows, f"{stem}.o.weight", self.nrm, resident)
         self._bind_gate(2)
         self.gpu.gate(self.x, self.nrm, self.gate, self.rows, self.dim, self.dim)
 
-    def _cross(self, resident: Resident, prefix: str) -> None:
+    def _cross(self, resident: Resident, prefix: str, seq: int) -> None:
         stem = f"{prefix}.cross_attn"
         self._linear(self.nrm, self.dim, self.rows, f"{stem}.q.weight", self.q, resident)
         self._rms(self.q, resident.halves[f"{stem}.norm_q.weight"], self.rows)
@@ -351,7 +374,7 @@ class Forward:
             self.k,
             self.nrm,
             self.attn,
-            self.tokens,
+            seq,
             self.text_len,
             self.heads,
             self.head_dim,

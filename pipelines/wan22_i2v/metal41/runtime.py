@@ -23,7 +23,7 @@ from favlo.memory import memory
 from wan22_i2v.metal41.dit import Forward, drop_expert, forward_bytes
 from wan22_i2v.metal41.formats import TILE_M, pad_to
 from wan22_i2v.metal41.hold import ClipHold, reload_quietly
-from wan22_i2v.metal41.latent import stride_decode, stride_encode
+from wan22_i2v.metal41.latent import pin_opening, stride_decode, stride_encode
 from wan22_i2v.metal41.metal import _NAMES, Gpu
 from wan22_i2v.metal41.png import resize_rgb
 from wan22_i2v.metal41.progress import ClipProgress, clip_label
@@ -48,14 +48,17 @@ from wan22_i2v.metal41.schedule import (
     sigmas,
     timesteps,
     velocity_walks,
-    window_weights,
+    chunk_overlap,
+    commit_span,
 )
 from wan22_i2v.metal41.text import _LAYERS, encode_prompt, tokenizer_path
 from wan22_i2v.metal41.vae import (
     DECODER_BLOCKS,
     ENCODER_BLOCKS,
     WanVAE,
+    activation_extent,
     encode_peak_bytes,
+    tile_count,
     vae_device_bytes,
     vae_path,
     vae_present,
@@ -193,14 +196,19 @@ class Runtime:
                 console=self.console,
                 clip=clip_label(width, height, frames, int(self.config["fps"])),
             )
+        walks = velocity_walks(times, low, high, boundary)
+        expert_loads = _loads(times, boundary)
+        if plan is not None:
+            walks *= n_windows
+            expert_loads *= n_windows
         progress.open(
             text_layers=text_layers,
             pipelines=len(_NAMES),
-            loads=_loads(times, boundary),
-            steps=velocity_walks(times, low, high, boundary),
-            encode_blocks=lat_t * ENCODER_BLOCKS if vae_file else 0,
-            decode_blocks=lat_t * DECODER_BLOCKS if vae_file else 0,
-            dit_layers=layers * n_windows,
+            loads=expert_loads,
+            steps=walks,
+            encode_blocks=lat_t * ENCODER_BLOCKS * tile_count(height, width) if vae_file else 0,
+            decode_blocks=lat_t * DECODER_BLOCKS * tile_count(height, width) if vae_file else 0,
+            dit_layers=layers,
             files=len(linear_names(layers)) + len(half_names(layers)),
         )
         hold = getattr(progress, "hold", None)
@@ -331,149 +339,71 @@ class Runtime:
                 gpu.reclaim()
                 knots = sigmas(steps)
                 loaded: str | None = None
-                start = hold.step if hold is not None and hold.stage == "step" else 0
+                resume = hold.step if hold is not None and hold.stage == "step" else 0
                 self._fit_dit_step(
                     frames, width, height, lat_t, lat_h, lat_w, tokens, scratch_t
                 )
                 with objc.autorelease_pool():
                     volume_size = int(np.prod((36, scratch_t, lat_h, lat_w)))
                     self._forward = Forward(gpu, self.config, tokens, volume_size)
+                forward = self._forward
                 count = 16 * lat_t * lat_h * lat_w
                 spare_count = 16 * scratch_t * lat_h * lat_w
                 spare = gpu.keep(gpu.empty(spare_count * 4)) if cfg else None
-                for index, timestep in enumerate(times[:-1]):
-                    if index < start:
-                        continue
-                    name = expert_name(float(timestep), boundary)
-                    if loaded != name:
-                        self._release_resident(gpu)
-                        self._fit_dit_step(
-                            frames, width, height, lat_t, lat_h, lat_w, tokens, scratch_t
-                        )
-                        if reload_quietly(hold, name, index):
-                            progress.counting(False)
-                        else:
-                            progress.stage("load")
-                        self._use(
-                            name,
-                            progress.advance,
-                            self._load_stop(
-                                progress,
-                                index,
-                                name,
-                                table,
-                                table_null,
-                                noise,
-                                cond,
-                                mask,
-                                noise_shape,
-                                mask_shape,
-                                step_times,
-                                gpu,
-                                quiet=reload_quietly(hold, name, index),
-                            ),
-                        )
-                        progress.counting(True)
-                        loaded = name
-                    progress.stage(name)
-
-                    def on_layer() -> None:
-                        progress.advance()
-                        if not _stopping(progress):
-                            return
-                        self._pause(
-                            progress,
-                            ClipHold(
-                                stage="step",
-                                step=index,
-                                expert=name,
-                                table=table,
-                                table_null=table_null,
-                                noise=_volume(gpu, noise, noise_shape),
-                                cond=_volume(gpu, cond, noise_shape),
-                                mask=_volume(gpu, mask, mask_shape),
-                                step_times=list(step_times),
-                            ),
-                        )
-
-                    started = time.perf_counter()
-                    with objc.autorelease_pool():
-                        forward = self._forward
-                        if forward is None:
-                            message = "the DiT forward is closed"
-                            raise RuntimeError(message)
-                        if plan is None:
-                            forward.prepare(noise, mask, cond, lat_t, lat_h, lat_w)
-                            forward.velocity(
-                                self._resident,
-                                table,
-                                float(timestep),
-                                (lat_t, lat_h, lat_w),
-                                on_layer=on_layer,
-                            )
-                            scale = guide_scale(float(timestep), low, high, boundary)
-                            if scale != 1.0:
-                                if table_null is None or spare is None:
-                                    message = "the negative context is missing"
-                                    raise RuntimeError(message)
-                                gpu.copy_f32(forward.vel, 0, spare, count)
-                                progress.stage(name)
-                                forward.velocity(
-                                    self._resident,
-                                    table_null,
-                                    float(timestep),
-                                    (lat_t, lat_h, lat_w),
-                                    on_layer=on_layer,
-                                )
-                                gpu.axpy(spare, forward.vel, -1.0, count)
-                                gpu.axpy(forward.vel, spare, scale, count)
-                            gpu.axpy(
-                                noise,
-                                forward.vel,
-                                float(knots[index + 1] - knots[index]),
-                                count,
-                            )
-                        else:
-                            self._blend_windows(
-                                gpu,
-                                forward,
-                                noise,
-                                noise_shape,
-                                cond,
-                                mask,
-                                mask_shape,
-                                plan[0],
-                                plan[1],
-                                table,
-                                table_null,
-                                float(timestep),
-                                lat_h,
-                                lat_w,
-                                low,
-                                high,
-                                boundary,
-                                spare,
-                                on_layer,
-                                progress,
-                                name,
-                                float(knots[index + 1] - knots[index]),
-                            )
-                    elapsed = time.perf_counter() - started
-                    step_times.append(elapsed)
-                    progress.note(f"step {index} expert {name} {elapsed:.2f}s")
-                    self._pause(
+                if plan is None:
+                    loaded = self._denoise_clip(
+                        gpu,
+                        forward,
+                        noise,
+                        noise_shape,
+                        cond,
+                        mask,
+                        mask_shape,
+                        table,
+                        table_null,
+                        times,
+                        knots,
+                        lat_t,
+                        lat_h,
+                        lat_w,
+                        low,
+                        high,
+                        boundary,
+                        spare,
+                        count,
                         progress,
-                        ClipHold(
-                            stage="step",
-                            step=index + 1,
-                            expert=name,
-                            table=table,
-                            table_null=table_null,
-                            noise=_volume(gpu, noise, noise_shape),
-                            cond=_volume(gpu, cond, noise_shape),
-                            mask=_volume(gpu, mask, mask_shape),
-                            step_times=list(step_times),
-                        ),
+                        step_times,
+                        hold,
+                        resume,
+                        loaded,
+                    )
+                else:
+                    loaded = self._continue_chunks(
+                        gpu,
+                        forward,
+                        noise,
+                        noise_shape,
+                        cond,
+                        mask,
+                        mask_shape,
+                        plan[0],
+                        plan[1],
+                        table,
+                        table_null,
+                        times,
+                        knots,
+                        lat_h,
+                        lat_w,
+                        low,
+                        high,
+                        boundary,
+                        spare,
+                        progress,
+                        step_times,
+                        hold,
+                        resume,
+                        loaded,
+                        seed,
                     )
                 latent = gpu.read_f32(noise, count).reshape(noise_shape)
                 if not np.isfinite(latent).all():
@@ -693,6 +623,9 @@ class Runtime:
         gpu: Gpu,
         *,
         quiet: bool,
+        chunk: Any = None,
+        chunk_shape: tuple[int, ...] | None = None,
+        seed_noise: np.ndarray | None = None,
     ) -> Any:
         """Stop between weight files when a chat needs the device."""
 
@@ -700,6 +633,9 @@ class Runtime:
             del after_file
             if not _stopping(progress):
                 return
+            chunk_noise = None
+            if chunk is not None and chunk_shape is not None:
+                chunk_noise = _volume(gpu, chunk, chunk_shape)
             self._pause(
                 progress,
                 ClipHold(
@@ -712,6 +648,8 @@ class Runtime:
                     cond=_volume(gpu, cond, noise_shape),
                     mask=_volume(gpu, mask, mask_shape),
                     step_times=list(step_times),
+                    chunk_noise=chunk_noise,
+                    seed_noise=seed_noise,
                 ),
             )
 
@@ -747,7 +685,73 @@ class Runtime:
         gc.collect()
 
 
-    def _blend_windows(
+    def _denoise_clip(
+        self,
+        gpu: Gpu,
+        forward: Forward,
+        noise: Any,
+        noise_shape: tuple[int, ...],
+        cond: Any,
+        mask: Any,
+        mask_shape: tuple[int, ...],
+        table: np.ndarray,
+        table_null: np.ndarray | None,
+        times: np.ndarray,
+        knots: np.ndarray,
+        lat_t: int,
+        lat_h: int,
+        lat_w: int,
+        low: float,
+        high: float,
+        boundary: float,
+        spare: Any,
+        count: int,
+        progress: ClipProgress,
+        step_times: list[float],
+        hold: ClipHold | None,
+        resume: int,
+        loaded: str | None,
+    ) -> str | None:
+        """Run every Euler step on the whole clip."""
+        for index, timestep in enumerate(times[:-1]):
+            if index < resume:
+                continue
+            loaded = self._euler(
+                gpu,
+                forward,
+                noise,
+                mask,
+                cond,
+                lat_t,
+                lat_h,
+                lat_w,
+                count,
+                table,
+                table_null,
+                float(timestep),
+                float(knots[index + 1] - knots[index]),
+                low,
+                high,
+                boundary,
+                spare,
+                progress,
+                step_times,
+                hold,
+                index,
+                loaded,
+                noise,
+                noise_shape,
+                cond,
+                mask,
+                mask_shape,
+                None,
+                None,
+                None,
+                f"step {index}",
+            )
+        return loaded
+
+    def _continue_chunks(
         self,
         gpu: Gpu,
         forward: Forward,
@@ -760,110 +764,342 @@ class Runtime:
         starts: list[int],
         table: np.ndarray,
         table_null: np.ndarray | None,
-        timestep: float,
+        times: np.ndarray,
+        knots: np.ndarray,
         lat_h: int,
         lat_w: int,
         low: float,
         high: float,
         boundary: float,
         spare: Any,
-        on_layer: Any,
         progress: ClipProgress,
-        name: str,
-        delta: float,
-    ) -> None:
-        """Run each window, ramp the overlap, and apply one Euler update."""
-        full = int(np.prod(noise_shape))
-        noise_host = gpu.read_f32(noise, full).reshape(noise_shape)
-        cond_host = gpu.read_f32(cond, full).reshape(noise_shape)
-        mask_host = gpu.read_f32(mask, int(np.prod(mask_shape))).reshape(mask_shape)
-        acc_num = np.zeros(noise_shape, dtype=np.float32)
-        acc_den = np.zeros(noise_shape, dtype=np.float32)
-        win_count = int(noise_shape[0]) * win * lat_h * lat_w
-        scale = guide_scale(timestep, low, high, boundary)
-        for index, start in enumerate(starts):
-            head, tail = _pair_overlap(starts, index, win)
-            taken = self._window_velocity(
-                gpu,
-                forward,
-                np.ascontiguousarray(noise_host[:, start : start + win]),
-                np.ascontiguousarray(mask_host[:, start : start + win]),
-                np.ascontiguousarray(cond_host[:, start : start + win]),
-                win,
-                lat_h,
-                lat_w,
-                table,
-                table_null,
-                timestep,
-                scale,
-                spare,
-                win_count,
-                on_layer,
-                progress,
-                name,
-            )
-            weights = window_weights(win, head, tail)
-            span = slice(start, start + win)
-            acc_num[:, span] += taken * weights[None, :, None, None]
-            acc_den[:, span] += weights[None, :, None, None]
-        blended = acc_num / acc_den
-        noise_host = noise_host + blended * np.float32(delta)
-        gpu.store_f32(noise, np.ascontiguousarray(noise_host))
+        step_times: list[float],
+        hold: ClipHold | None,
+        resume: int,
+        loaded: str | None,
+        seed: int,
+    ) -> str | None:
+        """Denoise one chunk to the end, then start the next from its tail.
 
-    def _window_velocity(
+        The finished tail latents are the next chunk's condition. A later
+        chunk starts at the low-noise expert from the last of those latents.
+        They are not decoded. The joined latent is decoded once.
+        """
+        if hold is not None and hold.seed_noise is not None:
+            seed_host = hold.seed_noise
+        elif resume == 0:
+            seed_host = _volume(gpu, noise, noise_shape)
+        else:
+            seed_host = None
+        cond_host = _volume(gpu, cond, noise_shape)
+        mask_host = _volume(gpu, mask, mask_shape)
+        share = chunk_overlap(starts, win)
+        n_steps = len(times) - 1
+        for chunk, start in enumerate(starts):
+            base = chunk * n_steps
+            if resume >= base + n_steps:
+                continue
+            local = max(0, resume - base)
+            prefix = 0 if start == 0 else share
+            if local > 0:
+                if hold is None or hold.chunk_noise is None:
+                    message = "the paused chunk is missing its latent"
+                    raise RuntimeError(message)
+                work_host = hold.chunk_noise
+            elif seed_host is not None:
+                work_host = np.array(seed_host[:, start : start + win], copy=True)
+            else:
+                work_host = np.random.default_rng(seed + start).standard_normal(
+                    (noise_shape[0], win, lat_h, lat_w)
+                ).astype(np.float32)
+            work_mask = np.array(mask_host[:, start : start + win], copy=True)
+            work_cond = np.array(cond_host[:, start : start + win], copy=True)
+            if prefix:
+                assembled = _volume(gpu, noise, noise_shape)
+                # The tail stays the latents produced at these positions.
+                work_cond[:, :prefix] = assembled[:, start : start + prefix]
+                work_mask[:, :prefix] = np.float32(1)
+                if seed_host is not None:
+                    prefix_noise = np.array(seed_host[:, start : start + prefix], copy=True)
+                else:
+                    prefix_noise = np.array(work_host[:, :prefix], copy=True)
+                low_at = 0
+                for step_index, step_time in enumerate(times[:-1]):
+                    if float(step_time) < boundary:
+                        low_at = step_index
+                        break
+                sigma = np.float32(knots[low_at])
+                last = work_cond[:, prefix - 1 : prefix]
+                carried = np.repeat(last, win, axis=1)
+                work_host = (np.float32(1.0) - sigma) * carried + sigma * work_host
+                local = max(local, low_at)
+            else:
+                prefix_noise = None
+            work_shape = (noise_shape[0], win, lat_h, lat_w)
+            work_count = int(np.prod(work_shape))
+            work = gpu.keep(gpu.upload(np.ascontiguousarray(work_host)))
+            chunk_mask = gpu.keep(gpu.upload(np.ascontiguousarray(work_mask)))
+            chunk_cond = gpu.keep(gpu.upload(np.ascontiguousarray(work_cond)))
+            try:
+                for index, timestep in enumerate(times[:-1]):
+                    if index < local:
+                        continue
+                    if prefix:
+                        self._pin_prefix(
+                            gpu,
+                            work,
+                            work_shape,
+                            work_cond[:, :prefix],
+                            prefix_noise,
+                            float(knots[index]),
+                        )
+                    loaded = self._euler(
+                        gpu,
+                        forward,
+                        work,
+                        chunk_mask,
+                        chunk_cond,
+                        win,
+                        lat_h,
+                        lat_w,
+                        work_count,
+                        table,
+                        table_null,
+                        float(timestep),
+                        float(knots[index + 1] - knots[index]),
+                        low,
+                        high,
+                        boundary,
+                        spare,
+                        progress,
+                        step_times,
+                        hold,
+                        base + index,
+                        loaded,
+                        noise,
+                        noise_shape,
+                        cond,
+                        mask,
+                        mask_shape,
+                        work,
+                        work_shape,
+                        seed_host,
+                        f"chunk {chunk} step {index}",
+                    )
+                if prefix:
+                    self._pin_prefix(
+                        gpu,
+                        work,
+                        work_shape,
+                        work_cond[:, :prefix],
+                        prefix_noise,
+                        float(knots[-1]),
+                    )
+                done = _volume(gpu, work, work_shape)
+            finally:
+                gpu.drop(work)
+                gpu.drop(chunk_mask)
+                gpu.drop(chunk_cond)
+            write_at, owned = commit_span(start, win, prefix)
+            assembled = _volume(gpu, noise, noise_shape)
+            assembled[:, write_at : write_at + owned] = done[:, win - owned :]
+            gpu.store_f32(noise, np.ascontiguousarray(assembled))
+        return loaded
+
+    def _pin_prefix(
+        self,
+        gpu: Gpu,
+        work: Any,
+        shape: tuple[int, ...],
+        clean: np.ndarray,
+        noise: np.ndarray,
+        sigma: float,
+    ) -> None:
+        """Keep the conditioned latents on this knot. The step cannot repaint them."""
+        current = _volume(gpu, work, shape)
+        current[:, : clean.shape[1]] = pin_opening(sigma, clean, noise)
+        gpu.store_f32(work, np.ascontiguousarray(current))
+
+    def _euler(
         self,
         gpu: Gpu,
         forward: Forward,
-        noise_slice: np.ndarray,
-        mask_slice: np.ndarray,
-        cond_slice: np.ndarray,
-        win: int,
+        noise: Any,
+        mask: Any,
+        cond: Any,
+        span: int,
         lat_h: int,
         lat_w: int,
+        count: int,
         table: np.ndarray,
         table_null: np.ndarray | None,
         timestep: float,
-        scale: float,
+        delta: float,
+        low: float,
+        high: float,
+        boundary: float,
         spare: Any,
-        win_count: int,
-        on_layer: Any,
         progress: ClipProgress,
-        name: str,
-    ) -> np.ndarray:
-        noise_buf = gpu.keep(gpu.upload(noise_slice))
-        mask_buf = gpu.keep(gpu.upload(mask_slice))
-        cond_buf = gpu.keep(gpu.upload(cond_slice))
-        try:
-            forward.prepare(noise_buf, mask_buf, cond_buf, win, lat_h, lat_w)
+        step_times: list[float],
+        hold: ClipHold | None,
+        index: int,
+        loaded: str | None,
+        full_noise: Any,
+        full_shape: tuple[int, ...],
+        full_cond: Any,
+        full_mask: Any,
+        full_mask_shape: tuple[int, ...],
+        chunk: Any,
+        chunk_shape: tuple[int, ...] | None,
+        seed_noise: np.ndarray | None,
+        label: str,
+        frame_times: list[int] | None = None,
+    ) -> str:
+        """Load the expert for this knot, predict, and take one Euler step."""
+        name = expert_name(timestep, boundary)
+        if loaded != name:
+            self._release_resident(gpu)
+            if reload_quietly(hold, name, index):
+                progress.counting(False)
+            else:
+                progress.stage("load")
+            self._use(
+                name,
+                progress.advance,
+                self._load_stop(
+                    progress,
+                    index,
+                    name,
+                    table,
+                    table_null,
+                    full_noise,
+                    full_cond,
+                    full_mask,
+                    full_shape,
+                    full_mask_shape,
+                    step_times,
+                    gpu,
+                    quiet=reload_quietly(hold, name, index),
+                    chunk=chunk,
+                    chunk_shape=chunk_shape,
+                    seed_noise=seed_noise,
+                ),
+            )
+            progress.counting(True)
+            loaded = name
+        progress.stage(name)
+
+        def on_layer() -> None:
+            progress.advance()
+            if not _stopping(progress):
+                return
+            self._pause(
+                progress,
+                self._step_hold(
+                    gpu,
+                    index,
+                    name,
+                    table,
+                    table_null,
+                    full_noise,
+                    full_shape,
+                    full_cond,
+                    full_mask,
+                    full_mask_shape,
+                    step_times,
+                    chunk,
+                    chunk_shape,
+                    seed_noise,
+                ),
+            )
+
+        started = time.perf_counter()
+        with objc.autorelease_pool():
+            forward.prepare(noise, mask, cond, span, lat_h, lat_w)
             forward.velocity(
                 self._resident,
                 table,
                 timestep,
-                (win, lat_h, lat_w),
+                (span, lat_h, lat_w),
                 on_layer=on_layer,
+                frame_times=frame_times,
             )
+            scale = guide_scale(timestep, low, high, boundary)
             if scale != 1.0:
                 if table_null is None or spare is None:
                     message = "the negative context is missing"
                     raise RuntimeError(message)
-                gpu.copy_f32(forward.vel, 0, spare, win_count)
+                gpu.copy_f32(forward.vel, 0, spare, count)
                 progress.stage(name)
                 forward.velocity(
                     self._resident,
                     table_null,
                     timestep,
-                    (win, lat_h, lat_w),
+                    (span, lat_h, lat_w),
                     on_layer=on_layer,
+                    frame_times=frame_times,
                 )
-                gpu.axpy(spare, forward.vel, -1.0, win_count)
-                gpu.axpy(forward.vel, spare, scale, win_count)
-            return gpu.read_f32(forward.vel, win_count).reshape(
-                noise_slice.shape[0], win, lat_h, lat_w
-            )
-        finally:
-            gpu.drop(noise_buf)
-            gpu.drop(mask_buf)
-            gpu.drop(cond_buf)
+                gpu.axpy(spare, forward.vel, -1.0, count)
+                gpu.axpy(forward.vel, spare, scale, count)
+            gpu.axpy(noise, forward.vel, delta, count)
+        elapsed = time.perf_counter() - started
+        step_times.append(elapsed)
+        progress.note(f"{label} expert {name} {elapsed:.2f}s")
+        self._pause(
+            progress,
+            self._step_hold(
+                gpu,
+                index + 1,
+                name,
+                table,
+                table_null,
+                full_noise,
+                full_shape,
+                full_cond,
+                full_mask,
+                full_mask_shape,
+                step_times,
+                chunk,
+                chunk_shape,
+                seed_noise,
+            ),
+        )
+        return name
+
+    def _step_hold(
+        self,
+        gpu: Gpu,
+        step: int,
+        expert: str | None,
+        table: np.ndarray,
+        table_null: np.ndarray | None,
+        noise: Any,
+        noise_shape: tuple[int, ...],
+        cond: Any,
+        mask: Any,
+        mask_shape: tuple[int, ...],
+        step_times: list[float],
+        chunk: Any,
+        chunk_shape: tuple[int, ...] | None,
+        seed_noise: np.ndarray | None,
+    ) -> ClipHold:
+        chunk_noise = None
+        if chunk is not None and chunk_shape is not None:
+            chunk_noise = _volume(gpu, chunk, chunk_shape)
+        return ClipHold(
+            stage="step",
+            step=step,
+            expert=expert,
+            table=table,
+            table_null=table_null,
+            noise=_volume(gpu, noise, noise_shape),
+            cond=_volume(gpu, cond, noise_shape),
+            mask=_volume(gpu, mask, mask_shape),
+            step_times=list(step_times),
+            chunk_noise=chunk_noise,
+            seed_noise=seed_noise,
+        )
+
 
     def _expert(self, name: str) -> Path:
         if name == "high":
@@ -934,16 +1170,6 @@ def _planned(
     return frames, context, plan, win, win * (lat_h // 2) * (lat_w // 2)
 
 
-def _pair_overlap(starts: list[int], index: int, win: int) -> tuple[int, int]:
-    head = 0
-    tail = 0
-    if index > 0:
-        head = starts[index - 1] + win - starts[index]
-    if index + 1 < len(starts):
-        tail = starts[index] + win - starts[index + 1]
-    return head, tail
-
-
 def _latent_device_bytes(lat_t: int, lat_h: int, lat_w: int, frames: int) -> int:
     cell = 16 * lat_t * lat_h * lat_w * 4
     mask = int(np.prod(mask_latent(frames).shape)) * 4
@@ -961,19 +1187,21 @@ def decode_peak_bytes(
 ) -> int:
     """Latent grid on device plus the largest float video slice the window emits."""
     resident = resident_latent_frames(room, frames, height, width, lat_t)
+    work_h, work_w = activation_extent(height, width)
     grid = 16 * lat_t * lat_h * lat_w * 4
     if resident >= lat_t:
         out_frames = frames
     else:
         out_frames = min(frames, 1 + (resident - 1) * 4)
-    return grid + 3 * out_frames * height * width * 4
+    return grid + 3 * out_frames * work_h * work_w * 4
 
 
 def resident_latent_frames(room: int, frames: int, height: int, width: int, lat_t: int) -> int:
     """How many decoded latent frames stay on device. The clip length stays the request."""
-    if _pixel_bytes(frames, height, width) <= room:
+    work_h, work_w = activation_extent(height, width)
+    if _pixel_bytes(frames, work_h, work_w) <= room:
         return lat_t
-    if _pixel_bytes(min(4, frames), height, width) <= room:
+    if _pixel_bytes(min(4, frames), work_h, work_w) <= room:
         return 1
     raise RuntimeError(f"scratch for {frames} frames at {width}x{height} does not fit")
 

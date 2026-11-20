@@ -187,11 +187,12 @@ Both edges are multiples of 16.
 - That still is written into the last pixel of the causal chunk that contains it. It is not encoded as its own latent and pasted over the last time.
 - The DiT input is 16 noise channels, the four mask channels, then the 16-channel latent.
 - `split` omitted, or `split` 1, is one DiT call per Euler step.
-- A larger `split` shortens the clip until the latent length lands on that many windows. `overlap` latent frames are shared. The default overlap is 1.
-- Each Euler step slices the noise, the mask, and the latent, runs the window, and blends the velocities with a linear ramp. One update follows the blend.
-- The first latent stays on the window that contains it. It is not copied into later windows.
-- RoPE starts at 0 on each window, because the grid is the window.
-- DiT scratch is the window. The noise, the mask, and the condition latent stay the full clip.
+- A larger `split` shortens the clip until that many chunks tile it. `overlap` is the finished tail passed into the next chunk. The default overlap is 1.
+- Each chunk runs every Euler step before the next chunk starts.
+- The first chunk is conditioned on the still. Its sample is noise on every frame, including the conditioned one.
+- A later chunk copies the finished tail latents into its condition. It starts at the low-noise expert, from the last of those latents, and each step puts that opening back on the current noise level. Those latents are not decoded or encoded again.
+- The new latents are written after the tail. The tail stays the frame the earlier chunk produced. The VAE decodes the joined latent once.
+- DiT scratch is one chunk. The noise, the mask, and the condition latent of the whole clip stay allocated.
 - The head's 64 outputs are one time patch, a 2×2 spatial patch, then the 16 latent channels.
 - Without that file, each 4×8×8 cell is averaged into the latent and the decoder repeats each cell.
 
@@ -217,6 +218,7 @@ Both edges are multiples of 16.
 - Each DiT block commits before the next one is recorded.
 - The 1×1 projections, the channel RMS, and the clipped SiLU are kernels. Both mid-block attentions are `attend_flash_wide`.
 - The causal cache is a device buffer.
+- A frame larger than 832×480 is encoded and decoded in spatial tiles of 512 pixels, stepping by 384. Each tile keeps its own causal cache. A linear ramp blends the 128-pixel overlap. A 320p or 480p frame stays one tile.
 - The Euler step adds the velocity on device.
 - The host sees the latent again at the decoder, then reads the uint8 frames for the AVI.
 

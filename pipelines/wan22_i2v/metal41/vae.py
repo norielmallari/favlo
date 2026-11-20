@@ -7,7 +7,9 @@ past frames and does not pad the future. The decoder walks one latent frame
 at a time. Its first temporal upsample only marks the cache. The next chunk
 upsamples without reading that frame. Later chunks do. The first latent frame
 is expanded in space only. Later frames are expanded by four. The latent
-affine is the published 16-channel mean and standard deviation.
+affine is the published 16-channel mean and standard deviation. A frame
+larger than the 480p slot is split into overlapping spatial tiles. Each tile
+keeps its own causal cache, and a linear ramp blends the overlap.
 """
 
 from __future__ import annotations
@@ -26,7 +28,13 @@ import numpy as np
 
 from wan22_i2v.metal41.blob import blob_ready, fill_span, load_index, plane_array, write_blob
 from wan22_i2v.metal41.metal import BufferView, Gpu
-from wan22_i2v.metal41.schedule import LATENT_MEAN, LATENT_STD, geometry
+from wan22_i2v.metal41.schedule import (
+    LATENT_MEAN,
+    LATENT_STD,
+    P480_HEIGHT,
+    P480_WIDTH,
+    geometry,
+)
 from wan22_i2v.metal41.source import VAE_FILE, vae_dir
 
 _EPS = np.float32(1e-12)
@@ -57,10 +65,91 @@ def vae_device_bytes(path: str) -> int:
     return total
 
 
+TILE_EDGE = 512
+TILE_STRIDE = 384
+
+
+def uses_spatial_tiles(height: int, width: int) -> bool:
+    """A frame larger than the 480p slot is encoded and decoded in tiles."""
+    return height * width > P480_WIDTH * P480_HEIGHT
+
+
+def tile_spans(length: int) -> list[tuple[int, int]]:
+    """``(origin, extent)`` along one edge. The last tile is the remainder."""
+    if length <= TILE_EDGE:
+        return [(0, length)]
+    spans: list[tuple[int, int]] = []
+    origin = 0
+    while True:
+        spans.append((origin, min(TILE_EDGE, length - origin)))
+        if origin + TILE_EDGE >= length:
+            return spans
+        origin += TILE_STRIDE
+
+
+def tile_grid(height: int, width: int) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Row spans and column spans. The 480p slot is one span on each edge."""
+    if not uses_spatial_tiles(height, width):
+        return [(0, height)], [(0, width)]
+    return tile_spans(height), tile_spans(width)
+
+
+def tile_count(height: int, width: int) -> int:
+    rows, cols = tile_grid(height, width)
+    return len(rows) * len(cols)
+
+
+def tile_ramps(spans: list[tuple[int, int]]) -> tuple[list[int], list[int]]:
+    """Leading and trailing overlap of each span, in the same units as ``spans``."""
+    leading = [0]
+    trailing: list[int] = []
+    for index in range(1, len(spans)):
+        prev, prev_n = spans[index - 1]
+        origin, _extent = spans[index]
+        overlap = prev + prev_n - origin
+        if overlap < 1:
+            message = f"VAE tiles at {prev} and {origin} do not overlap"
+            raise ValueError(message)
+        leading.append(overlap)
+        trailing.append(overlap)
+    trailing.append(0)
+    return leading, trailing
+
+
+def feather(
+    height: int, width: int, lead_y: int, trail_y: int, lead_x: int, trail_x: int
+) -> np.ndarray:
+    """Separable ramp. Adjacent tiles sum to 1 across the overlap."""
+    if lead_y + trail_y > height or lead_x + trail_x > width:
+        message = f"VAE tile overlap exceeds {(height, width)}"
+        raise ValueError(message)
+    return _axis_weight(height, lead_y, trail_y)[:, None] * _axis_weight(width, lead_x, trail_x)[None, :]
+
+
+def activation_extent(height: int, width: int) -> tuple[int, int]:
+    """Spatial size of the largest tile. A small frame is its own size."""
+    rows, cols = tile_grid(height, width)
+    return max(extent for _origin, extent in rows), max(extent for _origin, extent in cols)
+
+
+def _axis_weight(length: int, leading: int, trailing: int) -> np.ndarray:
+    weight = np.ones(length, dtype=np.float32)
+    if leading > 0:
+        ramp = min(leading, length)
+        slope = (np.arange(ramp, dtype=np.float32) + np.float32(0.5)) / np.float32(ramp)
+        weight[:ramp] *= slope
+    if trailing > 0:
+        ramp = min(trailing, length)
+        slope = (np.arange(ramp, dtype=np.float32) + np.float32(0.5)) / np.float32(ramp)
+        weight[-ramp:] *= slope[::-1]
+    return weight
+
+
 def encode_peak_bytes(height: int, width: int, lat_t: int, lat_h: int, lat_w: int) -> int:
-    """Encoder output plus one RGB chunk while weights are resident."""
+    """Encoder output plus one RGB chunk. A tiled frame uploads one tile."""
+    work_h, work_w = activation_extent(height, width)
     latent = 16 * lat_t * lat_h * lat_w * 4
-    chunk = 3 * 4 * height * width * 4
+    chunk = 3 * 4 * work_h * work_w * 4
     return latent + chunk
 
 
@@ -394,23 +483,7 @@ class WanVAE:
         started = time.perf_counter()
         self._open(gpu, on_pipeline, on_block)
         try:
-            pieces: list[_Vol] = []
-            starts = [0, *range(1, frames, 4)]
-            for start in starts:
-                count = 1 if start == 0 else min(4, frames - start)
-                chunk = self._chunk(image, height, width, start, count, frames, end)
-                encoded = self._encoder(chunk)
-                self._free(chunk)
-                stats = self._project(encoded, "conv1.weight", "conv1.bias")
-                self._free(encoded)
-                pieces.append(self._mu(stats))
-                self._free(stats)
-            latent = pieces[0]
-            for extra in pieces[1:]:
-                joined = self._concat(latent, extra)
-                self._free(latent)
-                self._free(extra)
-                latent = joined
+            latent = self._encode_spatial(image, frames, height, width, lat_t, lat_h, lat_w, end)
             self.gpu.keep(latent.buf)
             self.gpu.end()
         finally:
@@ -422,7 +495,7 @@ class WanVAE:
             message = f"encoder emitted {latent.shape}, expected {(16, lat_t, lat_h, lat_w)}"
             raise RuntimeError(message)
         elapsed = time.perf_counter() - started
-        print(f"vae encode {elapsed:.2f}s", flush=True)
+        print(f"vae encode {elapsed:.2f}s{self._tile_note(height, width)}", flush=True)
         return latent.buf
 
     def decode(
@@ -435,33 +508,16 @@ class WanVAE:
         resident_frames: int | None = None,
     ) -> np.ndarray:
         """Device latent ``[16, T, H, W]`` to uint8 ``[frames, height, width, 3]``."""
-        expected = 1 + (int(shape[1]) - 1) * 4
+        _channels, lat_t, lat_h, lat_w = (int(value) for value in shape)
+        height, width = lat_h * 8, lat_w * 8
+        expected = 1 + (lat_t - 1) * 4
         started = time.perf_counter()
         self._open(gpu, on_pipeline, on_block)
         try:
-            restored = self._inv(_Vol(latent, shape))
-            z = self._project(restored, "conv2.weight", "conv2.bias")
-            self._free(restored)
-            pieces: list[_Vol] = []
-            host: list[np.ndarray] = []
-            window = shape[1] if resident_frames is None else max(1, min(resident_frames, shape[1]))
-            for index in range(shape[1]):
-                frame = self._slice(z, index, 1)
-                pieces.append(self._decoder(frame))
-                self._free(frame)
-                if len(pieces) < window and index + 1 < shape[1]:
-                    continue
-                video = pieces[0]
-                for extra in pieces[1:]:
-                    joined = self._concat(video, extra)
-                    self._free(video)
-                    self._free(extra)
-                    video = joined
-                host.append(self._u8(video))
-                self._free(video)
-                pieces = []
-            self._free(z)
-            pixels = host[0] if len(host) == 1 else np.concatenate(host, axis=0)
+            if uses_spatial_tiles(height, width):
+                pixels = self._decode_tiled(latent, shape, resident_frames, expected)
+            else:
+                pixels = self._decode_one(latent, shape, resident_frames)
             if pixels.shape[0] != expected:
                 message = f"decoder emitted {pixels.shape[0]} frames, expected {expected}"
                 raise RuntimeError(message)
@@ -471,8 +527,220 @@ class WanVAE:
                 self.release_device()
             self._close()
         elapsed = time.perf_counter() - started
-        print(f"vae decode {elapsed:.2f}s", flush=True)
+        print(f"vae decode {elapsed:.2f}s{self._tile_note(height, width)}", flush=True)
         return pixels
+
+    def _tile_note(self, height: int, width: int) -> str:
+        count = tile_count(height, width)
+        if count < 2:
+            return ""
+        return f" tiles {count}"
+
+    def _encode_spatial(
+        self,
+        image: np.ndarray,
+        frames: int,
+        height: int,
+        width: int,
+        lat_t: int,
+        lat_h: int,
+        lat_w: int,
+        end: np.ndarray | None,
+    ) -> _Vol:
+        if not uses_spatial_tiles(height, width):
+            return self._encode_time(image, frames, height, width, end)
+        blended = self._encode_tiled(image, frames, height, width, lat_t, lat_h, lat_w, end)
+        return self._host(blended)
+
+    def encode_clip(
+        self,
+        pixels: np.ndarray,
+        on_pipeline: Callable[[], None] | None = None,
+        on_block: Callable[[], None] | None = None,
+        gpu: Gpu | None = None,
+    ) -> Any:
+        """uint8 ``[frames, height, width, 3]`` to a kept latent ``[16, T, H, W]``.
+
+        ``frames`` is ``4n+1``. The first pixel is encoded as latent 0. Each
+        later latent is the next four pixels, so a handover tail is a real
+        opening instead of a slice from the middle of the previous clip.
+        """
+        frames, height, width = (
+            int(pixels.shape[0]),
+            int(pixels.shape[1]),
+            int(pixels.shape[2]),
+        )
+        if frames < 1 or (frames - 1) % 4:
+            message = f"a clip encode needs 4n+1 frames, got {frames}"
+            raise RuntimeError(message)
+        lat_t, lat_h, lat_w, _ = geometry(frames, height, width)
+        self._open(gpu, on_pipeline, on_block)
+        try:
+            if uses_spatial_tiles(height, width):
+                blended = self._encode_tiled(
+                    pixels[0], frames, height, width, lat_t, lat_h, lat_w, None, pixels
+                )
+                latent = self._host(blended)
+            else:
+                latent = self._encode_time(pixels[0], frames, height, width, None, pixels)
+            self.gpu.keep(latent.buf)
+            self.gpu.end()
+        finally:
+            self._clear_cache()
+            if not self._own:
+                self.release_device()
+            self._close()
+        if latent.shape != (16, lat_t, lat_h, lat_w):
+            message = f"encoder emitted {latent.shape}, expected {(16, lat_t, lat_h, lat_w)}"
+            raise RuntimeError(message)
+        return latent.buf
+
+    def _encode_time(
+        self,
+        image: np.ndarray,
+        frames: int,
+        height: int,
+        width: int,
+        end: np.ndarray | None,
+        clip: np.ndarray | None = None,
+    ) -> _Vol:
+        pieces: list[_Vol] = []
+        starts = [0, *range(1, frames, 4)]
+        for start in starts:
+            count = 1 if start == 0 else min(4, frames - start)
+            chunk = self._chunk(image, height, width, start, count, frames, end, clip)
+            encoded = self._encoder(chunk)
+            self._free(chunk)
+            stats = self._project(encoded, "conv1.weight", "conv1.bias")
+            self._free(encoded)
+            pieces.append(self._mu(stats))
+            self._free(stats)
+        latent = pieces[0]
+        for extra in pieces[1:]:
+            joined = self._concat(latent, extra)
+            self._free(latent)
+            self._free(extra)
+            latent = joined
+        return latent
+
+    def _encode_tiled(
+        self,
+        image: np.ndarray,
+        frames: int,
+        height: int,
+        width: int,
+        lat_t: int,
+        lat_h: int,
+        lat_w: int,
+        end: np.ndarray | None,
+        clip: np.ndarray | None = None,
+    ) -> np.ndarray:
+        rows, cols = tile_grid(height, width)
+        y_lead, y_trail = tile_ramps(rows)
+        x_lead, x_trail = tile_ramps(cols)
+        acc = np.zeros((16, lat_t, lat_h, lat_w), dtype=np.float32)
+        wgt = np.zeros((lat_h, lat_w), dtype=np.float32)
+        for yi, (y0, th) in enumerate(rows):
+            for xi, (x0, tw) in enumerate(cols):
+                if th % 8 or tw % 8:
+                    message = f"VAE tile {tw}x{th} is not a multiple of 8"
+                    raise RuntimeError(message)
+                self._clear_cache()
+                still = image[y0 : y0 + th, x0 : x0 + tw]
+                last = None if end is None else end[y0 : y0 + th, x0 : x0 + tw]
+                tile = None if clip is None else clip[:, y0 : y0 + th, x0 : x0 + tw]
+                piece = self._encode_time(still, frames, th, tw, last, tile)
+                latent = self._read_vol(piece)
+                self._free(piece)
+                ly, lx = y0 // 8, x0 // 8
+                mask = feather(
+                    th // 8,
+                    tw // 8,
+                    y_lead[yi] // 8,
+                    y_trail[yi] // 8,
+                    x_lead[xi] // 8,
+                    x_trail[xi] // 8,
+                )
+                acc[:, :, ly : ly + mask.shape[0], lx : lx + mask.shape[1]] += latent * mask
+                wgt[ly : ly + mask.shape[0], lx : lx + mask.shape[1]] += mask
+        if not np.all(wgt > 0):
+            message = "a VAE tile left part of the frame uncovered"
+            raise RuntimeError(message)
+        return acc / wgt[None, None]
+
+    def _decode_one(
+        self,
+        latent: Any,
+        shape: tuple[int, int, int, int],
+        resident_frames: int | None,
+    ) -> np.ndarray:
+        restored = self._inv(_Vol(latent, shape))
+        z = self._project(restored, "conv2.weight", "conv2.bias")
+        self._free(restored)
+        pieces: list[_Vol] = []
+        host: list[np.ndarray] = []
+        window = shape[1] if resident_frames is None else max(1, min(resident_frames, shape[1]))
+        for index in range(shape[1]):
+            frame = self._slice(z, index, 1)
+            pieces.append(self._decoder(frame))
+            self._free(frame)
+            if len(pieces) < window and index + 1 < shape[1]:
+                continue
+            video = pieces[0]
+            for extra in pieces[1:]:
+                joined = self._concat(video, extra)
+                self._free(video)
+                self._free(extra)
+                video = joined
+            host.append(self._u8(video))
+            self._free(video)
+            pieces = []
+        self._free(z)
+        if len(host) == 1:
+            return host[0]
+        return np.concatenate(host, axis=0)
+
+    def _decode_tiled(
+        self,
+        latent: Any,
+        shape: tuple[int, int, int, int],
+        resident_frames: int | None,
+        frames: int,
+    ) -> np.ndarray:
+        channels, lat_t, lat_h, lat_w = (int(value) for value in shape)
+        height, width = lat_h * 8, lat_w * 8
+        host = self._read_buf(latent, channels * lat_t * lat_h * lat_w).reshape(shape)
+        rows, cols = tile_grid(height, width)
+        y_lead, y_trail = tile_ramps(rows)
+        x_lead, x_trail = tile_ramps(cols)
+        acc = np.zeros((frames, height, width, 3), dtype=np.float32)
+        wgt = np.zeros((height, width), dtype=np.float32)
+        for yi, (y0, th) in enumerate(rows):
+            for xi, (x0, tw) in enumerate(cols):
+                ly, lx = y0 // 8, x0 // 8
+                lh, lw = th // 8, tw // 8
+                self._clear_cache()
+                crop = np.ascontiguousarray(host[:, :, ly : ly + lh, lx : lx + lw])
+                buf = self.gpu.keep(self.gpu.upload(crop))
+                try:
+                    pixels = self._decode_one(buf, (channels, lat_t, lh, lw), resident_frames)
+                finally:
+                    self._clear_cache()
+                    self.gpu.drop(buf)
+                mask = feather(th, tw, y_lead[yi], y_trail[yi], x_lead[xi], x_trail[xi])
+                acc[:, y0 : y0 + th, x0 : x0 + tw] += pixels.astype(np.float32) * mask[:, :, None]
+                wgt[y0 : y0 + th, x0 : x0 + tw] += mask
+        if not np.all(wgt > 0):
+            message = "a VAE tile left part of the frame uncovered"
+            raise RuntimeError(message)
+        mixed = acc / wgt[None, :, :, None]
+        return np.clip(np.rint(mixed), 0, 255).astype(np.uint8)
+
+    def _read_vol(self, vol: _Vol) -> np.ndarray:
+        return self._read_buf(vol.buf, vol.count()).reshape(vol.shape)
+
+    def _read_buf(self, buf: Any, count: int) -> np.ndarray:
+        return self._gpu().read_f32(buf, count)
 
     def release_device(self) -> None:
         """Drop GPU copies of VAE weights. Host ``weights`` stay for a later stage."""
@@ -542,8 +810,14 @@ class WanVAE:
         count: int,
         frames: int,
         end: np.ndarray | None,
+        clip: np.ndarray | None = None,
     ) -> _Vol:
         video = np.zeros((3, count, height, width), dtype=np.float32)
+        if clip is not None:
+            taken = clip[start : start + count]
+            values = taken.astype(np.float32) / np.float32(127.5) - np.float32(1.0)
+            video[:] = np.transpose(values, (3, 0, 1, 2))
+            return self._host(video)
         if start == 0:
             pixels = image.astype(np.float32) / np.float32(127.5) - np.float32(1.0)
             video[:, 0] = np.transpose(pixels, (2, 0, 1))

@@ -27,6 +27,8 @@ class ClipHold:
     pixels: np.ndarray | None = None
     avi: bytes | None = None
     step_times: list[float] = field(default_factory=list)
+    chunk_noise: np.ndarray | None = None
+    seed_noise: np.ndarray | None = None
 
     def reached(self, stage: str) -> bool:
         """True when ``stage`` has finished and its host outputs are on this object."""

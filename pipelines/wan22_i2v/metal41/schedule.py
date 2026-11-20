@@ -258,11 +258,12 @@ def mask_latent(frames: int, *, end: bool = False) -> np.ndarray:
 def apply_split(
     frames: int, split: int | None, overlap: int = 1
 ) -> tuple[int, int | None]:
-    """Return ``(frames, context)`` for ``split`` calls that share ``overlap`` latents.
+    """Return ``(frames, context)`` for ``split`` chunks that continue through ``overlap`` latents.
 
     ``None`` and ``1`` keep every frame and return no window. A larger split
-    shortens the clip until the latent length lands exactly, then returns the
-    window length in ``4n+1`` pixel frames. ``overlap`` defaults to 1.
+    shortens the clip until the chunks tile it, then returns one chunk's length
+    in ``4n+1`` pixel frames. The overlap is the finished tail of one chunk and
+    the conditioned start of the next. ``overlap`` defaults to 1.
     """
     if split is None or split == 1:
         return frames, None
@@ -324,22 +325,38 @@ def latent_windows(lat: int, context: int | None, overlap: int) -> tuple[int, li
     return win, windows(lat, win, overlap)
 
 
-def window_weights(length: int, head: int, tail: int) -> np.ndarray:
-    """Ramp across the real overlap. Each shared frame keeps a positive weight.
+def handoff_frames(overlap: int) -> int:
+    """Pixel frames that re-encode into ``overlap`` latent slots.
 
-    The frame at the outer edge of an overlap of ``n`` weighs ``1 / (n + 1)``,
-    and the neighbor carries the rest, so the pair sums to 1. An overlap of 1
-    is a half-and-half blend of that one latent frame.
+    The first slot is one pixel. Each later slot is four. Encoding this many
+    frames from scratch makes latent 0 a real first frame.
     """
-    weights = np.ones(length, dtype=np.float32)
-    if head > 0:
-        span = np.float32(head + 1)
-        for index in range(head):
-            weights[index] = np.float32(index + 1) / span
-    if tail > 0:
-        span = np.float32(tail + 1)
-        for distance in range(tail):
-            slot = length - 1 - distance
-            share = np.float32(distance + 1) / span
-            weights[slot] = np.float32(min(float(weights[slot]), float(share)))
-    return weights
+    if overlap < 1:
+        message = f"overlap must be at least 1, got {overlap}"
+        raise ValueError(message)
+    return 1 + (overlap - 1) * 4
+
+
+def chunk_overlap(starts: list[int], win: int) -> int:
+    """Latent tail one chunk hands to the next. One chunk shares nothing."""
+    if len(starts) < 2:
+        return 0
+    share = win - (starts[1] - starts[0])
+    if share < 1 or share >= win:
+        message = f"overlap must sit inside the chunk, got {share} of {win}"
+        raise ValueError(message)
+    return share
+
+
+def commit_span(start: int, win: int, overlap: int) -> tuple[int, int]:
+    """``(write_at, count)`` for the latents a finished chunk owns.
+
+    The first chunk writes its whole window. A later chunk leaves the
+    conditioned tail in place and writes only the new latents after it.
+    """
+    if start < 0 or win < 1 or overlap < 0 or overlap >= win:
+        message = f"a chunk needs a start, a length, and an overlap, got {start}, {win}, {overlap}"
+        raise ValueError(message)
+    if start == 0:
+        return 0, win
+    return start + overlap, win - overlap

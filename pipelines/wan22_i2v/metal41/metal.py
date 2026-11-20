@@ -533,7 +533,12 @@ class Gpu:
         dim: int,
         grid: tuple[int, int, int],
         axes: tuple[int, int, int],
+        frame_times: list[int] | None = None,
     ) -> None:
+        times = list(range(grid[0])) if frame_times is None else list(frame_times)
+        if len(times) != grid[0]:
+            message = f"RoPE needs {grid[0]} frame times, got {len(times)}"
+            raise ValueError(message)
         self._dispatch(
             "rope3d",
             [values],
@@ -548,6 +553,7 @@ class Gpu:
                 struct.pack("I", axes[1]),
                 struct.pack("I", axes[2]),
                 struct.pack("f", 10000.0),
+                struct.pack(f"{len(times)}I", *[int(item) for item in times]),
             ],
             (seq, 1, 1),
             (128, 1, 1),

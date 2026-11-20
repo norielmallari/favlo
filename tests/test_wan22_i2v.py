@@ -240,6 +240,34 @@ def test_umt5_buckets_are_bidirectional() -> None:
     assert buckets[1, 0] == 1
 
 
+def test_a_frame_above_480p_is_split_into_overlapping_tiles() -> None:
+    from wan22_i2v.metal41.vae import (
+        activation_extent,
+        encode_peak_bytes,
+        feather,
+        tile_count,
+        tile_grid,
+        uses_spatial_tiles,
+    )
+
+    assert uses_spatial_tiles(320, 576) is False
+    assert uses_spatial_tiles(480, 832) is False
+    assert tile_count(320, 576) == 1
+    assert uses_spatial_tiles(720, 1280) is True
+    rows, cols = tile_grid(720, 1280)
+    assert rows == [(0, 512), (384, 336)]
+    assert cols[0] == (0, 512)
+    assert cols[-1] == (768, 512)
+    assert all(extent % 8 == 0 for _origin, extent in rows + cols)
+    left = feather(64, 64, 0, 16, 0, 0)
+    right = feather(64, 64, 16, 0, 0, 0)
+    seam = left[48:, 0] + right[:16, 0]
+    assert np.allclose(seam, 1.0)
+    full = 16 * 3 * 90 * 160 * 4 + 3 * 4 * 720 * 1280 * 4
+    assert encode_peak_bytes(720, 1280, 3, 90, 160) < full
+    assert activation_extent(720, 1280) == (512, 512)
+
+
 def test_mask_marks_the_first_latent_frame() -> None:
     mask = mask_latent(5)
     assert mask.shape == (4, 2)
@@ -270,7 +298,7 @@ def test_stride_encode_keeps_the_end_still_in_the_last_chunk() -> None:
 
 
 def test_split_lands_on_a_whole_number_of_windows() -> None:
-    from wan22_i2v.metal41.schedule import apply_split, latent_windows, window_weights
+    from wan22_i2v.metal41.schedule import apply_split, chunk_overlap, latent_windows
 
     assert apply_split(81, None, 1) == (81, None)
     assert apply_split(81, 1, 1) == (81, None)
@@ -286,10 +314,65 @@ def test_split_lands_on_a_whole_number_of_windows() -> None:
     for start in plan[1]:
         covered[start : start + plan[0]] += 1
     assert np.all(covered > 0)
-    weights = window_weights(11, 1, 1)
-    assert weights[0] == np.float32(0.5)
-    assert weights[-1] == np.float32(0.5)
-    assert np.all(weights[1:-1] == 1)
+    assert chunk_overlap([0, 10], 11) == 1
+
+
+def test_known_opening_stays_on_the_noise_schedule() -> None:
+    from wan22_i2v.metal41.latent import match_opening_color, pin_opening
+
+    clean = np.ones((16, 2, 1, 1), dtype=np.float32)
+    noise = np.full((16, 2, 1, 1), 3.0, dtype=np.float32)
+    assert np.allclose(pin_opening(1.0, clean, noise), noise)
+    assert np.allclose(pin_opening(0.0, clean, noise), clean)
+    assert np.allclose(pin_opening(0.5, clean, noise), 2.0)
+    clip = np.zeros((3, 2, 2, 3), dtype=np.uint8)
+    clip[0, :, :, 2] = 200
+    clip[1] = 40
+    clip[2] = 90
+    matched = match_opening_color(clip)
+    assert np.array_equal(matched[0], clip[0])
+    assert np.allclose(matched[1].mean(axis=(0, 1)), matched[0].mean(axis=(0, 1)), atol=1.0)
+    assert np.allclose(matched[2].mean(axis=(0, 1)), matched[0].mean(axis=(0, 1)), atol=1.0)
+
+
+def test_handoff_reencodes_the_tail_as_a_first_frame() -> None:
+    from wan22_i2v.metal41.latent import stride_encode_clip
+    from wan22_i2v.metal41.schedule import handoff_frames
+
+    assert handoff_frames(1) == 1
+    assert handoff_frames(2) == 5
+    red = np.zeros((5, 16, 16, 3), dtype=np.uint8)
+    red[..., 0] = 255
+    swapped = red.copy()
+    swapped[1:] = 0
+    swapped[1:, ..., 2] = 255
+    opening = stride_encode_clip(red)
+    changed = stride_encode_clip(swapped)
+    assert opening.shape == (16, 2, 2, 2)
+    assert np.allclose(opening[:, 0], changed[:, 0])
+    assert not np.allclose(opening[:, 1], changed[:, 1])
+
+
+def test_later_chunk_keeps_the_finished_tail() -> None:
+    from wan22_i2v.metal41.schedule import (
+        apply_split,
+        chunk_overlap,
+        commit_span,
+        latent_windows,
+    )
+
+    frames, context = apply_split(81, 2, 2)
+    assert (frames, context) == (77, 41)
+    plan = latent_windows(1 + (frames - 1) // 4, context, 2)
+    assert plan == (11, [0, 9])
+    share = chunk_overlap(plan[1], plan[0])
+    assert share == 2
+    assert commit_span(0, 11, share) == (0, 11)
+    assert commit_span(9, 11, share) == (11, 9)
+    clean = np.arange(20, dtype=np.float32)
+    tail = clean[9:11].copy()
+    clean[11:20] = 7
+    assert np.allclose(clean[9:11], tail)
 
 
 def test_unpatchify_is_spatial_patch_then_channel() -> None:
