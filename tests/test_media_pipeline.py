@@ -169,6 +169,34 @@ def test_a_bad_body_is_a_400_and_stores_no_hold() -> None:
     assert state.get("video_hold") is None
 
 
+def test_a_completed_job_records_start_and_end(tmp_path) -> None:
+    from datetime import datetime
+
+    from favlo.media_meta import load_media
+
+    pipe = _Pipe()
+    state = _state()
+    state["video_home"] = tmp_path
+    state["preempt"].set()
+    first = _Reply()
+    pipe(first, _Runtime(), {"prompt": "move"}, None, None, state)
+    job = first.payload
+    assert job is not None
+    assert load_media(job["id"], home=tmp_path) is None
+    state["preempt"].clear()
+    second = _Reply()
+    pipe(second, _Runtime(), {"prompt": "move"}, None, None, state)
+    record = load_media(job["id"], home=tmp_path)
+    assert record is not None
+    start = record["generation"]["startdatetime"]
+    end = record["generation"]["enddatetime"]
+    assert start.endswith("Z") and end.endswith("Z")
+    opened = datetime.fromisoformat(start)
+    closed = datetime.fromisoformat(end)
+    assert opened <= closed
+    assert int(opened.timestamp()) == job["created_at"]
+
+
 def test_a_mismatch_mints_a_new_id(tmp_path) -> None:
     pipe = _Pipe()
     state = _state()

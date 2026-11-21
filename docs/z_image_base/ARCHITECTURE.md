@@ -162,7 +162,7 @@ uv run favlo media --pipeline z_image_base --model Z-Image-int8 --out pack.json 
 - `cfg_normalization` also accepts `true` and `false`.
 - An omitted sampler field uses the registry row for that model.
 
-The seed, the prompt, the negative prompt, and the other parameters are written under `generation` in `~/.favlo/images/<id>.png.json` (the shared media metadata schema).
+The seed, the prompt, the negative prompt, `startdatetime`, `enddatetime`, and the other parameters are written under `generation` in `~/.favlo/images/<id>.png.json` (the shared media metadata schema). Both times are UTC. The start is when the job opened. The end is when the PNG was stored.
 
 - The uint8 decode is written to `~/.favlo/images/<id>.rgb`.
 - The PNG is encoded from that file and written to `<id>.png` before the response is built.

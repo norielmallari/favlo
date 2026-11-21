@@ -1083,6 +1083,9 @@ def test_preempt_pauses_and_the_same_job_resumes(tmp_path) -> None:
     assert record["generation"]["prompt"] == "move"
     assert record["generation"]["seed"] == body["seed"]
     assert "image" not in record["generation"]
+    assert record["generation"]["startdatetime"].endswith("Z")
+    assert record["generation"]["enddatetime"].endswith("Z")
+    assert record["generation"]["startdatetime"] <= record["generation"]["enddatetime"]
 
 
 def test_expert_load_checkpoints_the_unfinished_step(monkeypatch) -> None:

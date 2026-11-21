@@ -9,6 +9,7 @@ moves that sidecar to Trash with the media.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,19 @@ _META_KIND = {
     "music": "audio",
     "voice": "audio",
 }
+
+
+def generation_clock(created_at: Any, finished_at: float) -> dict[str, str]:
+    """UTC start and end for a generation sidecar. A missing start is omitted."""
+    found = {"enddatetime": _utc(finished_at)}
+    if isinstance(created_at, (int, float)) and not isinstance(created_at, bool):
+        found["startdatetime"] = _utc(float(created_at))
+    return found
+
+
+def _utc(stamp: float) -> str:
+    text = datetime.fromtimestamp(stamp, UTC).replace(microsecond=0).isoformat()
+    return text.replace("+00:00", "Z")
 
 
 def kind_of(name: str) -> str | None:

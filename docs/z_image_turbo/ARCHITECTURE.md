@@ -170,7 +170,7 @@ A path under `/v1/images` is 404.
 - `response_format` must be omitted or `b64_json`.
 - `stream` must be omitted or false, and `partial_images` must be omitted or 0.
 - An omitted `seed` is a random integer, and a provided integer selects the image.
-- The seed, the prompt, and the other parameters are written under `generation` in `~/.favlo/images/<id>.png.json` (the shared media metadata schema).
+- The seed, the prompt, `startdatetime`, `enddatetime`, and the other parameters are written under `generation` in `~/.favlo/images/<id>.png.json` (the shared media metadata schema). Both times are UTC. The start is when the job opened. The end is when the PNG was stored.
 - The uint8 decode is written to `~/.favlo/images/<id>.rgb`.
 - The PNG is encoded from that file and written to `<id>.png` before the response is built, and the handler returns `data[].id`, the file stem.
 - The reply has no PNG bytes.

@@ -342,6 +342,8 @@ That MP4 is encoded from the uncompressed `<id>.avi` beside it.
 
 Both stay until `video_ttl_seconds` in `~/.favlo/settings.json`.
 
+`<id>.mp4.json` beside the MP4 stores `generation.startdatetime` and `generation.enddatetime` in UTC. The start is when the job opened. The end is when the MP4 was stored. A resumed job keeps the original start.
+
 The default is one day.
 
 `prompt` is required.

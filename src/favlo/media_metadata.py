@@ -36,6 +36,8 @@ _GENERATION_KEYS = (
     "input",
     "voice",
     "instructions",
+    "startdatetime",
+    "enddatetime",
 )
 
 

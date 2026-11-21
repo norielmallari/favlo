@@ -289,10 +289,11 @@ class MediaPipeline(Pipeline):
         self._clear(state)
         self._hook(self.on_complete, runtime, call)
         shown = job if replacement is None else replacement
-        self._store_metadata(request, shown, job, home)
+        finished = time.time()
+        self._store_metadata(request, shown, job, home, finished)
         if replacement is None:
             if isinstance(job, dict):
-                job["completed_at"] = int(time.time())
+                job["completed_at"] = int(finished)
                 job["progress"] = 100
                 job["eta"] = 0
                 job["status"] = "completed"
@@ -420,14 +421,18 @@ class MediaPipeline(Pipeline):
         payload: Any,
         job: dict[str, Any],
         home: Path | None,
+        finished: float | None = None,
     ) -> None:
         if not isinstance(payload, dict):
             return
         from favlo.logs import favlo_home
-        from favlo.media_meta import save_media
+        from favlo.media_meta import generation_clock, save_media
 
         root = home if isinstance(home, Path) else favlo_home()
         fields = self.parameters(request)
+        ended = time.time() if finished is None else finished
+        created = job.get("created_at") if isinstance(job, dict) else None
+        fields.update(generation_clock(created, ended))
         if isinstance(job, dict):
             for key in ("seconds", "size", "response_format", "seed"):
                 if key in fields:
