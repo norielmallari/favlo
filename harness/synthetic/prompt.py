@@ -23,6 +23,10 @@ _SENTENCES = (
     "There and back again.",
 )
 _LINE_CHARS = 160
+_PADS = ("0", "1", "x", ".")
+_PAIR_PADS = ("00", "10", "x0", ".0")
+_PAD_STEPS = 8
+_WALK_BACK = 16
 
 
 def user_text(
@@ -152,9 +156,100 @@ def _fit_tokens(
             return lines
         if got > tokens:
             break
+    if _close_gap(lines, original, under, tokens, encode):
+        return lines
     lines[-1] = original
     message = "the prompt cannot be trimmed to the token target"
     raise RuntimeError(message)
+
+
+def _close_gap(
+    lines: list[str],
+    original: str,
+    under: int,
+    tokens: int,
+    encode: Callable[[str], int],
+) -> bool:
+    """Pad after a trim that stepped over ``tokens``.
+
+    A character can add more than one token, so the prefixes of the filler
+    line miss the target. A short walk back plus a one-piece pad closes that
+    gap. When the first character of the last line still steps over, the
+    previous line is retokenized.
+    """
+    saved = list(lines)
+    stop = max(-1, under - _WALK_BACK)
+    for end in range(under, stop, -1):
+        lines[-1] = original[:end]
+        count = encode(_join(lines))
+        if count == tokens:
+            return True
+        if count > tokens:
+            continue
+        if _pad_exact(lines, tokens, encode, count):
+            return True
+    lines[:] = saved
+    if _retokenize_previous(lines, tokens, encode):
+        return True
+    lines[:] = saved
+    return False
+
+
+def _retokenize_previous(
+    lines: list[str],
+    tokens: int,
+    encode: Callable[[str], int],
+) -> bool:
+    """Replace the end of the previous line when a new line cannot add one token."""
+    if len(lines) < 2:
+        return False
+    saved = list(lines)
+    lines.pop()
+    if not lines[-1]:
+        lines[:] = saved
+        return False
+    original = lines[-1]
+    stem = original[:-1]
+    last = original[-1]
+    for pair in _PAIR_PADS:
+        lines[-1] = stem + pair
+        if encode(_join(lines)) == tokens:
+            return True
+    for digit in "0123456789":
+        lines[-1] = stem + digit + last
+        if encode(_join(lines)) == tokens:
+            return True
+    lines[:] = saved
+    return False
+
+
+def _pad_exact(
+    lines: list[str],
+    tokens: int,
+    encode: Callable[[str], int],
+    count: int,
+) -> bool:
+    """Append a pad piece until ``encode`` lands on ``tokens``."""
+    stem = lines[-1]
+    for _ in range(_PAD_STEPS):
+        if count >= tokens:
+            break
+        moved = False
+        for piece in _PADS:
+            lines[-1] = stem + piece
+            got = encode(_join(lines))
+            if got == tokens:
+                return True
+            if count < got < tokens:
+                stem = lines[-1]
+                count = got
+                moved = True
+                break
+        if not moved:
+            lines[-1] = stem
+            return False
+    lines[-1] = stem
+    return count == tokens
 
 
 def _filler_line(rng: random.Random) -> str:

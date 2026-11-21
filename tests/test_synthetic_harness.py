@@ -27,6 +27,34 @@ def test_two_labels_do_not_share_an_opening_line() -> None:
     assert _overhead(long) == 120
 
 
+def test_a_trim_that_skips_a_count_is_padded() -> None:
+    text = user_text(tokens=51, label="Hi.", encode=_skips, seed=0)
+    assert _skips(text) == 51
+    assert text.startswith("Hi.\n")
+
+
+def _skips(text: str) -> int:
+    body = text[:-1] if text.endswith("\n") else text
+    if body.endswith("0"):
+        return 20 + (len(text) - 1) * 2 + 1
+    return 20 + len(text) * 2
+
+
+def test_a_new_line_that_steps_over_is_closed_on_the_previous_line() -> None:
+    text = user_text(tokens=48, label="Hi.", encode=_boundary, seed=0)
+    assert _boundary(text) == 48
+    assert text.startswith("Hi.\n")
+
+
+def _boundary(text: str) -> int:
+    body = text[:-1] if text.endswith("\n") else text
+    rows = body.split("\n")
+    extra = 1 if rows and rows[-1] else 0
+    if rows and (rows[-1].endswith("00") or rows[-1].endswith("0.")):
+        extra = 0
+    return 30 + len(text) + extra
+
+
 def test_a_label_longer_than_the_target_is_rejected() -> None:
     try:
         user_text(tokens=2, label="Passage 10000.", encode=_overhead, seed=0)
