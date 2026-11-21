@@ -299,6 +299,21 @@ def test_a_stream_prints_reasoning_then_the_reply() -> None:
     assert 'read_file {"a": 1}' in text.split("--- request 1 tool_calls ---", 1)[1]
 
 
+def test_a_finished_tool_call_is_not_printed_twice() -> None:
+    updates = [
+        _update(Content.from_function_call(call_id="call_0", name="glob", arguments="")),
+        _update(Content.from_function_call(call_id="call_0", name="glob", arguments='{"pattern": "notes/**/*"')),
+        _update(Content.from_function_call(call_id="call_0", name="", arguments="}")),
+        _update(Content.from_function_call(call_id="call_0", name="glob", arguments='{"pattern": "notes/**/*"}')),
+        _update(finish_reason="tool_calls"),
+    ]
+    sink = StringIO()
+    print_updates(updates, sink)
+    text = sink.getvalue()
+    assert text.count("glob") == 1
+    assert text.count('{"pattern": "notes/**/*"}') == 1
+
+
 def test_a_later_turn_prints_when_the_response_id_stays() -> None:
     updates = [
         _update(Content.from_function_call(call_id="c0", name="glob", arguments="{}")),

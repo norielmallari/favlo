@@ -81,12 +81,12 @@ class TurnPrinter:
             found = {"id": call_id or f"call_{len(self.calls)}", "name": "", "arguments": ""}
             self.calls.append(found)
         name = getattr(item, "name", None) or ""
-        if isinstance(name, str) and name:
+        if isinstance(name, str) and name and found["name"] != name:
             found["name"] += name
         arguments = getattr(item, "arguments", None)
         if isinstance(arguments, dict):
-            found["arguments"] = json.dumps(arguments)
-        elif isinstance(arguments, str) and arguments:
+            arguments = json.dumps(arguments)
+        if isinstance(arguments, str) and arguments and not _repeats(found["arguments"], arguments):
             found["arguments"] += arguments
 
     def _end(self) -> None:
@@ -109,6 +109,21 @@ def print_updates(updates: Iterable[Any], sink: TextIO) -> None:
     for update in updates:
         printer.take(update)
     printer.close()
+
+
+def _repeats(current: str, arguments: str) -> bool:
+    """True when ``arguments`` copies a JSON object ``current`` already holds."""
+    if not current:
+        return False
+    if arguments == current:
+        return True
+    if not current.endswith(arguments):
+        return False
+    try:
+        json.loads(current)
+    except json.JSONDecodeError:
+        return False
+    return True
 
 
 def _has_body(update: Any) -> bool:
