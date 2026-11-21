@@ -1037,6 +1037,47 @@ def test_a_warm_embedding_child_is_reused_within_ttl(monkeypatch) -> None:
     assert state["embed_cache"]["child"] is opened[0]
 
 
+def test_a_stale_embeddings_drop_marker_does_not_unload_a_language_resident() -> None:
+    from favlo.pipelines import release_embed_cache
+
+    language = _Runtime()
+    language.counts = {}
+    state = _embed_state(language)
+    args = _args()
+    state["embed_cache"] = {
+        "drop_resident": True,
+        "folder": "bge-m3-int8",
+        "pipeline": "bge_m3",
+    }
+    release_embed_cache(state, args)
+    assert language.closed is False
+    assert state["runtime"] is language
+    assert state["record"] == "qwen"
+    assert state["pipeline"] == "qwen36_35b_a3b"
+    assert state.get("embed_cache") is None
+
+
+def test_a_matching_embeddings_drop_marker_still_closes_that_resident() -> None:
+    from favlo.pipelines import release_embed_cache
+
+    embed = _Runtime()
+    embed.counts = {}
+    state = _embed_state(embed)
+    state["record"] = "bge-m3-int8"
+    state["pipeline"] = "bge_m3"
+    args = _args()
+    state["embed_cache"] = {
+        "drop_resident": True,
+        "folder": "bge-m3-int8",
+        "pipeline": "bge_m3",
+    }
+    release_embed_cache(state, args)
+    assert embed.closed is True
+    assert state["runtime"] is None
+    assert state["record"] is None
+    assert state.get("embed_cache") is None
+
+
 def test_an_embedding_child_exit_keeps_the_resident_runtime(monkeypatch) -> None:
     from favlo.http_app import _run_once
     from favlo.pipeline_worker import ChildExited

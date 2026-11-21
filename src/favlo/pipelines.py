@@ -605,13 +605,22 @@ def cancel_embed_ttl(state: dict[str, Any]) -> None:
 
 
 def release_embed_cache(state: dict[str, Any], args: Any) -> None:
-    """Close a parked embeddings process and clear its cache entry."""
+    """Close a parked embeddings process and clear its cache entry.
+
+    A ``drop_resident`` marker only closes the resident when that process is
+    still the embeddings model named when the marker was parked. A later
+    language or media load must not be swept by a stale timer or by the next
+    embeddings request.
+    """
     cancel_embed_ttl(state)
     cache = state.pop("embed_cache", None)
     if not isinstance(cache, dict):
         return
     if cache.get("drop_resident"):
-        _clear_resident(state, args)
+        if state.get("record") == cache.get("folder") and state.get("pipeline") == cache.get(
+            "pipeline"
+        ):
+            _clear_resident(state, args)
         return
     child = cache.get("child")
     if child is not None:
