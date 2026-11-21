@@ -413,6 +413,9 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - A `<tool_call>` before `</think>` ends the trace.
 - The reply parser turns a finished call into an OpenAI `tool_calls` message.
 - The call XML is not sent as `delta.content`.
+- A streamed call sends the function name when `<function=...>` closes.
+- Each finished parameter follows as a `tool_calls` argument fragment.
+- Those fragments join to the same JSON object as the finished call.
 - A parameter body that is a JSON array, object, or number is that value.
 - Any other body stays a string.
 - A leading zero keeps a digit string as text.

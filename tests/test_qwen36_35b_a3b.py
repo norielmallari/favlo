@@ -811,6 +811,20 @@ def test_an_open_think_block_stays_out_of_the_reply() -> None:
     assert calls == []
 
 
+def test_a_split_parameter_keeps_the_markup_newline_out_of_the_value() -> None:
+    gate = StreamText(False)
+    events: list[tuple[str, object]] = []
+    events.extend(gate.push("<tool_call>\n<function=glob>\n<parameter=pattern>"))
+    events.extend(gate.push("\nnotes/**/*\n</parameter>\n</function>\n</tool_call>"))
+    events.extend(gate.finish())
+    arguments = "".join(
+        payload["arguments"]
+        for kind, payload in events
+        if kind == "tool_args" and isinstance(payload, dict)
+    )
+    assert arguments == '{"pattern": "notes/**/*"}'
+
+
 def test_a_tool_call_before_the_close_ends_the_trace() -> None:
     call = "<tool_call>\n<function=read_file>\n</function>\n</tool_call>"
     reasoning, reply = completion_fields("Look\n" + call, True)
@@ -824,7 +838,10 @@ def test_a_tool_call_before_the_close_ends_the_trace() -> None:
     parts.extend(gate.push(call))
     parts.extend(gate.finish())
     assert ("reasoning", "Look\n") in parts
-    assert all("<tool_call>" not in text for _channel, text in parts)
+    assert ("tool_start", {"index": 0, "id": "call_0", "name": "read_file"}) in parts
+    assert all(
+        "<tool_call>" not in text for _channel, text in parts if isinstance(text, str)
+    )
 
 
 def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
@@ -872,6 +889,61 @@ def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
     assert names == ["read_file"]
     assert finished
     assert "<tool_call>" not in "".join(content)
+
+
+def test_a_thinking_stream_sends_the_tool_name_before_the_arguments() -> None:
+    from favlo.reply import MemoryReply
+    from favlo.responses import ChatWire
+    from qwen36_35b_a3b.metal41.chat import _stream
+
+    class _Runtime:
+        _hit_limit = False
+        _cached_tokens = 0
+        _prefill_seconds = 1.0
+        _decode_seconds = 1.0
+        _output_ids: list[int] = []
+
+        def decode(self, ids: list[int]) -> str:
+            words = {
+                1: "Plan",
+                2: "\n</think>\n",
+                3: "<tool_call>\n<function=locker>\n",
+                4: "<parameter=code>\npebble-7\n</parameter>\n",
+                5: "</function>\n</tool_call>",
+            }
+            return "".join(words[token] for token in ids)
+
+        def generate(self, prompt, limit, temperature, top_p, top_k, presence, stop, **kwargs):
+            del prompt, limit, temperature, top_p, top_k, presence, stop
+            ids = [1, 2, 3, 4, 5]
+            on_token = kwargs["on_token"]
+            for token in ids:
+                on_token(token)
+            self._output_ids = ids
+            return ids
+
+    inner = MemoryReply("qwen36_35b_a3b")
+    _stream(ChatWire(inner), _Runtime(), [9], [], False, 8, 0.0, 1.0, 1, 0.0, True, [], None)
+    seen: list[tuple[str, str]] = []
+    for payload in inner.events:
+        choices = payload.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        if delta.get("reasoning_content"):
+            seen.append(("reasoning", str(delta["reasoning_content"])))
+        for call in delta.get("tool_calls") or []:
+            function = call.get("function") or {}
+            if function.get("name"):
+                seen.append(("name", str(function["name"])))
+            if function.get("arguments"):
+                seen.append(("arguments", str(function["arguments"])))
+    names = [text for kind, text in seen if kind == "name"]
+    arguments = "".join(text for kind, text in seen if kind == "arguments")
+    assert names == ["locker"]
+    assert arguments == '{"code": "pebble-7"}'
+    assert seen.index(("reasoning", "Plan")) < seen.index(("name", "locker"))
+    assert seen.index(("name", "locker")) < seen.index(("arguments", '{"code": "pebble-7"'))
 
 
 def _qwen36_record() -> Path | None:

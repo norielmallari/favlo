@@ -903,8 +903,52 @@ def _stream(
         gate = StreamText(thinking, keep_calls=not emit_tools)
         opened: set[str] = set()
 
-        def emit_piece(channel: str, visible: str) -> None:
-            if not visible:
+        def tool_output_index(ordinal: int) -> int:
+            base = 0
+            if "reasoning" in opened:
+                base += 1
+            if "content" in opened:
+                base += 1
+            return base + ordinal
+
+        def emit_tool(channel: str, payload: dict[str, Any]) -> None:
+            call_id = str(payload.get("id") or "")
+            output_index = tool_output_index(int(payload.get("index") or 0))
+            if channel == "tool_start":
+                event(
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "type": "function_call",
+                            "id": f"fc_{call_id}",
+                            "call_id": call_id,
+                            "name": payload.get("name") or "",
+                            "arguments": "",
+                            "status": "in_progress",
+                        },
+                    }
+                )
+                return
+            fragment = payload.get("arguments") or ""
+            if not fragment:
+                return
+            event(
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "delta": fragment,
+                    "item_id": f"fc_{call_id}",
+                    "output_index": output_index,
+                    "call_id": call_id,
+                }
+            )
+
+        def emit_piece(channel: str, visible: Any) -> None:
+            if channel in {"tool_start", "tool_args"}:
+                if isinstance(visible, dict):
+                    emit_tool(channel, visible)
+                return
+            if not isinstance(visible, str) or not visible:
                 return
             if channel not in opened:
                 opened.add(channel)

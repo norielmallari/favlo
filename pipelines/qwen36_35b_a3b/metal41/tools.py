@@ -210,27 +210,37 @@ def _held_suffix(text: str, marker: str) -> int:
 
 
 class StreamText:
-    """Reasoning and reply as tokens arrive.
+    """Reasoning, reply, and tool calls as tokens arrive.
 
     Thinking stays open until ``</think>``. A reply suffix that may still grow
-    into ``<tool_call>`` is held and is not sent as content. The caller parses
-    the call into ``tool_calls``. ``keep_calls`` leaves that text in the reply
-    when the request asked for no tool message.
+    into ``<tool_call>`` is held back. Once the call opens, the function name
+    is sent, then each finished parameter as a JSON fragment. Those fragments
+    join to the same object the finished call uses. ``keep_calls`` leaves the
+    call XML in the reply when the request asked for no tool message.
     """
 
     def __init__(self, thinking: bool, *, keep_calls: bool = False) -> None:
         self._reasoning = thinking
         self._keep_calls = keep_calls
+        self._tools = not keep_calls
         self._held = ""
         self._call = ""
         self._in_call = False
+        self._tool = ""
+        self._phase = "seek_fn"
+        self._index = 0
+        self._json_open = False
+        self._param = ""
+        self._drop_lead = False
         self._escape_tail = ""
         self._escape_channel: str | None = None
 
-    def push(self, piece: str) -> list[tuple[str, str]]:
+    def push(self, piece: str) -> list[tuple[str, Any]]:
         if piece == "":
             return []
         if self._in_call:
+            if self._tools:
+                return self._push_tool(piece)
             self._call += piece
             return []
         self._held += piece
@@ -238,7 +248,9 @@ class StreamText:
             return self._push_reasoning()
         return self._push_reply()
 
-    def finish(self) -> list[tuple[str, str]]:
+    def finish(self) -> list[tuple[str, Any]]:
+        if self._in_call and self._tools:
+            return self._finish_call()
         if self._in_call:
             xml = self._call
             self._call = ""
@@ -314,16 +326,21 @@ class StreamText:
         out.extend(self.push(rest.lstrip("\n")))
         return out
 
-    def _push_reply(self) -> list[tuple[str, str]]:
+    def _push_reply(self) -> list[tuple[str, Any]]:
         at = self._held.find(_TOOL_OPEN)
         if at >= 0:
             emit = self._held[:at]
-            self._call = self._held[at:]
+            rest = self._held[at + len(_TOOL_OPEN) :]
             self._held = ""
             self._in_call = True
-            if emit:
-                return self._show("content", emit, final=True)
-            return self._flush_escape()
+            out = self._show("content", emit, final=True) if emit else self._flush_escape()
+            if not self._tools:
+                self._call = _TOOL_OPEN + rest
+                return out
+            self._tool = ""
+            self._phase = "seek_fn"
+            out.extend(self._push_tool(rest))
+            return out
         keep = _held_suffix(self._held, _TOOL_OPEN)
         if keep == 0:
             emit = self._held
@@ -332,6 +349,112 @@ class StreamText:
         emit = self._held[:-keep]
         self._held = self._held[-keep:]
         return self._show("content", emit) if emit else []
+
+    def _push_tool(self, piece: str) -> list[tuple[str, Any]]:
+        self._tool += piece
+        out: list[tuple[str, Any]] = []
+        while self._in_call:
+            if self._phase == "seek_fn":
+                match = re.search(r"<function=([^\n>]+)>", self._tool)
+                if match is None:
+                    break
+                name = match.group(1).strip()
+                self._tool = self._tool[match.end() :]
+                out.append(
+                    (
+                        "tool_start",
+                        {"index": self._index, "id": f"call_{self._index}", "name": name},
+                    )
+                )
+                self._phase = "seek_param"
+                continue
+            if self._phase == "in_value":
+                end = self._tool.find("</parameter>")
+                if end < 0:
+                    break
+                value = self._parameter_body(self._tool[:end])
+                self._tool = self._tool[end + len("</parameter>") :]
+                out.append(
+                    (
+                        "tool_args",
+                        {
+                            "index": self._index,
+                            "id": f"call_{self._index}",
+                            "arguments": self._param_fragment(self._param, value),
+                        },
+                    )
+                )
+                self._phase = "seek_param"
+                continue
+            param = re.search(r"<parameter=([^\n>]+)>(\n?)", self._tool)
+            close = self._tool.find("</tool_call>")
+            param_at = param.start() if param is not None else -1
+            if param is not None and (close < 0 or param_at < close):
+                self._param = param.group(1).strip()
+                self._drop_lead = param.group(2) != "\n"
+                self._tool = self._tool[param.end() :]
+                self._phase = "in_value"
+                continue
+            if close < 0:
+                break
+            out.extend(self._close_call())
+        return out
+
+    def _finish_call(self) -> list[tuple[str, Any]]:
+        out: list[tuple[str, Any]] = []
+        if self._phase == "in_value" and self._tool:
+            out.append(
+                (
+                    "tool_args",
+                    {
+                        "index": self._index,
+                        "id": f"call_{self._index}",
+                        "arguments": self._param_fragment(self._param, self._parameter_body(self._tool)),
+                    },
+                )
+            )
+            self._tool = ""
+        if self._phase != "seek_fn":
+            out.extend(self._close_call())
+        self._in_call = False
+        self._tool = ""
+        return out
+
+    def _close_call(self) -> list[tuple[str, Any]]:
+        arguments = "{}" if not self._json_open else "}"
+        self._json_open = False
+        index = self._index
+        call_id = f"call_{index}"
+        self._index += 1
+        self._phase = "seek_fn"
+        end = self._tool.find("</tool_call>")
+        if end >= 0:
+            rest = self._tool[end + len("</tool_call>") :]
+        else:
+            rest = ""
+        self._tool = ""
+        self._in_call = False
+        out: list[tuple[str, Any]] = [
+            ("tool_args", {"index": index, "id": call_id, "arguments": arguments})
+        ]
+        if rest.strip():
+            out.extend(self.push(rest.lstrip("\n")))
+        return out
+
+    def _parameter_body(self, value: str) -> str:
+        if self._drop_lead and value.startswith("\n"):
+            value = value[1:]
+        if value.endswith("\n"):
+            value = value[:-1]
+        return value
+
+    def _param_fragment(self, name: str, value: str) -> str:
+        parsed = _parameter_value(value)
+        body = json.dumps(name, ensure_ascii=False) + ": " + json.dumps(parsed, ensure_ascii=False)
+        if self._json_open:
+            return ", " + body
+        self._json_open = True
+        return "{" + body
 
 
 def split_thinking(text: str, thinking: bool) -> tuple[str, str]:
