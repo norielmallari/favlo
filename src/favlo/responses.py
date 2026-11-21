@@ -473,6 +473,8 @@ class ChatWire:
         self.model_id = getattr(inner, "model_id", "")
         self._created = int(time.time())
         self._calls = 0
+        self._announced: dict[str, int] = {}
+        self._arg_streamed: set[str] = set()
 
     @property
     def started(self) -> bool:
@@ -536,9 +538,58 @@ class ChatWire:
                 ]
             )
             return
+        if kind == "response.output_item.added":
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                self._announce_call(item)
+            return
+        if kind == "response.function_call_arguments.delta":
+            call_id = str(payload.get("call_id") or "")
+            index = self._announced.get(call_id)
+            fragment = payload.get("delta") or ""
+            if index is None or not fragment:
+                return
+            self._arg_streamed.add(call_id)
+            self._send(
+                [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {"index": index, "function": {"arguments": fragment}}
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            )
+            return
         if kind == "response.output_item.done":
             item = payload.get("item")
             if isinstance(item, dict) and item.get("type") == "function_call":
+                call_id = str(item.get("call_id") or "")
+                if call_id in self._announced:
+                    if call_id not in self._arg_streamed:
+                        arguments = item.get("arguments") or "{}"
+                        if not isinstance(arguments, str):
+                            arguments = json.dumps(arguments)
+                        self._send(
+                            [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": self._announced[call_id],
+                                                "function": {"arguments": arguments},
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ]
+                        )
+                    return
                 self._send(
                     [
                         {
@@ -575,6 +626,32 @@ class ChatWire:
             self._send([{"index": 0, "delta": {}, "finish_reason": reason}])
             usage = extra if isinstance(extra, dict) else {}
             self._inner.event(_chat_chunk(self, [], self._created, usage))
+
+    def _announce_call(self, item: dict[str, Any]) -> None:
+        call_id = str(item.get("call_id") or "")
+        if not call_id or call_id in self._announced:
+            return
+        index = self._calls
+        self._announced[call_id] = index
+        self._calls += 1
+        self._send(
+            [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                "id": call_id,
+                                "type": "function",
+                                "function": {"name": item.get("name") or "", "arguments": ""},
+                            }
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        )
 
     def _send(self, choices: list[dict[str, Any]]) -> None:
         self._inner.event(_chat_chunk(self, choices, self._created))
