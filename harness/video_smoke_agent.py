@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from agent_framework import Agent
+from agent_framework import Agent, FunctionInvocationContext, function_middleware
 
 from favlo.chat_client import open_chat_client
 from harness.harness_model import judge_model
@@ -49,6 +49,20 @@ def post_json(port: int, route: str, body: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+@function_middleware
+async def _fill_injected_arguments(context: FunctionInvocationContext, call_next: Any) -> None:
+    """Copy stills the harness injected into the arguments the schema checks."""
+    arguments = context.arguments
+    if not isinstance(arguments, dict):
+        arguments = {} if arguments is None else dict(arguments)
+        context.arguments = arguments
+    if "image" not in arguments:
+        image = context.kwargs.get("image")
+        if image is not None:
+            arguments["image"] = image
+    await call_next()
+
+
 def _image_block(path: Path) -> dict[str, str]:
     return {
         "type": "image",
@@ -64,7 +78,7 @@ def video_body(note: dict[str, Any], still: Path, model: str | None) -> dict[str
         "prompt": prompt,
         "image": _image_block(still),
         "size": f"{note['width']}x{note['height']}",
-        "frames": note["frames"],
+        "duration": note["frames"] / note["fps"],
         "seed": note["seed"],
     }
     folder = model or note.get("model")
@@ -92,6 +106,7 @@ async def create_video(
             name="video-smoke-agent",
             instructions=f"Call {call} once with the exact arguments. Then stop.",
             tools=mcp,
+            middleware=[_fill_injected_arguments],
             default_options={"temperature": 0},
         )
         extra: dict[str, Any] = {"image": body["image"]}
@@ -122,7 +137,7 @@ def check_still(port: int, png: bytes, sentence: str, model: str) -> str:
         {
             "model": model,
             "temperature": 0,
-            "max_tokens": 8,
+            "max_tokens": 16,
             "enable_thinking": False,
             "messages": [
                 {
@@ -213,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _ask(tool: str, body: dict[str, Any]) -> str:
     lines = [f"Call {tool} once with these arguments, then stop."]
-    for key in ("prompt", "size", "frames", "seed"):
+    for key in ("prompt", "size", "duration", "seed"):
         if key in body:
             lines.append(f"{key}: {body[key]}")
     return "\n".join(lines)
