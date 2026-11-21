@@ -3,7 +3,9 @@
 The coding agent is the production-readiness run. These checks share its
 listener: a system instruction and a user reply, one thinking turn, a
 stored follow-up, a required tool call, ``tool_choice`` ``none``, a hosted
-``web_search``, ``finish_reason`` ``length``, and a streamed reply. The horse
+``web_search``, ``finish_reason`` ``length``, a streamed reply, and a second
+streamed chat that keeps thinking on and must show the tool name, then argument
+fragments, after the think block. The horse
 still is the first coding chat when ``--vision`` is set, not a separate check.
 
 The listener's chat object uses ``stop``, ``length``, and ``tool_calls``. It does
@@ -193,6 +195,48 @@ def stop_problems(text: str) -> list[str]:
     if leaked is not None:
         problems.append(leaked)
     return problems
+
+
+def tool_stream_problems(
+    *,
+    saw_reasoning: bool,
+    name: str,
+    pieces: list[str],
+) -> list[str]:
+    """Problems when a thinking stream does not show the call being built.
+
+    Reasoning comes first. The first argument piece is not the finished object.
+    Later pieces complete that object, and it carries the locker code.
+    """
+    problems: list[str] = []
+    if not saw_reasoning:
+        problems.append("the stream returned no reasoning before the tool call")
+    if name != "locker":
+        problems.append(f"streamed tool {name!r}")
+    first = pieces[0] if pieces else ""
+    try:
+        opened = json.loads(first) if first else None
+    except json.JSONDecodeError:
+        opened = None
+    if isinstance(opened, dict):
+        problems.append("the tool call arrived in one piece")
+    parsed = _first_object(pieces)
+    if not isinstance(parsed, dict) or parsed.get("code") != CODE:
+        problems.append("the streamed arguments are not the locker code")
+    return problems
+
+
+def _first_object(pieces: list[str]) -> Any:
+    joined = ""
+    for piece in pieces:
+        joined += piece
+        try:
+            value = json.loads(joined)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
 
 
 def stream_problems(pieces: list[str], text: str) -> list[str]:
@@ -626,8 +670,70 @@ async def run_web_search(base_url: str, model: str, *, store: bool) -> list[str]
     return [*web_search_problems(text, calls), *ended(response, "stop")]
 
 
+def _stream_reasoning(update: Any) -> str:
+    parts = [
+        item.text
+        for item in getattr(update, "contents", None) or []
+        if getattr(item, "type", None) == "text_reasoning"
+        and isinstance(getattr(item, "text", None), str)
+        and item.text
+    ]
+    return "".join(parts)
+
+
+async def run_tool_stream(base_url: str, model: str, *, store: bool) -> list[str]:
+    """Thinking stays on. The tool name streams, then the argument fragments."""
+    from agent_framework import Agent
+
+    from favlo.chat_client import close_chat_client, open_chat_client
+
+    options = _quiet(True, store=store)
+    client = open_chat_client(model, base_url)
+    agent = Agent(
+        client=client,
+        name="coding",
+        instructions="Call locker. Do not describe the call in the reply.",
+        tools=_tools([]),
+        default_options=options,
+    )
+    session = agent.create_session()
+    saw_reasoning = False
+    name = ""
+    pieces: list[str] = []
+    prompt = f"Think in one sentence, then call locker with code {CODE}."
+    try:
+        stream = await agent.run(prompt, stream=True, session=session, options=options)
+        async for update in stream:
+            if _stream_reasoning(update):
+                if not name:
+                    saw_reasoning = True
+            for part in getattr(update, "contents", None) or []:
+                if getattr(part, "type", None) != "function_call":
+                    continue
+                part_name = getattr(part, "name", "") or ""
+                part_args = getattr(part, "arguments", "") or ""
+                if isinstance(part_args, dict):
+                    part_args = json.dumps(part_args)
+                if not isinstance(part_args, str):
+                    part_args = ""
+                if part_name and not name:
+                    name = part_name
+                if part_args:
+                    pieces.append(part_args)
+            if getattr(update, "finish_reason", None):
+                break
+    finally:
+        await close_chat_client(client)
+    print(f"tool stream {name!r} pieces {len(pieces)}", flush=True)
+    return tool_stream_problems(
+        saw_reasoning=saw_reasoning,
+        name=name,
+        pieces=pieces,
+    )
+
+
 async def run_contract(base_url: str, model: str, *, store: bool) -> list[str]:
-    """Reply, reasoning, store, tools, choice, web search, length, and stream."""
+    """Reply, reasoning, store, tools, choice, web search, length, stream, and tool stream."""
     problems: list[str] = []
     cases = (
         ("reply", run_reply),
@@ -638,6 +744,7 @@ async def run_contract(base_url: str, model: str, *, store: bool) -> list[str]:
         ("web", run_web_search),
         ("length", run_length),
         ("stream", run_stream),
+        ("tool_stream", run_tool_stream),
     )
     for name, runner in cases:
         print(f"check {name}", flush=True)

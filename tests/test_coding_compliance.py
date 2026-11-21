@@ -28,6 +28,7 @@ from harness.coding.compliance import (
     stored_reasoning,
     stream_problems,
     tool_problems,
+    tool_stream_problems,
     tool_rounds,
     usage_problems,
     vision_problems,
@@ -86,6 +87,22 @@ def test_tool_choice_none_rejects_a_call() -> None:
     call = ToolRound("c1", CODE, LABEL)
     assert choice_problems([], "Apple.", "") == []
     assert any("tool_choice" in item for item in choice_problems([call], "Apple.", ""))
+
+
+def test_a_thinking_stream_shows_the_tool_name_then_the_arguments() -> None:
+    held = tool_stream_problems(
+        saw_reasoning=True,
+        name="locker",
+        pieces=['{"code": "pebble-7"', "}", '{"code": "pebble-7"}'],
+    )
+    assert held == []
+    late = tool_stream_problems(
+        saw_reasoning=False,
+        name="locker",
+        pieces=['{"code": "pebble-7"}'],
+    )
+    assert any("reasoning" in item for item in late)
+    assert any("one piece" in item for item in late)
 
 
 def test_length_and_stop_replies() -> None:
