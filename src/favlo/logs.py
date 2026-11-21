@@ -27,6 +27,7 @@ DEFAULT_IMAGE_TTL_SECONDS = 5 * 24 * 60 * 60
 DEFAULT_MUSIC_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_VOICE_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_EMBEDDINGS_TTL_SECONDS = 60
+DEFAULT_BULK_DEBOUNCE_SECONDS = 60
 DEFAULT_HEARTBEAT_SECONDS = 5 * 60
 _SETTINGS_NAME = "settings.json"
 _LOG_NAME = "favlo.log"
@@ -139,6 +140,7 @@ def _default_settings() -> dict[str, Any]:
         "voice_ttl_seconds": DEFAULT_VOICE_TTL_SECONDS,
         "embeddings_ttl_seconds": DEFAULT_EMBEDDINGS_TTL_SECONDS,
         "heartbeat_seconds": DEFAULT_HEARTBEAT_SECONDS,
+        "bulk_debounce_seconds": DEFAULT_BULK_DEBOUNCE_SECONDS,
         "pipeline_roots": [],
     }
 
@@ -154,6 +156,18 @@ def configured_pipeline_roots(settings: dict[str, Any] | None = None) -> tuple[s
         if isinstance(item, str) and item.strip():
             roots.append(item.strip())
     return tuple(roots)
+
+
+def bulk_debounce_seconds(settings: dict[str, Any]) -> float:
+    """Seconds bulk waits after a preemption. The default is 60. ``0`` admits at once."""
+    value = settings.get("bulk_debounce_seconds", DEFAULT_BULK_DEBOUNCE_SECONDS)
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_BULK_DEBOUNCE_SECONDS
+    if seconds < 0:
+        return DEFAULT_BULK_DEBOUNCE_SECONDS
+    return seconds
 
 
 def heartbeat_seconds(settings: dict[str, Any]) -> int:

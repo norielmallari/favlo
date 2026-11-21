@@ -8,8 +8,10 @@ chat or an embedding preempts interactive media and bulk at the next safe
 point and leaves ``preempt`` set until that higher deque has drained. An
 interactive media waiter preempts bulk. After a chat releases, a short
 debounce keeps media and bulk from admitting so the next model call can reuse
-the resident language model. ``flush`` drops every waiter. The request that
-holds admission stays until it releases.
+the resident language model. After bulk is preempted, bulk stays out for
+``bulk_debounce_seconds`` and a later higher request restarts that wait.
+``flush`` drops every waiter. The request that holds admission stays until
+it releases.
 """
 
 from __future__ import annotations
@@ -98,7 +100,9 @@ def ensure(state: dict) -> Scheduler:
     """The pipeline manager's scheduler, created on the first use of ``state``."""
     found = state.get("schedule")
     if not isinstance(found, Scheduler):
-        found = Scheduler()
+        from favlo.logs import bulk_debounce_seconds, favlo_home, load_settings
+
+        found = Scheduler(bulk_debounce=bulk_debounce_seconds(load_settings(favlo_home())))
         state["schedule"] = found
     state["preempt"] = found.preempt
     return found
@@ -107,7 +111,9 @@ def ensure(state: dict) -> Scheduler:
 class Scheduler:
     """Admission queues. The pipeline manager admits one request at a time."""
 
-    def __init__(self, *, chat_debounce: float | None = None) -> None:
+    def __init__(
+        self, *, chat_debounce: float | None = None, bulk_debounce: float | None = None
+    ) -> None:
         self._cond = threading.Condition()
         self._embeds: deque[_Ticket] = deque()
         self._chats: deque[_Ticket] = deque()
@@ -120,6 +126,11 @@ class Scheduler:
         self._chat_debounce_until = 0.0
         self._chat_debounce_seconds = (
             _CHAT_DEBOUNCE_SECONDS if chat_debounce is None else max(0.0, float(chat_debounce))
+        )
+        self._bulk_debounce_until = 0.0
+        self._bulk_preempted = False
+        self._bulk_debounce_seconds = (
+            0.0 if bulk_debounce is None else max(0.0, float(bulk_debounce))
         )
         self.epoch = 0
         self.preempt = threading.Event()
@@ -162,6 +173,9 @@ class Scheduler:
             self._running = ticket
             if seam_for(ticket.kind).debounce_after_release:
                 self._chat_debounce_until = 0.0
+            if _queue_is_bulk(ticket.kind):
+                self._bulk_preempted = False
+                self._bulk_debounce_until = 0.0
             self._sync_preempt()
         except BaseException:
             self._abandon(ticket)
@@ -175,6 +189,8 @@ class Scheduler:
         with self._cond:
             self.epoch += 1
             self._chat_debounce_until = 0.0
+            self._bulk_debounce_until = 0.0
+            self._bulk_preempted = False
             for queue in (self._embeds, self._chats, self._media, self._bulk):
                 while queue:
                     self._dropped.add(id(queue.popleft()))
@@ -188,6 +204,8 @@ class Scheduler:
                 self._running = None
                 if seam_for(ticket.kind).debounce_after_release and self._chat_debounce_seconds > 0:
                     self._chat_debounce_until = time.monotonic() + self._chat_debounce_seconds
+                if self._bulk_preempted and not _queue_is_bulk(ticket.kind):
+                    self._arm_bulk_debounce()
             self._sync_preempt()
             self._cond.notify_all()
 
@@ -273,7 +291,7 @@ class Scheduler:
                 return False
             return ticket is self._media[0]
         if self._bulk:
-            if self._debounce_active():
+            if self._debounce_active() or self._bulk_debounce_active():
                 return False
             return ticket is self._bulk[0]
         return False
@@ -281,14 +299,32 @@ class Scheduler:
     def _debounce_active(self) -> bool:
         return time.monotonic() < self._chat_debounce_until
 
+    def _bulk_debounce_active(self) -> bool:
+        return time.monotonic() < self._bulk_debounce_until
+
+    def _arm_bulk_debounce(self) -> None:
+        if self._bulk_debounce_seconds <= 0:
+            return
+        self._bulk_debounce_until = time.monotonic() + self._bulk_debounce_seconds
+
+    def _mark_bulk_preempted(self) -> None:
+        self._bulk_preempted = True
+        self._arm_bulk_debounce()
+
     def _wait_seconds(self, cancellable: bool) -> float | None:
         if cancellable:
             return 0.05
-        remaining = self._chat_debounce_until - time.monotonic()
-        waiting_media = self._media or self._bulk
-        if remaining > 0 and waiting_media and not self._embeds and not self._chats:
-            return min(0.05, remaining)
-        return None
+        higher = self._embeds or self._chats
+        waits: list[float] = []
+        chat_left = self._chat_debounce_until - time.monotonic()
+        if chat_left > 0 and (self._media or self._bulk) and not higher:
+            waits.append(min(0.05, chat_left))
+        bulk_left = self._bulk_debounce_until - time.monotonic()
+        if bulk_left > 0 and self._bulk and not higher and not self._media:
+            waits.append(min(0.05, bulk_left))
+        if not waits:
+            return None
+        return min(waits)
 
     def _abandon(self, ticket: _Ticket) -> None:
         queue = self._queue(ticket.kind)
@@ -324,6 +360,8 @@ class Scheduler:
         if bulk and self._media and MediaPipeline.preempts_bulk:
             waiting = True
         if waiting:
+            if bulk:
+                self._mark_bulk_preempted()
             self.preempt.set()
             return
         self.preempt.clear()

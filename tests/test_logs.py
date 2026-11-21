@@ -11,6 +11,7 @@ from favlo.logs import (
     DEFAULT_LOG_MAX_BYTES,
     configured_thinking_budget,
     ensure_settings,
+    bulk_debounce_seconds,
     heartbeat_seconds,
     install_rolling_stdio,
     load_settings,
@@ -32,6 +33,14 @@ def test_a_missing_settings_file_uses_one_mebibyte(tmp_path) -> None:
     settings_path(tmp_path).write_text(json.dumps(stored), encoding="utf-8")
     assert log_max_bytes(ensure_settings(tmp_path)) == 4096
     assert json.loads(settings_path(tmp_path).read_text(encoding="utf-8"))["log_max_bytes"] == 4096
+
+
+def test_bulk_debounce_defaults_to_sixty_seconds() -> None:
+    assert bulk_debounce_seconds({}) == 60
+    assert bulk_debounce_seconds({"bulk_debounce_seconds": 0}) == 0
+    assert bulk_debounce_seconds({"bulk_debounce_seconds": 15}) == 15
+    assert bulk_debounce_seconds({"bulk_debounce_seconds": "nope"}) == 60
+    assert bulk_debounce_seconds({"bulk_debounce_seconds": -1}) == 60
 
 
 def test_the_quiet_interval_defaults_to_five_minutes(tmp_path) -> None:

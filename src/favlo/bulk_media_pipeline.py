@@ -11,7 +11,11 @@ from favlo.media_pipeline import MediaPipeline
 
 
 class BulkMediaPipeline(MediaPipeline):
-    """Interactive media stays ahead. A second bulk job waits on the deque."""
+    """Interactive media stays ahead. A second bulk job waits on the deque.
+
+    After this job is preempted, the next bulk slice waits
+    ``bulk_debounce_seconds``. A later higher request restarts that wait.
+    """
 
     _seam_only = True
     admission = frozenset({"bulk"})

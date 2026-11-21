@@ -134,6 +134,76 @@ def test_bulk_sets_preempt_for_embeddings_chat_and_media() -> None:
     schedule.release(bulk)
 
 
+def test_a_preempted_bulk_ticket_waits_and_a_later_chat_restarts_that_wait() -> None:
+    schedule = Scheduler(chat_debounce=0, bulk_debounce=0.2)
+    bulk = schedule.acquire("bulk")
+    started = threading.Event()
+
+    def wait_chat() -> None:
+        ticket = schedule.acquire("chat")
+        started.set()
+        schedule.release(ticket)
+
+    thread = threading.Thread(target=wait_chat)
+    thread.start()
+    _wait_until(lambda: schedule.waiting("chat") == 1)
+    assert schedule.preempt.is_set()
+    schedule.release(bulk)
+    assert started.wait(2)
+    thread.join(2)
+
+    entered = threading.Event()
+
+    def wait_bulk() -> None:
+        ticket = schedule.acquire("bulk")
+        entered.set()
+        schedule.release(ticket)
+
+    again = threading.Thread(target=wait_bulk)
+    again.start()
+    time.sleep(0.05)
+    assert entered.is_set() is False
+
+    restarted = threading.Event()
+
+    def wait_again() -> None:
+        ticket = schedule.acquire("chat")
+        restarted.set()
+        time.sleep(0.05)
+        schedule.release(ticket)
+
+    other = threading.Thread(target=wait_again)
+    other.start()
+    assert restarted.wait(2)
+    other.join(2)
+    time.sleep(0.05)
+    assert entered.is_set() is False
+    assert entered.wait(1)
+    again.join(2)
+    assert again.is_alive() is False
+
+
+def test_bulk_debounce_does_not_hold_interactive_media() -> None:
+    schedule = Scheduler(chat_debounce=0, bulk_debounce=5)
+    bulk = schedule.acquire("bulk")
+    started = threading.Event()
+
+    def wait_chat() -> None:
+        ticket = schedule.acquire("chat")
+        started.set()
+        schedule.release(ticket)
+
+    thread = threading.Thread(target=wait_chat)
+    thread.start()
+    _wait_until(lambda: schedule.waiting("chat") == 1)
+    schedule.release(bulk)
+    assert started.wait(2)
+    thread.join(2)
+    media = schedule.acquire("media")
+    assert schedule.running() == "media"
+    schedule.release(media)
+
+
 def test_a_second_bulk_ticket_does_not_set_preempt() -> None:
     schedule = Scheduler(chat_debounce=0)
     first = schedule.acquire("bulk")
