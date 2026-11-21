@@ -55,8 +55,22 @@ THINK_END = 248069
 TOOL_CALL_FORBID = {248058, 248059}
 
 
+_LOAD_LOCK = threading.Lock()
+_TOKENIZERS: dict[str, Tokenizer] = {}
+_TEMPLATES: dict[str, Any] = {}
+_MARKERS: dict[str, tuple[tuple[int, ...], tuple[int, ...], int]] = {}
+_GENERATION_SUFFIX: dict[str, tuple[tuple[int, ...], tuple[int, ...]]] = {}
+
+
 def load_tokenizer(root: Path) -> Tokenizer:
-    return Tokenizer.from_file(str(root / "tokenizer.json"))
+    """The checkpoint tokenizer, loaded once for this process."""
+    key = str(root)
+    with _LOAD_LOCK:
+        found = _TOKENIZERS.get(key)
+        if found is None:
+            found = Tokenizer.from_file(str(root / "tokenizer.json"))
+            _TOKENIZERS[key] = found
+        return found
 
 
 _CHECKOUT_EMPTY_THINK = (
@@ -111,6 +125,28 @@ def _bridge_omitted_assistant(messages: list[dict[str, Any]]) -> list[dict[str, 
     return bridged
 
 
+def _chat_template(root: Path) -> Any:
+    """The checkpoint Jinja template, compiled once for this process.
+
+    The empty-think block is replaced before that compile. A later prompt
+    renders the stored template.
+    """
+    key = str(root)
+    with _LOAD_LOCK:
+        found = _TEMPLATES.get(key)
+        if found is None:
+            text = (root / "chat_template.jinja").read_text()
+            if _CHECKOUT_EMPTY_THINK not in text:
+                message = "chat template has no empty think block to align"
+                raise ValueError(message)
+            text = text.replace(_CHECKOUT_EMPTY_THINK, _EMPTY_THINK, 1)
+            env = Environment()
+            env.globals["raise_exception"] = _raise
+            found = env.from_string(text)
+            _TEMPLATES[key] = found
+        return found
+
+
 def _preserve_flag(value: Any) -> bool | None:
     if value is None:
         return None
@@ -134,16 +170,9 @@ def encode_chat(
     ``preserve_thinking`` false drops reasoning on assistant turns before the
     latest user message. True keeps every assistant think block.
     """
-    template = (root / "chat_template.jinja").read_text()
-    if _CHECKOUT_EMPTY_THINK not in template:
-        message = "chat template has no empty think block to align"
-        raise ValueError(message)
-    template = template.replace(_CHECKOUT_EMPTY_THINK, _EMPTY_THINK, 1)
     prepared = normalize_messages(messages)
     if preserve_thinking:
         prepared = _bridge_omitted_assistant(prepared)
-    env = Environment()
-    env.globals["raise_exception"] = _raise
     rendered_args = {
         "messages": prepared,
         "tools": tools or None,
@@ -154,7 +183,7 @@ def encode_chat(
     }
     if reasoning_effort:
         rendered_args["reasoning_effort"] = reasoning_effort
-    rendered = env.from_string(template).render(**rendered_args)
+    rendered = _chat_template(root).render(**rendered_args)
     return list(load_tokenizer(root).encode(rendered).ids)
 
 
@@ -162,20 +191,33 @@ def encode_text(root: Path, text: str) -> list[int]:
     return list(load_tokenizer(root).encode(text).ids)
 
 
-_GENERATION_SUFFIX: dict[Path, tuple[list[int], list[int]]] = {}
-
-
 def think_closes(root: Path) -> tuple[list[int], list[int], int]:
     """Close sequences for an open think, and the ``<tool_call>`` token.
 
     Empty reasoning replays ``</think>\\n\\n``. Reasoning text replays
     ``\\n</think>\\n\\n``. A tool call drawn before that close is stored as
-    the matching sequence, then sampled again.
+    the matching sequence, then sampled again. The strings do not depend on
+    the request, so the ids stay with the tokenizer.
     """
+    key = str(root)
+    with _LOAD_LOCK:
+        found = _MARKERS.get(key)
+    if found is not None:
+        return list(found[0]), list(found[1]), found[2]
     opener = encode_text(root, "<tool_call>")
     if len(opener) != 1:
         raise RuntimeError("the tool call open is not one token")
-    return encode_text(root, "</think>\n\n"), encode_text(root, "\n</think>\n\n"), opener[0]
+    packed = (
+        tuple(encode_text(root, "</think>\n\n")),
+        tuple(encode_text(root, "\n</think>\n\n")),
+        opener[0],
+    )
+    with _LOAD_LOCK:
+        found = _MARKERS.get(key)
+        if found is None:
+            _MARKERS[key] = packed
+            found = packed
+    return list(found[0]), list(found[1]), found[2]
 
 
 def redirect_open_think(
@@ -213,16 +255,23 @@ def generation_cut(root: Path, prompt: list[int]) -> int | None:
     A later prompt that omits historical thinking does not repeat that suffix,
     so the tokens before it are the prefix the follow-up still shares.
     """
-    pair = _GENERATION_SUFFIX.get(root)
+    key = str(root)
+    with _LOAD_LOCK:
+        pair = _GENERATION_SUFFIX.get(key)
     if pair is None:
         pair = (
-            encode_text(root, "<think>\n\n</think>\n\n"),
-            encode_text(root, "<think>\n"),
+            tuple(encode_text(root, "<think>\n\n</think>\n\n")),
+            tuple(encode_text(root, "<think>\n")),
         )
-        _GENERATION_SUFFIX[root] = pair
+        with _LOAD_LOCK:
+            stored = _GENERATION_SUFFIX.get(key)
+            if stored is None:
+                _GENERATION_SUFFIX[key] = pair
+            else:
+                pair = stored
     for suffix in pair:
         count = len(suffix)
-        if count and len(prompt) > count and prompt[-count:] == suffix:
+        if count and len(prompt) > count and prompt[-count:] == list(suffix):
             return len(prompt) - count
     return None
 

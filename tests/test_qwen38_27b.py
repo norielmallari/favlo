@@ -559,6 +559,80 @@ def test_a_retokenized_split_is_not_kept() -> None:
         produced.append(token)
 
 
+def test_the_tokenizer_and_template_load_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen38_27b.metal41 import chat
+
+    root = tmp_path / "example-model"
+    root.mkdir()
+    (root / "chat_template.jinja").write_text(
+        "{# " + chat._CHECKOUT_EMPTY_THINK + " #}\n{{ messages[0].content }}"
+    )
+    opens = {"n": 0}
+    reads = {"n": 0}
+    real_read = Path.read_text
+
+    def counted_read(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "chat_template.jinja":
+            reads["n"] += 1
+        return real_read(self, *args, **kwargs)
+
+    class _Codec:
+        @staticmethod
+        def from_file(path: str) -> "_Codec":
+            del path
+            opens["n"] += 1
+            return _Codec()
+
+        def encode(self, text: str) -> SimpleNamespace:
+            return SimpleNamespace(ids=[len(text)])
+
+    monkeypatch.setattr(Path, "read_text", counted_read)
+    monkeypatch.setattr(chat, "Tokenizer", _Codec)
+    key = str(root)
+    chat._TOKENIZERS.pop(key, None)
+    chat._TEMPLATES.pop(key, None)
+    messages = [{"role": "user", "content": "hi"}]
+    first = chat.encode_chat(root, messages, None, False)
+    second = chat.encode_chat(root, messages, None, True)
+    assert first == second
+    assert opens["n"] == 1
+    assert reads["n"] == 1
+
+
+def test_a_template_without_the_empty_think_block_is_not_cached(tmp_path: Path) -> None:
+    from qwen38_27b.metal41 import chat
+
+    root = tmp_path / "example-model"
+    root.mkdir()
+    (root / "chat_template.jinja").write_text("{{ messages[0].content }}")
+    chat._TEMPLATES.pop(str(root), None)
+    messages = [{"role": "user", "content": "hi"}]
+    with pytest.raises(ValueError, match="empty think"):
+        chat.encode_chat(root, messages, None, False)
+    assert str(root) not in chat._TEMPLATES
+
+
+def test_think_closes_are_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    from qwen38_27b.metal41 import chat
+
+    root = Path("example-model")
+    chat._MARKERS.pop(str(root), None)
+    calls: list[str] = []
+
+    def fake(_root: Path, text: str) -> list[int]:
+        calls.append(text)
+        if text == "<tool_call>":
+            return [7]
+        if text == "</think>\n\n":
+            return [1, 2]
+        return [3, 4, 5]
+
+    monkeypatch.setattr(chat, "encode_text", fake)
+    assert chat.think_closes(root) == ([1, 2], [3, 4, 5], 7)
+    assert chat.think_closes(root) == ([1, 2], [3, 4, 5], 7)
+    assert calls == ["<tool_call>", "</think>\n\n", "\n</think>\n\n"]
+
+
 def test_the_draw_tokenizer_is_not_the_lookup_method(monkeypatch: pytest.MonkeyPatch) -> None:
     from qwen38_27b.metal41.forward import Qwen38Runtime
 

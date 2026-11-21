@@ -43,3 +43,19 @@ An image, video, or music package reads preempt at each stage boundary, after th
 ## Checks
 
 A command that uses the GPU in its own process takes the machine lock. The procedure is the smoke-testing skill. Do not copy those commands here. A listener harness uses `attach` and does not take the lock.
+
+## Tokenizer
+
+`Tokenizer.from_file` runs once per checkpoint in the process. Encode and decode use the stored object.
+
+A Jinja template is read and compiled once per checkpoint. `encode_chat` renders that template.
+
+Marker ids that do not depend on the request are computed once.
+
+A media or embeddings runtime holds the tokenizer for the open. `encode` does not call `from_file`.
+
+A child process loads once inside that process.
+
+The cache is per package. The miss path takes a lock.
+
+A quantize command and a harness may load the file once for that command.

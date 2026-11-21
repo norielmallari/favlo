@@ -74,3 +74,14 @@ Later finds are appended here. The sections above stay as committed.
 | 10000 | 467.09 tok/s (10000 tok in 21.41 s) | 13.77 tok/s (128 tok in 9.29 s) | 329.90 tok/s (10128 tok in 30.70 s) |
 
 The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "293.68 OR 403.33 OR 446.84 OR 467.09 Qwen3.8-27B prefill tok/s" did not find those four prefill rates. The published rows named above are different packs and different machines.
+
+19 November 2026. The tokenizer and the compiled chat template are kept for the process. The same protocol run recorded:
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 297.76 tok/s (512 tok in 1.72 s) | 15.63 tok/s (128 tok in 8.19 s) | 64.58 tok/s (640 tok in 9.91 s) |
+| 1024 | 404.72 tok/s (1024 tok in 2.53 s) | 15.60 tok/s (128 tok in 8.21 s) | 107.26 tok/s (1152 tok in 10.74 s) |
+| 4096 | 493.91 tok/s (4096 tok in 8.29 s) | 15.10 tok/s (128 tok in 8.47 s) | 252.03 tok/s (4224 tok in 16.76 s) |
+| 10000 | 485.37 tok/s (10000 tok in 20.60 s) | 14.14 tok/s (128 tok in 9.05 s) | 341.59 tok/s (10128 tok in 29.65 s) |
+
+The banner was `kv half mtp off depth 3 thinking off decode 128`, and every measured prefill was a cache miss. A search the same day for "297.76 OR 404.72 OR 493.91 OR 485.37 Qwen3.8-27B prefill tok/s" did not find those four prefill rates. The published rows named above are different packs and different machines.

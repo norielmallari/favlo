@@ -39,6 +39,22 @@ Bind one instance: `pipeline = Pipeline()`. A media module sets `handle_image = 
 
 Read the sibling package `AGENTS.md` for that seam before writing the class. Write `pipelines/<pipeline>/AGENTS.md` from that sibling wording, speaking as "this package", and do not add a glob rule. Do not add another base class, a shared runner, or a kernel that branches on the pipeline. A seam task may edit `language_pipeline.py`, `embeddings_pipeline.py`, `media_pipeline.py`, `media_memory.py`, `memory.py`, `mcp_server.py`, `response_chain.py`, `schedule.py`, and `pipelines.py`, and the listener, the registry, and the console. Do not change other modules under `src/favlo/`.
 
+## Tokenizer
+
+`Tokenizer.from_file` runs once per checkpoint in the process. Encode and decode use the stored object.
+
+A Jinja template is read and compiled once per checkpoint. `encode_chat` renders that template.
+
+Marker ids that do not depend on the request are computed once.
+
+A media or embeddings runtime holds the tokenizer for the open. `encode` does not call `from_file`.
+
+A child process loads once inside that process.
+
+The cache is per package. The miss path takes a lock.
+
+A quantize command and a harness may load the file once for that command.
+
 ## CLI
 
 `pipeline.main` is `favlo --<pipeline>`. Media commands on that flag are `setup`, `quantize`, and `kernels`. `setup` downloads the official checkpoint. `quantize` writes the packed record and registers it. `kernels` compiles the shader library and checks a dispatch. A GPU command takes `favlo.smoke_lock`. Generation is `favlo media`.

@@ -39,4 +39,4 @@ Stop before the first write when the volume cannot hold what is still missing.
 
 ## Note
 
-The package README states the command, the default quant, and `--keep-bf16`. The as-built sizes and the registry fields stay in `ARCHITECTURE.md`.
+The package README states the command, the default quant, and `--keep-bf16`. The as-built sizes and the registry fields stay in `ARCHITECTURE.md`. The files `setup` copies are read once on the serve path. That cache rule is in `pipelines/AGENTS.md`.

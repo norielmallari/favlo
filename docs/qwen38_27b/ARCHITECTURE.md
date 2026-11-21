@@ -419,6 +419,7 @@ Request fields:
 Chat template and sampling:
 
 - The chat template is the checkout's `chat_template.jinja`.
+- The tokenizer and the compiled template are kept for the process, and a request renders the template it already compiled.
 - An assistant turn with no reasoning renders `<think>\n</think>\n\n` while thinking is on, the same bytes as a generation that closes thinking immediately, so the next turn keeps the stored tokens.
 - The checkout template writes a blank line in that block. Render keeps the blank line only when thinking is off.
 - Thinking stays open unless the request sets `enable_thinking` false.
