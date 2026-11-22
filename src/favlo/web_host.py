@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -40,6 +41,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not (spa / "node_modules" / "expo").exists():
         sys.stderr.write("web-spa dependencies are missing. Run npm install in web-spa.\n")
         return 1
+    try:
+        web_argv = _expo_command(spa)
+    except FileNotFoundError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
     _store_initial_model(model_id)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(api) + os.pathsep + env.get("PYTHONPATH", "")
@@ -53,11 +59,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     web_env = env.copy()
     web_env.pop("PYTHONPATH", None)
     web_env["NODE_OPTIONS"] = "--dns-result-order=ipv4first " + web_env.get("NODE_OPTIONS", "")
-    web_proc = _spawn(
-        ["npx", "expo", "start", "--web", "--port", str(WEB_PORT), "--host", "localhost"],
-        spa,
-        web_env,
-    )
+    web_proc = _spawn(web_argv, spa, web_env)
     try:
         if not _ready(api_proc, web_proc):
             return 1
@@ -98,6 +100,21 @@ def _store_initial_model(model_id: str) -> None:
         store.ensure_initial_model(model_id)
     finally:
         store.close()
+
+
+def _expo_command(spa: Path) -> list[str]:
+    """Start the local Expo CLI. Windows cannot CreateProcess a ``npx`` shim."""
+    args = ["start", "--web", "--port", str(WEB_PORT), "--host", "localhost"]
+    if os.name != "nt":
+        return ["npx", "expo", *args]
+    node = shutil.which("node")
+    if not node:
+        raise FileNotFoundError("node is not on PATH")
+    for name in ("cli", "cli.js"):
+        cli = spa / "node_modules" / "expo" / "bin" / name
+        if cli.is_file():
+            return [node, str(cli), *args]
+    raise FileNotFoundError("web-spa dependencies are missing. Run npm install in web-spa.")
 
 
 def _spawn(command: list[str], cwd: Path, env: dict[str, str]) -> subprocess.Popen[bytes]:
@@ -143,7 +160,11 @@ def _stop(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is not None:
         return
     if os.name == "nt":
-        proc.terminate()
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+        )
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
