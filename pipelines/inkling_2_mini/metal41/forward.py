@@ -20,7 +20,7 @@ from typing import Any
 
 import numpy as np
 
-from favlo.console import format_note, format_rate
+from favlo.console import format_note, format_rate, publish_count
 from favlo.memory import memory
 from favlo.pipeline import ClientClosed
 from favlo.prefix import aim_session
@@ -41,7 +41,7 @@ from inkling_2_mini.metal41.layout import (
     WINDOW,
     stored_k,
 )
-from inkling_2_mini.metal41.prefix import open_prefix
+from inkling_2_mini.metal41.prefix import VISIT_LAYERS, cache_slots, open_prefix
 from inkling_2_mini.metal41.session import Session, f32, u32
 from inkling_2_mini.metal41.weights import (
     ATTN_ROWS,
@@ -90,6 +90,8 @@ class InklingRuntime:
         console: Any = None,
         owner: str | None = None,
         calibrated: bool = True,
+        context_limit: int | None = None,
+        rows_limit: int | None = None,
     ) -> None:
         del kv_cache
         self.root = Path(path)
@@ -118,29 +120,68 @@ class InklingRuntime:
             message = "Inkling checkpoint is not in the models folder"
             raise FileNotFoundError(message)
         self.max_memory = memory.budget()
-        self._load_row = None
-        if console is not None:
-            self._load_row = console.begin("load", total=weight.stat().st_size, unit="bytes")
-        self.session = Session(self._owner)
+        self._disk_done = 0
+        self._alloc_done = 0
+        self._prefill_progress = None
+        self._prefill_done = 0
+        self._load_row = self._begin_load(self._opening_bytes())
+        self.session = None
+        summary = ""
         try:
+            self.session = Session(self._owner)
             self.weights = Checkpoint(self.root, self.session, progress=self, calibrated=calibrated)
-            if self._load_row is not None and console is not None:
-                console.end(self._load_row, "weights")
-                self._load_row = None
             room = max(0, memory.room() - (512 << 20))
             self.rows = CHUNK
             complete = False
             self.context = CONTEXTS[0]
-            for rows in (CHUNK, 1024, 512, 256):
-                if self.weights.expert_bytes + self._footprint(CONTEXTS[0], rows) <= room:
-                    self.rows = rows
-                    complete = True
-                    break
-            if not complete:
-                self.rows = 256
-                self.context, complete = plan_opening(
-                    room, self.weights.expert_bytes, lambda ctx: self._footprint(ctx, self.rows)
-                )
+            ceiling = CONTEXTS[0]
+            if context_limit is not None:
+                fitted = [ctx for ctx in CONTEXTS if ctx <= int(context_limit)]
+                ceiling = fitted[0] if fitted else int(context_limit)
+            row_choices = tuple(
+                rows
+                for rows in (CHUNK, 1024, 512, 256)
+                if rows_limit is None or rows <= int(rows_limit)
+            )
+            if not row_choices:
+                row_choices = (int(rows_limit or 256),)
+            if ceiling == CONTEXTS[0] and rows_limit is None:
+                for rows in row_choices:
+                    if self.weights.expert_bytes + self._footprint(CONTEXTS[0], rows) <= room:
+                        self.rows = rows
+                        complete = True
+                        break
+                if not complete:
+                    self.rows = 256
+                    self.context, complete = plan_opening(
+                        room, self.weights.expert_bytes, lambda ctx: self._footprint(ctx, self.rows)
+                    )
+            else:
+                self.context = ceiling
+                self.rows = row_choices[-1]
+                for rows in row_choices:
+                    if self.weights.expert_bytes + self._footprint(ceiling, rows) <= room:
+                        self.rows = rows
+                        complete = True
+                        break
+                if not complete:
+                    from inkling_2_mini.metal41.atlas import partial_bytes
+
+                    eight = partial_bytes()
+                    floor = min(ceiling, 2048)
+                    choices = [ctx for ctx in CONTEXTS if floor <= ctx <= ceiling] or [ceiling]
+                    for ctx in choices:
+                        need = self._footprint(ctx, self.rows)
+                        if self.weights.expert_bytes + need <= room:
+                            self.context = ctx
+                            complete = True
+                            break
+                        if eight + need <= room:
+                            self.context = ctx
+                            break
+                    else:
+                        message = "Inkling does not fit at the calibration context"
+                        raise MemoryError(message)
             self.atlas = ExpertAtlas(
                 self.session, self.weights, owner=self._owner, complete=complete
             )
@@ -149,18 +190,60 @@ class InklingRuntime:
             self.prefix = open_prefix(self)
             used = self.max_memory - memory.room()
             kind = "complete" if complete else "staged"
-            print(
+            summary = (
                 f"loaded Inkling-2-Mini kv half context {self.context} rows {self.rows} "
-                f"atlas {kind} dense {self.weights.dense_tag} memory {used}/{self.max_memory}",
-                flush=True,
+                f"atlas {kind} dense {self.weights.dense_tag} memory {used}/{self.max_memory}"
             )
         except Exception:
             self.close()
             raise
+        finally:
+            row = self._load_row
+            self._load_row = None
+            if row is not None and self.console is not None:
+                self.console.end(row, summary)
+            elif summary:
+                self._status(summary)
 
     def tick(self, done: int) -> None:
-        if self._load_row is not None and self.console is not None:
-            self.console.count(self._load_row, done)
+        """Disk bytes read so far. The expert pack is read after the dense pack."""
+        self._disk_done = int(done)
+        self._publish_load()
+
+    def _opening_bytes(self) -> int:
+        """Pack files plus the largest working set. A missing pack counts the checkpoint."""
+        from inkling_2_mini.metal41.gptq import PACK_NAME
+        from inkling_2_mini.metal41.resident import EXPERT_PACK
+
+        total = 0
+        checkpoint = self.root / "model-00001-of-00001.safetensors"
+        dense = self.root / PACK_NAME
+        experts = self.root / EXPERT_PACK
+        if dense.is_file():
+            total += dense.stat().st_size
+        elif checkpoint.is_file():
+            total += checkpoint.stat().st_size
+        if experts.is_file():
+            total += experts.stat().st_size
+        elif checkpoint.is_file() and dense.is_file():
+            total += checkpoint.stat().st_size
+        total += self._footprint(CONTEXTS[0], CHUNK)
+        return max(total, 1)
+
+    def _note_alloc(self, step: int) -> None:
+        if step <= 0:
+            return
+        self._alloc_done = int(getattr(self, "_alloc_done", 0)) + int(step)
+        self._publish_load()
+
+    def _publish_load(self) -> None:
+        row = self._load_row
+        if row is None:
+            return
+        done = int(getattr(self, "_disk_done", 0)) + int(getattr(self, "_alloc_done", 0))
+        if done > int(row.total):
+            row.total = done
+        publish_count(self.console, row, done)
 
     def close(self) -> None:
         prefix = getattr(self, "prefix", None)
@@ -200,13 +283,21 @@ class InklingRuntime:
         half = rows * (_PAIR + 64) * 2
         moe = _max_rows(rows) * (HIDDEN * 4 + HIDDEN * 2 + stored_k(INTERMEDIATE) * 2)
         index = rows * TOP_K * 4 * 8
-        kv = 48 * 2 * ctx * KV_DIM * 2
+        slots = sum(cache_slots(layer, ctx) for layer in VISIT_LAYERS)
+        kv = slots * 2 * KV_DIM * 2
+        stage = (rows + min(WINDOW, ctx) + 128) * 2 * KV_DIM * 2
         small = 3 * 48 * (6 * HIDDEN + 6 * KV_DIM) * 4 + GROUP_SPLITS * 24 * 132 * 4 + VOCAB * 8
-        return hidden + wide + half + moe + index + kv + small
+        return hidden + wide + half + moe + index + kv + stage + small
 
     def _allocate(self) -> None:
         rows = self.rows
-        zeros = self.session.zeros
+        session_zeros = self.session.zeros
+
+        def zeros(nbytes: int) -> Any:
+            handle = session_zeros(nbytes)
+            self._note_alloc(int(nbytes))
+            return handle
+
         plane = rows * HIDDEN * 4
 
         def hidden(count: int = 1) -> Any:
@@ -266,8 +357,15 @@ class InklingRuntime:
         self.best_value = zeros(span_groups * 4)
         self.best_index = zeros(span_groups * 4)
         self.history = zeros((self.context + 8) * 4)
-        self.k_cache = [zeros(self.context * KV_DIM * 2) for _ in range(48)]
-        self.v_cache = [zeros(self.context * KV_DIM * 2) for _ in range(48)]
+        self.k_cache = []
+        self.v_cache = []
+        for layer in VISIT_LAYERS:
+            width = cache_slots(layer, self.context) * KV_DIM * 2
+            self.k_cache.append(zeros(width))
+            self.v_cache.append(zeros(width))
+        staged = (rows + min(WINDOW, self.context) + 128) * KV_DIM * 2
+        self.k_stage = zeros(staged)
+        self.v_stage = zeros(staged)
         sizes = (3 * HIDDEN * 4, 3 * KV_DIM * 4, 3 * KV_DIM * 4, 3 * HIDDEN * 4)
         self.state_bytes = 48 * sum(sizes)
         self.state_all = zeros(self.state_bytes)
@@ -482,6 +580,24 @@ class InklingRuntime:
     # ------------------------------------------------------------------
     # Attention
 
+    def _window(self, mode: int, visit: int, origin: int, pos0: int, kend: int, slots: int) -> None:
+        """Copy one local visit between its ring and the contiguous prefill span."""
+        if mode == 0:
+            rows = pos0 - origin if pos0 > origin else 0
+        else:
+            keep = kend - slots if kend > slots else 0
+            if keep < origin:
+                keep = origin
+            rows = kend - keep if kend > keep else 0
+        if rows <= 0:
+            return
+        self.session.dispatch(
+            "kv_window",
+            [self.k_stage, self.v_stage, self.k_cache[visit], self.v_cache[visit]],
+            [u32(origin), u32(pos0), u32(kend), u32(slots), u32(mode)],
+            ((rows + 255) // 256, 1, 1),
+        )
+
     def _attention(
         self, layer: Any, visit: int, distinct: bool, pos0: int, tokens: int, dest: Any
     ) -> None:
@@ -537,6 +653,21 @@ class InklingRuntime:
                 self._matmul_fp4(plane, ROW_V, KV_DIM, self.proj, padded, ATTN_ROWS, ROW_V * 4)
             if layer.full:
                 self._matmul_f16(self.half, layer.v_proj, self.v_taps, padded)
+        local = 0 if layer.full else cache_slots(layer.index, self.context)
+        origin = 0
+        kend = pos0 + tokens
+        k_buf = self.k_cache[visit]
+        v_buf = self.v_cache[visit]
+        if local and tokens > 1:
+            lo = max(0, pos0 + 1 - local)
+            origin = lo & ~63
+            if kend - origin > self.rows + min(WINDOW, self.context) + 128:
+                message = "local attention span does not fit the staging buffer"
+                raise RuntimeError(message)
+            self._window(0, visit, origin, pos0, kend, local)
+            k_buf = self.k_stage
+            v_buf = self.v_stage
+        slot_mask = (local - 1) if local and tokens == 1 else 0
         self.session.dispatch(
             "attn_prep",
             [
@@ -552,8 +683,8 @@ class InklingRuntime:
                 v_taps,
                 k_state,
                 v_state,
-                self.k_cache[visit],
-                self.v_cache[visit],
+                k_buf,
+                v_buf,
             ],
             [
                 u32(tokens),
@@ -566,14 +697,16 @@ class InklingRuntime:
                 f32(EPS),
                 f32(Q_L2),
                 f32(REL_L2),
+                u32(origin),
+                u32(slot_mask),
             ],
             (tokens, 40, 1),
         )
-        window = 0 if layer.full else WINDOW
+        window = 0 if layer.full else local
         attend = [
             self.proj,
-            self.k_cache[visit],
-            self.v_cache[visit],
+            k_buf,
+            v_buf,
             (self.proj, ROW_REL * 4),
             layer.rel_table,
             sink,
@@ -586,7 +719,7 @@ class InklingRuntime:
             self.session.dispatch(
                 "attend_group",
                 [*attend, self.partial, self.counters, self.attn_out],
-                [u32(pos0), u32(window), u32(span)],
+                [u32(pos0), u32(window), u32(span), u32(slot_mask)],
                 (1, 8, -(-keys // span)),
             )
             self.session.dispatch(
@@ -607,9 +740,12 @@ class InklingRuntime:
                 u32(ATTN_ROWS),
                 u32(64),
                 u32(ATTN_ROWS),
+                u32(origin),
             ],
             (24, (tokens + 31) // 32, 1),
         )
+        if local:
+            self._window(1, visit, origin, pos0, kend, local)
         self.session.dispatch(
             "conv_tail",
             [(self.proj, ROW_K * 4), k_state, (self.proj, ROW_V * 4), v_state],
@@ -874,6 +1010,7 @@ class InklingRuntime:
             [u32(tokens), u32(HIDDEN)],
             tokens * HIDDEN,
         )
+        self._scatter_vision(pos0, tokens)
         self._rmsnorm(self.scratch, self.weights.embed_norm, self.embed, tokens)
         self._block(range(0, 6), [self.embed], None, pos0, tokens, self.prelude, 0)
         prev: tuple[Any, Any] | None = None
@@ -1020,21 +1157,55 @@ class InklingRuntime:
         probs /= total
         return int(np.random.choice(VOCAB, p=probs))
 
-    def _begin(self, phase: str, total: int) -> Any:
+    def _begin_load(self, total: int) -> Any:
         console = self.console
-        if console is None or total <= 0:
+        if console is None or total <= 0 or not getattr(console, "shows_bars", False):
+            return None
+        detail = getattr(console, "load_detail", "") or self.root.name
+        return console.begin("load", total=total, unit="bytes", detail=detail)
+
+    def _begin_phase(self, phase: str, total: int, *, live: bool = False) -> Any:
+        console = self.console
+        if console is None:
+            return None
+        if live:
+            if not getattr(console, "live_decode", False):
+                return None
+            total = 0
+        elif total <= 0:
             return None
         detail = f"req #{self._request_id}" if self._request_id else ""
         return console.begin(
-            phase, total=total, unit="tok", detail=detail, request=self._request_id or None
+            phase,
+            total=total,
+            unit="tok",
+            detail=detail,
+            request=self._request_id or None,
         )
 
-    def _end(self, progress: Any, summary: str) -> None:
-        if progress is None or self.console is None:
+    def _end_phase(self, progress: Any, summary: str) -> None:
+        if progress is None:
             if summary:
-                print(summary, flush=True)
+                self._status(summary)
             return
-        self.console.end(progress, summary)
+        if getattr(progress, "closed", False):
+            return
+        console = self.console
+        if console is None:
+            if summary:
+                self._status(summary)
+            return
+        console.end(progress, summary)
+
+    def _note_prefill(self, done: int) -> None:
+        progress = self._prefill_progress
+        if progress is None:
+            return
+        capped = min(int(progress.total), int(done))
+        if capped <= int(getattr(self, "_prefill_done", 0)):
+            return
+        self._prefill_done = capped
+        publish_count(self.console, progress, capped)
 
     # ------------------------------------------------------------------
     # Generate
@@ -1050,6 +1221,7 @@ class InklingRuntime:
                 self._run(len(piece), pos + offset, self.tokens)
                 last = len(piece)
                 offset += last
+                self._note_prefill(offset)
                 if offset >= len(fresh):
                     self._head(last - 1)
                     if device_pick:
@@ -1079,8 +1251,10 @@ class InklingRuntime:
         if not callable(on_token):
             on_token = None
         tokens = [int(item) for item in prompt]
+        dropped = 0
         if len(tokens) >= self.context:
-            tokens = tokens[-(self.context - 1) :]
+            dropped = len(tokens) - (self.context - 1)
+            tokens = tokens[dropped:]
         self._note("prompt", tokens=len(tokens))
         aim_session(self.prefix, budget=self._prefix_budget, scratch=self._prefix_scratch)
         pos = self.prefix.align(tokens)
@@ -1094,56 +1268,76 @@ class InklingRuntime:
         device_pick = (
             not forbid and not presence and not frequency and top_k <= 0 and not (0.0 < top_p < 1.0)
         )
-        started = time.perf_counter()
-        prefill_row = self._begin("prefill", len(fresh))
+        from inkling_2_mini.metal41.vision import bind_vision, release_vision
+
+        prefill_row = None
+        decode_row = None
         try:
-            self._prefill(fresh, pos, temperature, device_pick)
-        except RequestClosed:
-            self.prefix.tokens = []
-            self.prefix.dirty = False
-            self.reset()
-            raise
-        self._ids = list(tokens)
-        self._filled = len(tokens)
-        self._prefill_seconds = time.perf_counter() - started
-        self._end(prefill_row, format_rate("prefill", len(fresh), self._prefill_seconds))
-        self.prefix.note(tokens)
-        self._store_prefix()
-        limit = max(int(limit), 0)
-        room = self.context - self._filled
-        steps = min(limit, room)
-        decode_row = self._begin("decode", max(steps, 1))
-        decode_started = time.perf_counter()
-        try:
-            if device_pick:
-                produced = self._decode_device(steps, temperature, stop, fill, on_token, decode_row)
-            else:
-                produced = self._decode_host(
-                    steps,
-                    temperature,
-                    top_p,
-                    top_k,
-                    presence,
-                    frequency,
-                    forbid,
-                    stop,
-                    fill,
-                    on_token,
-                    decode_row,
-                    tokens,
-                )
-        except RequestClosed:
+            bind_vision(self, tokens, pos, dropped)
+            started = time.perf_counter()
+            prefill_row = self._begin_phase("prefill", len(fresh))
+            self._prefill_progress = prefill_row
+            self._prefill_done = 0
+            try:
+                self._prefill(fresh, pos, temperature, device_pick)
+            except RequestClosed:
+                self.prefix.tokens = []
+                self.prefix.dirty = False
+                self.reset()
+                raise
+            release_vision(self)
+            self._ids = list(tokens)
+            self._filled = len(tokens)
+            self._prefill_seconds = time.perf_counter() - started
+            self._note_prefill(len(fresh))
+            self._prefill_progress = None
+            self._end_phase(prefill_row, format_rate("prefill", len(fresh), self._prefill_seconds))
+            prefill_row = None
+            self.prefix.note(tokens)
+            self._store_prefix()
+            limit = max(int(limit), 0)
+            room = self.context - self._filled
+            steps = min(limit, room)
+            decode_row = self._begin_phase("decode", max(steps, 1), live=True)
+            decode_started = time.perf_counter()
+            try:
+                if device_pick:
+                    produced = self._decode_device(
+                        steps, temperature, stop, fill, on_token, decode_row
+                    )
+                else:
+                    produced = self._decode_host(
+                        steps,
+                        temperature,
+                        top_p,
+                        top_k,
+                        presence,
+                        frequency,
+                        forbid,
+                        stop,
+                        fill,
+                        on_token,
+                        decode_row,
+                        tokens,
+                    )
+            except RequestClosed:
+                self.prefix.note(self._ids[: self._filled])
+                self._store_prefix()
+                raise
+            self._hit_limit = steps > 0 and len(produced) >= steps
+            self._decode_seconds = time.perf_counter() - decode_started
+            self._settle(len(tokens), produced)
             self.prefix.note(self._ids[: self._filled])
             self._store_prefix()
-            raise
-        self._hit_limit = steps > 0 and len(produced) >= steps
-        self._decode_seconds = time.perf_counter() - decode_started
-        self._settle(len(tokens), produced)
-        self.prefix.note(self._ids[: self._filled])
-        self._store_prefix()
-        self._end(decode_row, format_rate("decode", len(produced), self._decode_seconds))
-        self._output_ids = produced
-        return produced
+            self._end_phase(decode_row, format_rate("decode", len(produced), self._decode_seconds))
+            decode_row = None
+            self._output_ids = produced
+            return produced
+        finally:
+            self._end_phase(prefill_row, "")
+            self._end_phase(decode_row, "")
+            self._prefill_progress = None
+            release_vision(self)
 
     def _settle(self, prompt: int, produced: list[int]) -> None:
         """Leave the device holding exactly the prompt and every produced token.
@@ -1173,12 +1367,31 @@ class InklingRuntime:
         count = self.state_bytes // 16
         self.session.launch("copy_words", [source, dest], [u32(count)], count)
 
+    def _scatter_vision(self, pos0: int, tokens: int) -> None:
+        bank = getattr(self, "_vision_bank", None)
+        slots = getattr(self, "_vision_slots", None)
+        if bank is None or slots is None:
+            return
+        self.session.launch(
+            "vision_scatter",
+            [self.scratch, bank, slots],
+            [u32(pos0), u32(tokens), u32(HIDDEN)],
+            tokens * HIDDEN,
+        )
+
+    def _status(self, line: str) -> None:
+        console = self.console
+        if console is None:
+            print(line, flush=True)
+            return
+        console.log(line)
+
     def _note(self, topic: str, **fields: Any) -> None:
         note = getattr(self.console, "note", None)
         if callable(note):
             note(topic, **fields)
             return
-        print(format_note(topic, **fields), flush=True)
+        self._status(format_note(topic, **fields))
 
     def _store_prefix(self) -> None:
         try:
@@ -1193,8 +1406,7 @@ class InklingRuntime:
         produced.append(token)
         if on_token is not None:
             on_token(token)
-        if decode_row is not None and self.console is not None:
-            self.console.count(decode_row, len(produced))
+        publish_count(self.console, decode_row, len(produced))
 
     def _decode_device(
         self,

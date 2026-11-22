@@ -12,8 +12,13 @@ from favlo.prefix import PrefixHeader, RegionRef
 from inkling_2_mini.metal41 import markup
 from inkling_2_mini.metal41 import prefix as prefix_mod
 from inkling_2_mini.metal41.atlas import partial_bytes, plan_opening
-from inkling_2_mini.metal41.calibration import weighted_error
-from inkling_2_mini.metal41.chat import forced_text
+from inkling_2_mini.metal41.calibration import (
+    _load_round,
+    _open_saved,
+    _store_round,
+    weighted_error,
+)
+from inkling_2_mini.metal41.chat import _required_name, forced_text
 from inkling_2_mini.metal41.codec import e4m3_to_float, nvfp4_row
 from inkling_2_mini.metal41.commands import _repo_id, register_folder
 from inkling_2_mini.metal41.fetch import File, keep, remaining_download, shortfall
@@ -25,12 +30,21 @@ from inkling_2_mini.metal41.gptq import (
     gptq_fp4,
     write_pack,
 )
-from inkling_2_mini.metal41.layout import EXPERTS, HIDDEN, INTERMEDIATE, LAYERS, WINDOW, stored_k
+from inkling_2_mini.metal41.layout import (
+    EXPERTS,
+    FULL_LAYERS,
+    HIDDEN,
+    INTERMEDIATE,
+    LAYERS,
+    WINDOW,
+    stored_k,
+)
 from inkling_2_mini.metal41.prefix import (
     ROW_BYTES,
     VISIT_LAYERS,
     VISITS,
     InklingPrefix,
+    cache_slots,
     visit_rows,
 )
 from inkling_2_mini.metal41.resident import (
@@ -46,7 +60,6 @@ from inkling_2_mini.metal41.sampling import (
     DEFAULT_REASONING_EFFORT,
     DEFAULT_VARIANT,
     EFFORT_LEVEL,
-    EFFORT_ORDER,
     PRESERVE_THINKING,
     VARIANTS,
     resolve_effort,
@@ -66,6 +79,16 @@ def test_nvfp4_row_uses_the_outer_scale() -> None:
     row = nvfp4_row(packed, scales, 2.0)
     assert row.shape == (32,)
     assert np.allclose(row, 1.0)
+
+
+def test_plan_uses_the_default_window_when_it_fits() -> None:
+    def activation(ctx: int) -> int:
+        return ctx * 1000
+
+    top = 131072
+    context, complete = plan_opening(top * 1000 + 50_000_000, 40_000_000, activation)
+    assert context == top
+    assert complete is True
 
 
 def test_plan_keeps_context_when_eight_experts_fit() -> None:
@@ -120,8 +143,12 @@ class _Runtime:
         self._ids: list[int] = []
         self.state_bytes = 64
         self.state_all = bytearray(self.state_bytes)
-        self.k_cache = [bytearray(context * ROW_BYTES) for _ in range(VISITS)]
-        self.v_cache = [bytearray(context * ROW_BYTES) for _ in range(VISITS)]
+        self.k_cache = []
+        self.v_cache = []
+        for layer in VISIT_LAYERS:
+            slots = cache_slots(layer, context) * ROW_BYTES
+            self.k_cache.append(bytearray(slots))
+            self.v_cache.append(bytearray(slots))
 
 
 def test_prefix_keeps_the_window_tail_of_local_visits(monkeypatch, tmp_path) -> None:
@@ -131,15 +158,31 @@ def test_prefix_keeps_the_window_tail_of_local_visits(monkeypatch, tmp_path) -> 
     live = _Runtime(WINDOW + 16, count)
     live.state_all[:] = bytes(range(64))
     index = np.arange(count * ROW_BYTES, dtype=np.int64)
-    for visit in range(VISITS):
-        live.k_cache[visit][: index.size] = ((index + visit) % 251).astype(np.uint8).tobytes()
-        live.v_cache[visit][: index.size] = ((index * 3 + visit) % 251).astype(np.uint8).tobytes()
+    local_tail = {}
+    for visit, layer in enumerate(VISIT_LAYERS):
+        keys = ((index + visit) % 251).astype(np.uint8).tobytes()
+        values = ((index * 3 + visit) % 251).astype(np.uint8).tobytes()
+        if layer in FULL_LAYERS:
+            live.k_cache[visit][: len(keys)] = keys
+            live.v_cache[visit][: len(values)] = values
+            continue
+        first, rows = visit_rows(visit, count)
+        row = ROW_BYTES
+        for plane, blob in ((live.k_cache[visit], keys), (live.v_cache[visit], values)):
+            for item in range(rows):
+                slot = (first + item) % cache_slots(layer, live.context)
+                start = item * row
+                src = (first * row) + start
+                plane[slot * row : (slot + 1) * row] = blob[src : src + row]
+        local_tail[visit] = (keys[first * row : count * row], values[first * row : count * row])
     regions = InklingPrefix(live).capture()
     by_name = {region.name: bytes(region.data) for region in regions}
     full = VISIT_LAYERS.index(5)
     local = 0
     assert len(by_name[f"k{full:02d}"]) == count * ROW_BYTES
     assert len(by_name[f"k{local:02d}"]) == WINDOW * ROW_BYTES
+    assert by_name[f"k{local:02d}"] == local_tail[local][0]
+    assert by_name[f"v{local:02d}"] == local_tail[local][1]
 
     path = tmp_path / "record"
     blob = b"".join(by_name[name] for name in by_name)
@@ -161,8 +204,8 @@ def test_prefix_keeps_the_window_tail_of_local_visits(monkeypatch, tmp_path) -> 
     assert fresh.k_cache[full][:end] == live.k_cache[full][:end]
     start, _ = visit_rows(local, count)
     assert start == 5
-    tail = slice(start * ROW_BYTES, end)
-    assert fresh.v_cache[local][tail] == live.v_cache[local][tail]
+    assert fresh.k_cache[local] == live.k_cache[local]
+    assert fresh.v_cache[local] == live.v_cache[local]
 
 
 _CALL = (
@@ -217,6 +260,16 @@ def test_forced_text_opens_the_required_call() -> None:
     assert forced_text(False, None, plain=False) == ""
 
 
+def test_required_name_reads_the_responses_choice() -> None:
+    assert _required_name({"tool_choice": {"type": "function", "name": "read_file"}}) == "read_file"
+    assert (
+        _required_name({"tool_choice": {"mode": "required", "required_function_name": "read_file"}})
+        == "read_file"
+    )
+    assert _required_name({"tool_choice": "auto"}) is None
+    assert _required_name({}) is None
+
+
 def test_gptq_identity_hessian_is_round_to_nearest() -> None:
     rng = np.random.default_rng(3)
     matrix = rng.standard_normal((64, 256)).astype(np.float32)
@@ -245,6 +298,8 @@ def test_capture_streams_and_round_trip(tmp_path: Path) -> None:
     capture.add(0, "k", 2 * rows)
     capture.add(0, "wo", np.ones((4, 6), dtype=np.float32))
     capture.tokens = 4
+    capture.done = 3
+    capture.source = "abc"
     assert np.allclose(capture.hessian(0, "k"), 20.0)
     assert np.allclose(capture.hessian(0, "q"), 4.0)
     assert capture.hessian(0, "wo").shape == (6, 6)
@@ -252,7 +307,37 @@ def test_capture_streams_and_round_trip(tmp_path: Path) -> None:
     capture.save(path)
     again = Capture.load(path)
     assert again.tokens == 4
+    assert again.done == 3
+    assert again.source == "abc"
     assert np.allclose(again.hessian(0, "k"), 20.0)
+    scratch = Capture()
+    scratch.add(0, "q", rows)
+    scratch.tokens = 4
+    again.absorb(scratch)
+    assert again.tokens == 8
+    assert np.allclose(again.hessian(0, "q"), 8.0)
+    legacy = tmp_path / "legacy.npz"
+    np.savez(legacy, tokens=np.int64(9), **{"0:q": np.eye(2, dtype=np.float32)})
+    old = Capture.load(legacy)
+    assert old.done == 2**31
+    assert old.source == ""
+
+
+def test_capture_resume_keeps_the_matching_source(tmp_path: Path) -> None:
+    capture = Capture()
+    capture.add(1, "wo", np.ones((2, 4), dtype=np.float32))
+    capture.done = 7
+    capture.source = "same"
+    capture.tokens = 14
+    path = tmp_path / "dense-fp4-inputs.npz"
+    capture.save(path)
+    assert _open_saved(path, "same").done == 7
+    assert _open_saved(path, "other") is None
+    kept = {"layers.0.attn.data": np.zeros((2, 2), dtype=np.uint8)}
+    partial = tmp_path / "dense-fp4-partial.npz"
+    _store_round(partial, "same", kept)
+    assert "layers.0.attn.data" in _load_round(partial, "same")
+    assert _load_round(partial, "other") == {}
 
 
 def test_expert_catalog_pads_the_down_projection() -> None:
@@ -339,16 +424,170 @@ def test_sampling_card_follows_the_published_defaults() -> None:
     assert DEFAULT_VARIANT == "thinking"
     assert DEFAULT_REASONING_EFFORT == "high"
     assert PRESERVE_THINKING is True
+    assert set(VARIANTS) == {"thinking", "instruct"}
+    assert VARIANTS["thinking"] == VARIANTS["instruct"]
     thinking = VARIANTS["thinking"]
     assert thinking["temperature"] == 1.0
     assert thinking["top_p"] == 1.0
     assert thinking["top_k"] == 0
     assert thinking["presence_penalty"] == 0.0
-    assert thinking["reasoning_effort"] == "high"
-    assert VARIANTS["instruct"]["reasoning_effort"] == "none"
-    for name in EFFORT_ORDER:
-        assert VARIANTS[name]["reasoning_effort"] == name
-        assert VARIANTS[name]["temperature"] == 1.0
+    assert "reasoning_effort" not in thinking
+
+
+def test_progress_reports_through_the_console(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from favlo.console import format_rate
+    from inkling_2_mini.metal41.forward import InklingRuntime
+
+    notes: list[str] = []
+    ended: list[tuple[str, str]] = []
+    logged: list[str] = []
+    begun: list[dict[str, object]] = []
+
+    class _Console:
+        shows_bars = True
+        live_decode = True
+        load_detail = "inkling_2_mini"
+
+        def begin(self, phase: str, **kwargs: object) -> SimpleNamespace:
+            begun.append({"phase": phase, **kwargs})
+            return SimpleNamespace(
+                phase=phase,
+                total=kwargs["total"],
+                done=0,
+                closed=False,
+                unit=kwargs["unit"],
+            )
+
+        def end(self, progress: SimpleNamespace, summary: str) -> None:
+            progress.closed = True
+            ended.append((progress.phase, summary))
+
+        def log(self, line: str) -> None:
+            logged.append(line)
+
+        def note(self, topic: str, **fields: object) -> None:
+            from favlo.console import format_note
+
+            notes.append(format_note(topic, **fields))
+
+    runtime = InklingRuntime.__new__(InklingRuntime)
+    runtime.console = _Console()
+    runtime.root = tmp_path
+    runtime._request_id = 4
+    runtime._disk_done = 0
+    runtime._alloc_done = 0
+    runtime._prefill_done = 0
+    runtime._prefill_progress = None
+    (tmp_path / "dense-fp4.safetensors").write_bytes(b"d" * 10)
+    (tmp_path / "experts-fp4.safetensors").write_bytes(b"e" * 20)
+    runtime._load_row = runtime._begin_load(runtime._opening_bytes())
+    runtime.tick(8)
+    runtime._note_alloc(4)
+    assert runtime._load_row.done == 12
+    assert begun[0]["phase"] == "load"
+    assert begun[0]["unit"] == "bytes"
+    assert begun[0]["detail"] == "inkling_2_mini"
+    runtime._note("prompt", tokens=6)
+    runtime._note("cache", hit=0)
+    row = runtime._begin_phase("prefill", 6)
+    runtime._prefill_progress = row
+    runtime._note_prefill(3)
+    runtime._note_prefill(3)
+    runtime._end_phase(row, format_rate("prefill", 6, 2.0))
+    runtime._end_phase(row, "prefill again")
+    decode = runtime._begin_phase("decode", 128, live=True)
+    assert decode is not None
+    assert decode.total == 0
+    runtime._end_phase(None, format_rate("decode", 0, 0.0))
+    assert notes == ["prompt tokens 6", "cache miss"]
+    assert ended == [("prefill", "prefill 3.00 tok/s (6 tok in 2.00s)")]
+    assert logged == ["decode 0 tok/s"]
+    assert row.done == 3
+    plain = InklingRuntime.__new__(InklingRuntime)
+    plain.console = _Console()
+    plain.console.live_decode = False
+    plain._request_id = 0
+    assert plain._begin_phase("decode", 32, live=True) is None
+    assert plain._begin_phase("prefill", 0) is None
+
+
+def test_calibration_rows_skip_a_short_dialog_and_an_email() -> None:
+    from inkling_2_mini.metal41.calibration import _TOOL_TURNS, _accept
+
+    short = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}]
+    assert _accept(short) is None
+    mailed = [
+        {"role": "user", "content": "Write to me"},
+        {
+            "role": "assistant",
+            "content": "Send it to person@example.com and then " + ("word " * 200),
+        },
+    ]
+    assert _accept(mailed) is None
+    long = [
+        {"role": "user", "content": "Explain sorting. " * 40},
+        {"role": "assistant", "content": "A sort orders items. " * 40},
+    ]
+    assert _accept(long) is not None
+    assert len(_TOOL_TURNS) == 16
+    from inkling_2_mini.metal41.chat import Pipeline
+
+    assert Pipeline().has_vision() is True
+
+
+def test_vision_grid_and_expand() -> None:
+    import base64
+
+    import pytest
+
+    from inkling_2_mini.metal41.vision import (
+        IMAGE_TOKEN,
+        axis_taps,
+        decode_png,
+        dequant_fp8,
+        expand_prompt,
+        patch_hw,
+        quantize_fp8,
+        token_grid,
+    )
+
+    horse = Path(__file__).resolve().parent / "assets" / "favlo-horse.png"
+    blob = horse.read_bytes()
+    image = decode_png(blob)
+    assert image.shape == (320, 576, 3)
+    assert token_grid(320, 576) == (8, 15)
+    url = "data:image/png;base64," + base64.b64encode(blob).decode()
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_url", "image_url": {"url": url}},
+            ],
+        }
+    ]
+    ids, plan = expand_prompt(messages, [3, IMAGE_TOKEN, 4])
+    assert ids == [3, *([IMAGE_TOKEN] * 120), 4]
+    assert plan[0][0] == 1 and plan[0][1] == 120
+    with pytest.raises(ValueError):
+        expand_prompt([], [IMAGE_TOKEN])
+    hw = patch_hw(16, 30)
+    assert hw.shape == (480, 2)
+    assert hw[0].tolist() == [0, 0]
+    assert hw[1].tolist() == [0, 1]
+    assert hw[2].tolist() == [1, 0]
+    assert hw[4].tolist() == [0, 2]
+    taps, weights = axis_taps(np.array([0.0]), 16)
+    assert taps[0].tolist() == [0, 1]
+    assert np.allclose(weights[0], [0.5, 0.5])
+    matrix = np.random.default_rng(0).normal(size=(32, 1200)).astype(np.float32)
+    codes, scales = quantize_fp8(matrix)
+    assert codes.shape == (32, 1216)
+    back = dequant_fp8(codes, scales)[:, :1200]
+    peak = float(np.max(np.abs(matrix)))
+    assert float(np.max(np.abs(back - matrix))) < 0.08 * peak + 1e-3
 
 
 def test_repo_id_accepts_the_public_link() -> None:
@@ -385,5 +624,7 @@ def test_register_writes_the_recommended_card(tmp_path: Path) -> None:
     assert row["enable_thinking"] is True
     assert row["reasoning_effort"] == "high"
     assert row["preserve_thinking"] is True
-    assert row["variants"]["medium"]["reasoning_effort"] == "medium"
+    assert set(row["variants"]) == {"thinking", "instruct"}
+    assert "reasoning_effort" not in row["variants"]["thinking"]
     assert row["variants"]["thinking"]["temperature"] == 1.0
+    assert row["variants"]["instruct"]["top_k"] == 0

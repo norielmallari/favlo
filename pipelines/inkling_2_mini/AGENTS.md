@@ -14,9 +14,7 @@ This package implements the Responses API only. The listener owns the Chat Compl
 
 ## Variants and effort
 
-Registration copies `VARIANTS` and `DEFAULT_VARIANT` from `sampling.py`. The template default is `high`. `none` is the instruct card. The checkpoint template accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, and each of those names is a variant. `thinking` is `high`. `resolve_effort` keeps a supported name. `template_effort` converts that name, or a number, to the float in `[0.0, 0.99]` that the checkpoint template writes.
-
-`generation_config.json` publishes temperature 1.0. It does not publish top-p, top-k, or a presence penalty. Those stay unrestricted on the card. `setup` sets `preserve_thinking` true, because the template keeps an assistant `reasoning_content` when the message carries one.
+Registration copies `VARIANTS` and `DEFAULT_VARIANT` from `sampling.py`. `generation_config.json` publishes temperature 1.0 and does not publish a separate top-k for thinking and non-thinking, so `thinking` and `instruct` store that one sampler. A request sets the effort with `reasoning_effort`. The row default is `high`. The template accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `resolve_effort` keeps a supported name. `template_effort` converts that name, or a number, to the float in `[0.0, 0.99]` that the checkpoint template writes. `setup` sets `preserve_thinking` true, because the template keeps an assistant `reasoning_content` when the message carries one.
 
 ## Setup
 
@@ -24,11 +22,11 @@ Registration copies `VARIANTS` and `DEFAULT_VARIANT` from `sampling.py`. The tem
 
 ## Memory
 
-This package reads `memory.budget()` when it opens. The weights are the minimum working set. A machine that cannot hold the safetensors file refuses to open. The context length is the knob it shrinks. A request keeps the prompt it named, truncated to the context that fit.
+This package reads `memory.budget()` when it opens. The weights are the minimum working set. A machine that cannot hold the safetensors file refuses to open. The context length is the knob it shrinks. A request keeps the prompt it named, truncated to the context that fit. Eight full-attention visits keep a half key/value plane for that context. Each of the other forty keeps a 1024-token ring. An image reads `vision-fp8.safetensors` for that request and releases it after the rows are written.
 
 ## Progress
 
-Load, prefill, and decode report through `favlo.console`. The prefill and decode lines use `format_rate`.
+Load, prefill, and decode report through `favlo.console`. The load row stays open through the dense pack, the expert pack, and the working-set allocation. Its close line is the loaded summary. Prefill opens only for an uncached suffix and advances after each chunk. Decode opens when `live_decode` is set and counts each kept token. Both close with `format_rate`. A cancel closes a row that is still open. Do not `print` a tok/s line.
 
 ## Kernels
 
@@ -36,4 +34,4 @@ Load, prefill, and decode report through `favlo.console`. The prefill and decode
 
 ## Calibration
 
-`calibrate` changes weights, so rerun the pipeline smoke and the coding agent after it. Its prompts are data in `calibration.py`. Keep them free of personal data. A change to the dense plane layout bumps `PACK_FORMAT` in `gptq.py`.
+`calibrate` changes weights, so rerun the pipeline smoke and the coding agent after it. Chat rows are downloaded from `HuggingFaceH4/ultrachat_200k` into `artifacts/` when that file is missing. Tool transcripts stay in `calibration.py`. The model does not write the sequences. A finished sequence and a finished plane are written before the next one starts. An out-of-memory capture reopens with fewer rows and continues from the last finished sequence. A change to the dense plane layout bumps `PACK_FORMAT` in `gptq.py`.

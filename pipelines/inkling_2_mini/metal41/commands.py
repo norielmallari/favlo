@@ -63,7 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     calibrate = sub.add_parser(
         "calibrate", help="round the dense fp4 planes with GPTQ from calibration inputs"
     )
-    calibrate.add_argument("--limit", type=int, default=384)
+    calibrate.add_argument("--limit", type=int, default=2048)
     calibrate.add_argument(
         "--reuse", action="store_true", help="round again from the saved calibration input sums"
     )
@@ -87,8 +87,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _bake(folder: Path | None = None) -> int:
     from inkling_2_mini.metal41.resident import bake
+    from inkling_2_mini.metal41.vision import ensure_pack
 
-    bake(folder or _folder(), log=lambda line: print(line, flush=True))
+    root = folder or _folder()
+
+    def note(line: str) -> None:
+        print(line, flush=True)
+
+    bake(root, log=note)
+    ensure_pack(root, log=note)
     return 0
 
 
@@ -363,6 +370,7 @@ def _check_attention(session: Session, rng: np.random.Generator) -> None:
                 u32(ATTN_ROWS),
                 u32(64),
                 u32(ATTN_ROWS),
+                u32(0),
             ],
             (24, (tokens + 31) // 32, 1),
         )
@@ -390,12 +398,74 @@ def _check_attention(session: Session, rng: np.random.Generator) -> None:
                 session.zeros(64 * 4),
                 out,
             ],
-            [u32(position), u32(window), u32(span)],
+            [u32(position), u32(window), u32(span), u32(0)],
             (1, 8, -(-(position + 1 - (max(0, position + 1 - window) if window else 0)) // span)),
         )
         found = session.download_f32(out, 3072).reshape(24, 128)
         expect = _attention_reference(q, rel, gate, sink[0], keys, values, table, position, window)
         _close(found, expect, 1e-4, f"decode attention window {window}")
+    _check_window(session, keys, values, table, proj_h, table_h, sink_h, out, heads, sink)
+
+
+def _check_window(session, keys, values, table, proj_h, table_h, sink_h, out, heads, sink) -> None:
+    """A 1024-slot ring gathers in order and attends the same scores as a linear cache."""
+    from inkling_2_mini.metal41.weights import ROW_GATE, ROW_REL
+
+    window = 1024
+    pos0 = int(keys.shape[0]) - 1
+    ring_k = np.zeros((window, 1024), dtype=np.float16)
+    ring_v = np.zeros_like(ring_k)
+    for key in range(pos0):
+        ring_k[key % window] = keys[key]
+        ring_v[key % window] = values[key]
+    ring_kh = session.upload(ring_k)
+    ring_vh = session.upload(ring_v)
+    origin = max(0, pos0 + 1 - window) & ~63
+    rows = pos0 - origin
+    stage_k = session.zeros((rows + 1) * 1024 * 2)
+    stage_v = session.zeros((rows + 1) * 1024 * 2)
+    session.dispatch(
+        "kv_window",
+        [stage_k, stage_v, ring_kh, ring_vh],
+        [u32(origin), u32(pos0), u32(pos0 + 1), u32(window), u32(0)],
+        ((rows + 255) // 256, 1, 1),
+    )
+    staged = np.frombuffer(session.download(stage_k, rows * 1024 * 2), dtype=np.float16)
+    staged = staged.reshape(rows, 1024)
+    held = pos0 - window
+    expect = np.zeros((rows, 1024), dtype=np.float16)
+    for absolute in range(origin, pos0):
+        if absolute >= held:
+            expect[absolute - origin] = keys[absolute]
+    if not np.array_equal(staged, expect):
+        message = "window gather did not rebuild the local history"
+        raise RuntimeError(message)
+    ring_k[pos0 % window] = keys[pos0]
+    ring_v[pos0 % window] = values[pos0]
+    ring_kh = session.upload(ring_k)
+    ring_vh = session.upload(ring_v)
+    span = 256
+    q, rel, gate = heads(0)
+    session.dispatch(
+        "attend_group",
+        [
+            proj_h,
+            ring_kh,
+            ring_vh,
+            (proj_h, ROW_REL * 4),
+            table_h,
+            sink_h,
+            (proj_h, ROW_GATE * 4),
+            session.zeros(4 * 24 * 132 * 4),
+            session.zeros(64 * 4),
+            out,
+        ],
+        [u32(pos0), u32(window), u32(span), u32(window - 1)],
+        (1, 8, -(-window // span)),
+    )
+    found = session.download_f32(out, 3072).reshape(24, 128)
+    reference = _attention_reference(q, rel, gate, sink[0], keys, values, table, pos0, window)
+    _close(found, reference, 1e-4, "decode attention ring")
 
 
 def _repo_id(text: str) -> str:
@@ -515,18 +585,23 @@ def _setup(args: argparse.Namespace) -> int:
             from inkling_2_mini.metal41.calibration import HESSIANS_NAME
             from inkling_2_mini.metal41.gptq import PACK_NAME
             from inkling_2_mini.metal41.resident import EXPERT_PACK
+            from inkling_2_mini.metal41.vision import PACK_NAME as VISION_PACK
 
-            for stale in (PACK_NAME, HESSIANS_NAME, EXPERT_PACK):
+            for stale in (PACK_NAME, HESSIANS_NAME, EXPERT_PACK, VISION_PACK):
                 (folder / stale).unlink(missing_ok=True)
             ready = False
             experts_ready = False
         register_folder(folder, alias="inkling_2_mini" if name == FOLDER else None)
         if not args.no_calibrate and not ready:
             ui.log("calibrating the dense fp4 planes")
-            _calibrate(384, False, folder)
+            _calibrate(2048, False, folder)
         if not experts_ready:
             ui.log("baking the expert fp4 planes")
             _bake(folder)
+        else:
+            from inkling_2_mini.metal41.vision import ensure_pack
+
+            ensure_pack(folder, log=ui.log)
         ui.log(f"registered {folder.name}")
         return 0
     except (OSError, RuntimeError, ValueError) as exc:

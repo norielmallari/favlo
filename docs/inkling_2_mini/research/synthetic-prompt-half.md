@@ -64,3 +64,20 @@ The served folder is `Inkling-2-Mini`. The fused attention input plane, the atte
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+22 November 2026. A later protocol-complete run on the same pack, plane, and MTP setting replaced the Active models row. Thinking stayed off. Decode stayed 128. Each measured prefill was a cache miss.
+
+- A 512-token prompt prefilled at 1198.92 tok/s and decoded 128 tokens at 68.53 tok/s.
+- A 1024-token prompt prefilled at 1394.74 tok/s and decoded 128 tokens at 67.31 tok/s.
+- A 4096-token prompt prefilled at 1414.29 tok/s and decoded 128 tokens at 64.95 tok/s.
+- A 10000-token prompt prefilled at 1323.82 tok/s and decoded 128 tokens at 62.44 tok/s.
+- The end-to-end rates, prefill plus decode, were 278.26, 438.02, 867.35, and 1055.00 tok/s.
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 1198.92 tok/s (512 tok in 0.43 s) | 68.53 tok/s (128 tok in 1.87 s) | 278.26 tok/s (640 tok in 2.30 s) |
+| 1024 | 1394.74 tok/s (1024 tok in 0.73 s) | 67.31 tok/s (128 tok in 1.90 s) | 438.02 tok/s (1152 tok in 2.63 s) |
+| 4096 | 1414.29 tok/s (4096 tok in 2.90 s) | 64.95 tok/s (128 tok in 1.97 s) | 867.35 tok/s (4224 tok in 4.87 s) |
+| 10000 | 1323.82 tok/s (10000 tok in 7.55 s) | 62.44 tok/s (128 tok in 2.05 s) | 1055.00 tok/s (10128 tok in 9.60 s) |
+
+A search the same day did not find 1198.92, 1394.74, 1414.29, or 1323.82. [oMLX on an M5 Pro with 48 GB](https://omlx.ai/benchmarks/performance/twcgm64y), pack `Inkling-2-Mini-oQ4e-mtp`, reports 813.8 tok/s prefill and 40.0 tok/s generation at 1k tokens, and 826.3 and 39.4 tok/s at 4k tokens. That row is not this table. Queries: "Inkling-2-Mini 1198.92 OR 1394.74 OR 1414.29 OR 1323.82 tok/s prefill M5", and "Inkling-2-Mini oMLX OR llama.cpp OR MLX M5 Pro 48GB prefill tok/s 512 1024 4096".

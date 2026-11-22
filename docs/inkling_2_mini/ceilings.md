@@ -17,6 +17,7 @@
 
 - One token is one command buffer: 48 layer visits, then the head and the argmax.
 - The byte count is the fp4 attention and output planes of every visit, the router and the other half planes each visit reads, the message gates of the second and third core passes, eight expert images per visit, the visible keys and values (all positions on a full-attention visit, at most 1024 on a local one), the convolution states read and written, one embedding row, and the head.
+- A local visit keeps a 1024-token ring. These byte totals already counted that window. The device times below were measured while the local buffer was still context-sized; attention did not read past the window.
 - The device time is the GPU start-to-end time of one step's command buffer, the median of the last 24 of 33 steps, with decode filled.
 - The wall time per step was within 2% of the device time.
 - At 16 GB the open keeps only the eight routed expert images per visit, so these figures describe the 48 GB layout.

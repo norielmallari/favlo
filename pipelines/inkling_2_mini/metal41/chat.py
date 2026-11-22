@@ -193,16 +193,25 @@ def _number(body: dict[str, Any], card: dict[str, Any], key: str, default: float
 
 
 def _required_name(body: dict[str, Any]) -> str | None:
+    """The function a required tool choice names, or None.
+
+    The Responses body uses ``{"type": "function", "name": ...}``. A chat body
+    may still carry ``required_function_name`` or a nested ``function`` object.
+    """
     choice = body.get("tool_choice")
     if not isinstance(choice, dict):
         return None
-    if choice.get("mode") == "required" or choice.get("type") == "function":
-        name = choice.get("required_function_name")
-        if isinstance(name, str) and name:
-            return name
-        function = choice.get("function")
-        if isinstance(function, dict) and isinstance(function.get("name"), str):
-            return function["name"]
+    if choice.get("mode") != "required" and choice.get("type") != "function":
+        return None
+    name = choice.get("name")
+    if isinstance(name, str) and name:
+        return name
+    named = choice.get("required_function_name")
+    if isinstance(named, str) and named:
+        return named
+    function = choice.get("function")
+    if isinstance(function, dict) and isinstance(function.get("name"), str) and function["name"]:
+        return function["name"]
     return None
 
 
@@ -326,7 +335,7 @@ class Pipeline(LanguagePipeline):
     default_reasoning_effort = "high"
 
     def has_vision(self) -> bool:
-        return False
+        return True
 
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
         super().on_open(runtime, reply, selection)
@@ -393,10 +402,15 @@ def _respond(
         "mode": "none"
     }
     opening = forced_text(thinking, required, plain=not tools or not emit_tools)
+    runtime._vision_plan = None
     try:
         prompt = encode_chat(
             runtime.root, messages, tools, thinking, effort=effort, opening=opening
         )
+        from inkling_2_mini.metal41.vision import expand_prompt
+
+        prompt, plan = expand_prompt(messages, prompt)
+        runtime._vision_plan = plan or None
     except (RuntimeError, json.JSONDecodeError, ValueError) as exc:
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return

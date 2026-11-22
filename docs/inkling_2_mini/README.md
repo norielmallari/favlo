@@ -12,9 +12,9 @@ Summary for the `inkling_2_mini` language pipeline. Kernels, the checkpoint layo
 - `setup` downloads [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) into that folder, writes the registry row, rounds the dense fp4 planes with GPTQ, and bakes the expert planes. The experts are already NVFP4 and MXFP8, so there is no separate packed checkout and no `--keep-bf16`. The drafter file is not downloaded.
 - The download is about 18.2 GiB. Calibration adds about 2.6 GiB beside it and takes about ten minutes on the GPU and the host. The expert pack adds about 14.4 GiB. The open reads both packs in 8 MiB pieces. `--no-calibrate` skips the dense pack. Without that file the open rounds to the nearest code, and tool calls are less reliable. Without the expert pack the open requantizes layers 0–19.
 - A finished folder is registered again. A partial download continues. `--repo` accepts `org/name` or a `huggingface.co` link. `--name` is the folder under `models/`.
-- The registered card is temperature 1.0, top-p 1.0, top-k 0, and no presence penalty. The default effort is `high`. `thinking` uses that effort. `instruct` uses `none`. Each template effort is also a variant: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The row preserves thinking.
-- The checkpoint context is 1,048,576 tokens. The served window starts at 16384. The half key/value cache is reserved first, and the expert atlas keeps every image when the budget allows, or the eight routed images otherwise. The window shrinks only when those eight images do not fit.
-- A complete atlas and that window use about 34 GB. 16 GB and 24 GB do not hold every expert image. 48 GB does.
+- The registered sampler is temperature 1.0, top-p 1.0, top-k 0, and no presence penalty. The checkpoint publishes that temperature for every effort, so `thinking` and `instruct` store the same card. A request sets the effort with `reasoning_effort`. The row default is `high`. The row preserves thinking.
+- The checkpoint context is 1,048,576 tokens. The served window starts at 131072. The half key/value cache reserves that window for the eight full-attention visits and a 1024-token ring for each local visit. The expert atlas keeps every image when the budget allows, or the eight routed images otherwise. The window shrinks only when those eight images and the cache do not fit.
+- A complete atlas and that window use about 25 GB. 16 GB and 24 GB do not hold every expert image. 48 GB does.
 - Prompts reuse the shared SSD prefix store.
 
 ```text
@@ -24,6 +24,6 @@ uv run favlo --inkling_2_mini bake
 uv run favlo --inkling_2_mini kernels
 ```
 
-Text only. An image request is rejected.
+A user image runs the vision tower. `bake` writes `vision-fp8.safetensors` beside the checkpoint. A request reads that file in 8 MiB pieces and releases it after the rows are written.
 
-Measured bandwidth and kernel costs are in [ceilings.md](ceilings.md). Measured runs are in [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md), [research/coding-text-half.md](research/coding-text-half.md), and [research/intelligence-smoke.md](research/intelligence-smoke.md). Harness scores are in [benchmarks.md](benchmarks.md).
+Measured bandwidth and kernel costs are in [ceilings.md](ceilings.md). Measured runs are in [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md), [research/coding-text-half.md](research/coding-text-half.md), [research/coding-vision-half.md](research/coding-vision-half.md), [research/file-agent-half.md](research/file-agent-half.md), and [research/intelligence-smoke.md](research/intelligence-smoke.md). Harness scores are in [benchmarks.md](benchmarks.md).

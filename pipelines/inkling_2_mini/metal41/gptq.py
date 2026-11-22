@@ -60,6 +60,8 @@ class Capture:
     def __init__(self) -> None:
         self.sums: dict[tuple[int, str], np.ndarray] = {}
         self.tokens = 0
+        self.done = 0
+        self.source = ""
 
     def add(self, layer: int, stream: str, rows: np.ndarray) -> None:
         rows = np.ascontiguousarray(rows, dtype=np.float32)
@@ -70,10 +72,26 @@ class Capture:
         else:
             held += gram
 
+    def absorb(self, other: Capture) -> None:
+        """Add a finished sequence. A failed sequence is discarded instead."""
+        for key, gram in other.sums.items():
+            held = self.sums.get(key)
+            if held is None:
+                self.sums[key] = gram
+            else:
+                held += gram
+        self.tokens += other.tokens
+
     def save(self, path: Path) -> None:
         arrays = {f"{layer}:{stream}": gram for (layer, stream), gram in self.sums.items()}
         partial = path.with_suffix(".partial.npz")
-        np.savez(partial, tokens=np.int64(self.tokens), **arrays)
+        np.savez(
+            partial,
+            tokens=np.int64(self.tokens),
+            done=np.int64(self.done),
+            source=np.array(self.source),
+            **arrays,
+        )
         partial.replace(path)
 
     @classmethod
@@ -83,9 +101,15 @@ class Capture:
             for key in held.files:
                 if key == "tokens":
                     capture.tokens = int(held[key])
-                    continue
-                layer, stream = key.split(":")
-                capture.sums[(int(layer), stream)] = held[key]
+                elif key == "done":
+                    capture.done = int(held[key])
+                elif key == "source":
+                    capture.source = str(held[key])
+                else:
+                    layer, stream = key.split(":")
+                    capture.sums[(int(layer), stream)] = held[key]
+            if "done" not in held.files and capture.tokens:
+                capture.done = 2**31
         return capture
 
     def hessian(self, layer: int, stream: str) -> np.ndarray:

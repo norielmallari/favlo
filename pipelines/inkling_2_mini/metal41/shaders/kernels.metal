@@ -1146,6 +1146,72 @@ static inline float conv_hist(
     return state[uint(3 + at) * channels + c];
 }
 
+// mode 0 copies history [origin, pos0) from a local ring into a contiguous span.
+// mode 1 writes the last ring_slots keys of [origin, kend) back onto that ring.
+// One thread copies one key row. The grid is that row count, rounded up to 256.
+kernel void kv_window(
+    device half* stage_k [[buffer(0)]],
+    device half* stage_v [[buffer(1)]],
+    device half* ring_k [[buffer(2)]],
+    device half* ring_v [[buffer(3)]],
+    constant uint& origin [[buffer(4)]],
+    constant uint& pos0 [[buffer(5)]],
+    constant uint& kend [[buffer(6)]],
+    constant uint& ring_slots [[buffer(7)]],
+    constant uint& mode [[buffer(8)]],
+    uint row [[thread_position_in_grid]])
+{
+    uint mask = ring_slots - 1u;
+    if (mode == 0u) {
+        if (origin >= pos0 || row >= pos0 - origin) {
+            return;
+        }
+        uint absolute = origin + row;
+        uint held = pos0 > ring_slots ? pos0 - ring_slots : 0u;
+        device half4* dk = (device half4*)(stage_k + (ulong)row * 1024u);
+        device half4* dv = (device half4*)(stage_v + (ulong)row * 1024u);
+        if (absolute < held) {
+            for (uint i = 0u; i < 256u; ++i) {
+                dk[i] = half4(0.0h);
+                dv[i] = half4(0.0h);
+            }
+            return;
+        }
+        uint slot = absolute & mask;
+        device const half4* sk = (device const half4*)(ring_k + (ulong)slot * 1024u);
+        device const half4* sv = (device const half4*)(ring_v + (ulong)slot * 1024u);
+        for (uint i = 0u; i < 256u; ++i) {
+            dk[i] = sk[i];
+            dv[i] = sv[i];
+        }
+        return;
+    }
+    uint keep = kend > ring_slots ? kend - ring_slots : 0u;
+    if (keep < origin) {
+        keep = origin;
+    }
+    if (keep >= kend || row >= kend - keep) {
+        return;
+    }
+    uint absolute = keep + row;
+    uint stage_row = absolute - origin;
+    uint slot = absolute & mask;
+    device const half4* sk = (device const half4*)(stage_k + (ulong)stage_row * 1024u);
+    device const half4* sv = (device const half4*)(stage_v + (ulong)stage_row * 1024u);
+    device half4* dk = (device half4*)(ring_k + (ulong)slot * 1024u);
+    device half4* dv = (device half4*)(ring_v + (ulong)slot * 1024u);
+    for (uint i = 0u; i < 256u; ++i) {
+        dk[i] = sk[i];
+        dv[i] = sv[i];
+    }
+}
+
+// A local ring stores position p at p & mask. mask 0 keeps the absolute index.
+static inline uint kv_slot(uint key, uint mask)
+{
+    return mask == 0u ? key : (key & mask);
+}
+
 // Grid (tokens, 40), 128 threads, one thread per head channel.
 // y < 24: query head clip (with its rel clip). 24..31: key head. 32..39: value head.
 // Keys: short conv, L2 clip, half store. Values: short conv, RMS, half store.
@@ -1175,6 +1241,8 @@ kernel void attn_prep(
     constant float& eps [[buffer(21)]],
     constant float& q_clip [[buffer(22)]],
     constant float& rel_clip [[buffer(23)]],
+    constant uint& slot_base [[buffer(24)]],
+    constant uint& slot_mask [[buffer(25)]],
     uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]],
@@ -1242,10 +1310,10 @@ kernel void attn_prep(
     float out;
     if (is_k) {
         out = y0 * min(1.0f, q_clip / (sqrt(sq) + CLIP_EPS));
-        k_cache[(ulong)pos * 1024u + c] = half(out);
+        k_cache[(ulong)kv_slot(pos - slot_base, slot_mask) * 1024u + c] = half(out);
     } else {
         out = y0 * rsqrt(sq / 128.0f + eps);
-        v_cache[(ulong)pos * 1024u + c] = half(out);
+        v_cache[(ulong)kv_slot(pos - slot_base, slot_mask) * 1024u + c] = half(out);
     }
 }
 
@@ -1325,6 +1393,7 @@ kernel void attend_flash(
     constant uint& r_st [[buffer(12)]],
     constant uint& s_st [[buffer(13)]],
     constant uint& g_st [[buffer(14)]],
+    constant uint& origin [[buffer(15)]],
     uint lane [[thread_index_in_simdgroup]],
     uint tid [[thread_index_in_threadgroup]],
     uint2 tgid [[threadgroup_position_in_grid]])
@@ -1363,9 +1432,9 @@ kernel void attend_flash(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     tensor<threadgroup half, dextents<int, 2>, tensor_inline> queries(qtile, dextents<int, 2>(FD, FQ));
     tensor<device half, dextents<int, 2>, tensor_inline> keys(
-        k_cache + kvh * uint(FD), dextents<int, 2>(FD, int(kend)), array<int, 2>{1, 1024});
+        k_cache + kvh * uint(FD), dextents<int, 2>(FD, int(kend - origin)), array<int, 2>{1, 1024});
     tensor<device half, dextents<int, 2>, tensor_inline> values(
-        v_cache + kvh * uint(FD), dextents<int, 2>(FD, int(kend)), array<int, 2>{1, 1024});
+        v_cache + kvh * uint(FD), dextents<int, 2>(FD, int(kend - origin)), array<int, 2>{1, 1024});
     tensor<threadgroup half, dextents<int, 2>, tensor_inline> tile_p(prob, dextents<int, 2>(FK, FQ));
     auto tile_q = queries.slice(0, 0);
     constexpr auto qk_desc = matmul2d_descriptor(FQ, FK, FD, false, true, false);
@@ -1382,7 +1451,7 @@ kernel void attend_flash(
     uint qp = pos0 + t;
     bool live = t < tokens;
     for (uint k0 = lo & ~uint(FK - 1); k0 < kend; k0 += uint(FK)) {
-        auto tile_k = keys.slice(0, int(k0));
+        auto tile_k = keys.slice(0, int(k0 - origin));
         auto score_tile = qk_op.get_destination_cooperative_tensor<decltype(tile_q), decltype(tile_k), float>();
         qk_op.run(tile_q, tile_k, score_tile);
         for (uint16_t i = 0u; i < score_tile.get_capacity(); ++i) {
@@ -1434,7 +1503,7 @@ kernel void attend_flash(
             mrun[row] = next;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        auto tile_v = values.slice(0, int(k0));
+        auto tile_v = values.slice(0, int(k0 - origin));
         auto mixed = pv_op.get_destination_cooperative_tensor<decltype(tile_p), decltype(tile_v), float>();
         pv_op.run(tile_p, tile_v, mixed);
         for (uint16_t i = 0u; i < mixed.get_capacity() && i < 32u; ++i) {
@@ -1477,6 +1546,7 @@ static inline void attend_range(
     uint qp,
     uint kbeg,
     uint kend,
+    uint slot_mask,
     bool with_sink,
     uint lane,
     thread float* m,
@@ -1507,7 +1577,8 @@ static inline void attend_range(
             float d1 = 0.0f;
             float d2 = 0.0f;
             if (key < kend) {
-                device const half4* kp = (device const half4*)(k_cache + (ulong)key * 1024u + kvh * 128u + sub * 16u);
+                uint slot = kv_slot(key, slot_mask);
+                device const half4* kp = (device const half4*)(k_cache + (ulong)slot * 1024u + kvh * 128u + sub * 16u);
                 for (uint i = 0u; i < 4u; ++i) {
                     float4 kf = float4(kp[i]);
                     d0 += dot(kf, qr[0][i]);
@@ -1551,11 +1622,22 @@ static inline void attend_range(
             sc[r] = p;
         }
         uint nk = min(32u, kend - kb);
-        device const half4* vp = (device const half4*)(v_cache + (ulong)kb * 1024u + kvh * 128u) + lane;
-        for (uint j = 0u; j < nk; ++j) {
-            float4 vf = float4(vp[j * 256u]);
-            for (uint r = 0u; r < 3u; ++r) {
-                o[r] = fma(float4(simd_broadcast(sc[r], ushort(j))), vf, o[r]);
+        if (slot_mask == 0u) {
+            device const half4* vp = (device const half4*)(v_cache + (ulong)kb * 1024u + kvh * 128u) + lane;
+            for (uint j = 0u; j < nk; ++j) {
+                float4 vf = float4(vp[j * 256u]);
+                for (uint r = 0u; r < 3u; ++r) {
+                    o[r] = fma(float4(simd_broadcast(sc[r], ushort(j))), vf, o[r]);
+                }
+            }
+        } else {
+            for (uint j = 0u; j < nk; ++j) {
+                uint slot = kv_slot(kb + j, slot_mask);
+                device const half4* vp = (device const half4*)(v_cache + (ulong)slot * 1024u + kvh * 128u) + lane;
+                float4 vf = float4(vp[0]);
+                for (uint r = 0u; r < 3u; ++r) {
+                    o[r] = fma(float4(simd_broadcast(sc[r], ushort(j))), vf, o[r]);
+                }
             }
         }
     }
@@ -1580,6 +1662,7 @@ kernel void attend_group(
     constant uint& pos0 [[buffer(10)]],
     constant uint& window [[buffer(11)]],
     constant uint& span [[buffer(12)]],
+    constant uint& slot_mask [[buffer(13)]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]],
     uint3 tgid [[threadgroup_position_in_grid]],
@@ -1603,7 +1686,7 @@ kernel void attend_group(
     float l[3];
     float4 o[3];
     attend_range(query, k_cache, v_cache, rel, table, sink, kvh, qp, sbeg, send,
-                 split == 0u && simd == 0u, lane, m, l, o);
+                 slot_mask, split == 0u && simd == 0u, lane, m, l, o);
     for (uint r = 0u; r < 3u; ++r) {
         if (lane == 0u) {
             tm[simd][r] = m[r];
@@ -2141,4 +2224,293 @@ kernel void dequant_nvfp4(
     uint nibble = (col & 1u) ? (byte >> 4) : (byte & 0x0fu);
     float scale = E4M3_TABLE[scales[row * (cols / 16u) + col / 16u]];
     destination[tid] = half(E2M1_SIGNED[nibble] * scale * global_scale);
+}
+
+// Vision tower. Rank-2 weights are E4M3 with one float scale per 32 along K.
+// The scale plane is raw little-endian bytes so the read does not need alignment.
+
+kernel void vision_dequant(
+    device const uchar* codes [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device half* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= rows * inner) {
+        return;
+    }
+    uint col = tid % inner;
+    uint row = tid / inner;
+    uint groups = inner >> 5;
+    uint byte_index = (row * groups + (col >> 5)) * 4u;
+    uint bits = uint(scales[byte_index]) | (uint(scales[byte_index + 1u]) << 8) |
+        (uint(scales[byte_index + 2u]) << 16) | (uint(scales[byte_index + 3u]) << 24);
+    destination[tid] = half(E4M3_TABLE[codes[tid]] * as_type<float>(bits));
+}
+
+kernel void vision_pad(
+    device const half* source [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant uint& pad_rows [[buffer(4)]],
+    constant uint& pad_cols [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= pad_rows * pad_cols) {
+        return;
+    }
+    uint col = tid % pad_cols;
+    uint row = tid / pad_cols;
+    if (row < rows && col < cols) {
+        destination[tid] = source[row * cols + col];
+    } else {
+        destination[tid] = half(0.0f);
+    }
+}
+
+kernel void vision_bias_cast(
+    device const float* source [[buffer(0)]],
+    device const float* bias [[buffer(1)]],
+    device half* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& pad_cols [[buffer(5)]],
+    constant uint& use_bias [[buffer(6)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= rows * cols) {
+        return;
+    }
+    uint col = tid % cols;
+    uint row = tid / cols;
+    float value = source[row * pad_cols + col];
+    if (use_bias != 0u) {
+        value += bias[col];
+    }
+    destination[tid] = half(value);
+}
+
+kernel void vision_add(
+    device const half* left [[buffer(0)]],
+    device const half* right [[buffer(1)]],
+    device half* destination [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= count) {
+        return;
+    }
+    destination[tid] = half(float(left[tid]) + float(right[tid]));
+}
+
+kernel void vision_ln(
+    device const half* source [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device half* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 group [[threadgroup_position_in_grid]])
+{
+    uint row = group.x;
+    if (row >= rows) {
+        return;
+    }
+    threadgroup float red[256];
+    float sum = 0.0f;
+    for (uint i = tid; i < hidden; i += 256u) {
+        sum += float(source[row * hidden + i]);
+    }
+    red[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint step = 128u; step > 0u; step >>= 1u) {
+        if (tid < step) {
+            red[tid] += red[tid + step];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float mean = red[0] / float(hidden);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float var = 0.0f;
+    for (uint i = tid; i < hidden; i += 256u) {
+        float delta = float(source[row * hidden + i]) - mean;
+        var += delta * delta;
+    }
+    red[tid] = var;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint step = 128u; step > 0u; step >>= 1u) {
+        if (tid < step) {
+            red[tid] += red[tid + step];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(red[0] / float(hidden) + eps);
+    for (uint i = tid; i < hidden; i += 256u) {
+        float value = (float(source[row * hidden + i]) - mean) * inv;
+        destination[row * hidden + i] = half(value * weight[i] + bias[i]);
+    }
+}
+
+// Abramowitz and Stegun 7.1.26. The erf GELU is 0.5 * x * (1 + erf(x / sqrt(2))).
+static inline float vision_erf(float value) {
+    float sign = value < 0.0f ? -1.0f : 1.0f;
+    float ax = fabs(value);
+    float t = 1.0f / (1.0f + 0.3275911f * ax);
+    float poly = fma(1.061405429f, t, -1.453152027f);
+    poly = fma(poly, t, 1.421413741f);
+    poly = fma(poly, t, -0.284496736f);
+    poly = fma(poly, t, 0.254829592f);
+    return sign * (1.0f - poly * t * exp(-ax * ax));
+}
+
+kernel void vision_gelu(
+    device const half* source [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= count) {
+        return;
+    }
+    float value = float(source[tid]);
+    destination[tid] = half(0.5f * value * (1.0f + vision_erf(value * 0.7071067811865476f)));
+}
+
+kernel void vision_residual(
+    device const half* residual [[buffer(0)]],
+    device const half* branch [[buffer(1)]],
+    device const float* gamma [[buffer(2)]],
+    device half* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint count = rows * hidden;
+    if (tid >= count) {
+        return;
+    }
+    uint col = tid % hidden;
+    destination[tid] = half(float(residual[tid]) + gamma[col] * float(branch[tid]));
+}
+
+// Axial RoPE. cos and sin are width then height, each value repeated for the pair.
+kernel void vision_rope(
+    device half* states [[buffer(0)]],
+    device const float* cos_table [[buffer(1)]],
+    device const float* sin_table [[buffer(2)]],
+    constant uint& seq [[buffer(3)]],
+    constant uint& heads [[buffer(4)]],
+    constant uint& head_dim [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint pairs = head_dim >> 1;
+    if (tid >= seq * heads * pairs) {
+        return;
+    }
+    uint pair = tid % pairs;
+    uint tmp = tid / pairs;
+    uint head = tmp % heads;
+    uint row = tmp / heads;
+    uint base = (row * heads + head) * head_dim + pair * 2u;
+    float x1 = float(states[base]);
+    float x2 = float(states[base + 1u]);
+    float cos_v = cos_table[row * head_dim + pair * 2u];
+    float sin_v = sin_table[row * head_dim + pair * 2u];
+    states[base] = half(x1 * cos_v - x2 * sin_v);
+    states[base + 1u] = half(x2 * cos_v + x1 * sin_v);
+}
+
+// Bidirectional attention over the real sequence. One simdgroup owns one query row of one head.
+kernel void vision_attend(
+    device const half* query [[buffer(0)]],
+    device const half* key [[buffer(1)]],
+    device const half* value [[buffer(2)]],
+    device half* destination [[buffer(3)]],
+    constant uint& seq [[buffer(4)]],
+    constant uint& heads [[buffer(5)]],
+    constant uint& head_dim [[buffer(6)]],
+    constant float& scale [[buffer(7)]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint3 group [[threadgroup_position_in_grid]])
+{
+    uint row = group.x;
+    uint head = group.y;
+    if (row >= seq || head >= heads || head_dim != 64u) {
+        return;
+    }
+    uint qbase = (row * heads + head) * head_dim;
+    float max_score = -INFINITY;
+    for (uint key_row = 0u; key_row < seq; ++key_row) {
+        uint kbase = (key_row * heads + head) * head_dim;
+        float dot = float(query[qbase + lane]) * float(key[kbase + lane]);
+        dot += float(query[qbase + 32u + lane]) * float(key[kbase + 32u + lane]);
+        dot = simd_sum(dot);
+        max_score = max(max_score, dot * scale);
+    }
+    float sum = 0.0f;
+    for (uint key_row = 0u; key_row < seq; ++key_row) {
+        uint kbase = (key_row * heads + head) * head_dim;
+        float dot = float(query[qbase + lane]) * float(key[kbase + lane]);
+        dot += float(query[qbase + 32u + lane]) * float(key[kbase + 32u + lane]);
+        dot = simd_sum(dot);
+        sum += exp(dot * scale - max_score);
+    }
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    for (uint key_row = 0u; key_row < seq; ++key_row) {
+        uint kbase = (key_row * heads + head) * head_dim;
+        float dot = float(query[qbase + lane]) * float(key[kbase + lane]);
+        dot += float(query[qbase + 32u + lane]) * float(key[kbase + 32u + lane]);
+        dot = simd_sum(dot);
+        float prob = exp(dot * scale - max_score) / sum;
+        acc0 += prob * float(value[kbase + lane]);
+        acc1 += prob * float(value[kbase + 32u + lane]);
+    }
+    destination[qbase + lane] = half(acc0);
+    destination[qbase + 32u + lane] = half(acc1);
+}
+
+// Drop the class token and concatenate each group of four patch rows.
+kernel void vision_merge(
+    device const half* source [[buffer(0)]],
+    device half* destination [[buffer(1)]],
+    constant uint& tokens [[buffer(2)]],
+    constant uint& hidden [[buffer(3)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint wide = hidden * 4u;
+    if (tid >= tokens * wide) {
+        return;
+    }
+    uint col = tid % wide;
+    uint token = tid / wide;
+    uint which = col / hidden;
+    uint inner = col - which * hidden;
+    uint src_row = 1u + token * 4u + which;
+    destination[tid] = source[src_row * hidden + inner];
+}
+
+kernel void vision_scatter(
+    device float* hidden [[buffer(0)]],
+    device const half* bank [[buffer(1)]],
+    device const int* slots [[buffer(2)]],
+    constant uint& pos0 [[buffer(3)]],
+    constant uint& tokens [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= tokens * width) {
+        return;
+    }
+    uint col = tid % width;
+    uint row = tid / width;
+    int slot = slots[pos0 + row];
+    if (slot < 0) {
+        return;
+    }
+    hidden[tid] = float(bank[(uint)slot * width + col]);
 }

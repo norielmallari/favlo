@@ -21,7 +21,7 @@ from inkling_2_mini.metal41.session import u32
 # Largest stored tensor of one expert: MXFP8 fused gate/up, then the widest block scale.
 _MAX_DATA = HIDDEN * HIDDEN
 _MAX_SCALE = HIDDEN * (HIDDEN // 16)
-CONTEXTS = (16384, 8192, 4096, 2048, 1024, 512)
+CONTEXTS = (131072, 16384, 8192, 4096, 2048, 1024, 512)
 
 
 def expert_file_bytes(header: dict[str, Any]) -> int:

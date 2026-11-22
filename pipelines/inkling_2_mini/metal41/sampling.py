@@ -1,18 +1,18 @@
 """Sampling card for Inkling 2 Mini.
 
 ``generation_config.json`` publishes temperature 1.0 and ``do_sample``. It does
-not publish top-p, top-k, or a presence penalty, so those stay unrestricted.
-The chat template publishes the effort map. Every listed OpenAI effort is a
-template key and a variant. ``high`` is the template default, 0.9. The
-template keeps an assistant ``reasoning_content`` when the message carries one,
-so the registry row preserves thinking.
+not publish a different temperature or top-k for thinking and non-thinking, so
+``thinking`` and ``instruct`` store one sampler. A request sets the effort with
+``reasoning_effort``. ``high`` is the template default, 0.9. The template keeps
+an assistant ``reasoning_content`` when the message carries one, so the
+registry row preserves thinking.
 """
 
 DEFAULT_VARIANT = "thinking"
 DEFAULT_THINKING = True
 DEFAULT_REASONING_EFFORT = "high"
 PRESERVE_THINKING = True
-CONTEXT_LENGTH = 16384
+CONTEXT_LENGTH = 131072
 
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 SUPPORTED_EFFORTS = frozenset(EFFORT_ORDER)
@@ -36,16 +36,10 @@ _CARD = {
 }
 
 
-def _effort_card(effort: str) -> dict[str, float | int | str]:
-    return {**_CARD, "reasoning_effort": effort}
-
-
 VARIANTS = {
-    "thinking": _effort_card("high"),
-    "instruct": _effort_card("none"),
+    "thinking": dict(_CARD),
+    "instruct": dict(_CARD),
 }
-for _effort in EFFORT_ORDER:
-    VARIANTS[_effort] = _effort_card(_effort)
 
 
 def template_effort(value: str | float | int | None) -> float:

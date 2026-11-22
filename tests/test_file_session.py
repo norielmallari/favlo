@@ -145,7 +145,12 @@ def test_parse_requests_and_prefix_extension() -> None:
         "prompt tokens 300\ncache hit 184",
         "prefix load 184 tokens\nprompt tokens 300\ncache hit 184",
     )
-    assert not extensions_hold(parse_requests(later))
+    assert extensions_hold(parse_requests(later))
+    wrong = later.replace(
+        "prefix load 184 tokens\nprompt tokens 300\ncache hit 184",
+        "prefix load 100 tokens\nprompt tokens 300\ncache hit 100",
+    )
+    assert not extensions_hold(parse_requests(wrong))
     after_prompt = """\
 prompt tokens 10
 cache miss

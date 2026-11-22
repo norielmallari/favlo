@@ -36,6 +36,7 @@ KERNELS: dict[str, int] = {
     "ctl_pair_rows": 256,
     "ctl_blend_rows": 256,
     "attn_prep": 128,
+    "kv_window": 256,
     "conv_tail": 256,
     "conv_add_rows": 256,
     "attend_group": 256,
@@ -52,6 +53,17 @@ KERNELS: dict[str, int] = {
     "argmax_index": 256,
     "pack_nvfp4_fp4": 256,
     "dequant_nvfp4": 256,
+    "vision_dequant": 256,
+    "vision_pad": 256,
+    "vision_bias_cast": 256,
+    "vision_add": 256,
+    "vision_ln": 256,
+    "vision_gelu": 256,
+    "vision_residual": 256,
+    "vision_rope": 256,
+    "vision_attend": 32,
+    "vision_merge": 256,
+    "vision_scatter": 256,
 }
 
 
