@@ -15,6 +15,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.exp
+*.lib
 
 # Local machine
 .DS_Store
