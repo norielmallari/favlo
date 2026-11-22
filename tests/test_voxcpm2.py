@@ -10,9 +10,6 @@ import pytest
 from safetensors.numpy import save_file
 
 from favlo.media_pipeline import MediaPaused, MediaRequestError
-from voxcpm2.metal41.audio import encode_wav
-from voxcpm2.metal41.block import embedding_scale, residual_add, rope_scale, swiglu
-from voxcpm2.metal41.checkpoint import summarize, tensor_header
 from voxcpm2.metal41.checks import (
     activation_matches,
     attention_matches,
@@ -22,13 +19,17 @@ from voxcpm2.metal41.checks import (
     rope_matches,
     stack_matches,
 )
-from voxcpm2.metal41.config import load_config
 from voxcpm2.metal41.dit import diffusion_schedule, zero_init_steps
-from voxcpm2.metal41.fsq import quantize_bound
-from voxcpm2.metal41.progress import PATCH_CAP, VoiceProgress, patch_limit, sample_total
-from voxcpm2.metal41.runtime import Pipeline, Runtime, VoiceRequest
-from voxcpm2.metal41.text import style_line
-from voxcpm2.metal41.tokenize import AUDIO_START, LineTokenizer
+from voxcpm2.metal41.runtime import Runtime
+from voxcpm2.portable.audio import encode_wav
+from voxcpm2.portable.block import embedding_scale, residual_add, rope_scale, swiglu
+from voxcpm2.portable.checkpoint import summarize, tensor_header
+from voxcpm2.portable.config import load_config
+from voxcpm2.portable.fsq import quantize_bound
+from voxcpm2.portable.progress import PATCH_CAP, VoiceProgress, patch_limit, sample_total
+from voxcpm2.portable.text import style_line
+from voxcpm2.portable.tokenize import AUDIO_START, LineTokenizer
+from voxcpm2.portable.voice import Pipeline, VoiceRequest
 
 
 def test_embedding_scale_is_one_when_mup_is_off() -> None:
@@ -188,12 +189,12 @@ def test_line_tokens_follow_the_published_tokenize_path() -> None:
 
 
 def test_open_accepts_an_empty_resident_percent(tmp_path: Path) -> None:
-    from voxcpm2.metal41.runtime import open_runtime
+    from voxcpm2.metal41.runtime import open_device
 
     (tmp_path / "model.safetensors").write_bytes(b"")
     (tmp_path / "config.json").write_text("{", encoding="utf-8")
     with pytest.raises(json.JSONDecodeError):
-        open_runtime(tmp_path, resident_percent=None)
+        open_device(tmp_path, resident_percent=None)
 
 
 def test_patch_limit_follows_the_published_clamp() -> None:

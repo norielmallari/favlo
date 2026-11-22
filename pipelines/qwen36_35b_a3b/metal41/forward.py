@@ -347,7 +347,7 @@ def piece_is_blank(root: Path, token: int) -> bool:
     """True when this token's text is only whitespace."""
     global _piece_decoder
     if _piece_decoder is None or _piece_decoder[0] != root:
-        from qwen36_35b_a3b.metal41.chat import decode_text
+        from qwen36_35b_a3b.portable.chat import decode_text
 
         _piece_decoder = (root, decode_text)
     return _piece_decoder[1](root, [token]).strip() == ""
@@ -2339,8 +2339,8 @@ class Qwen36Runtime:
             self._prefill_progress = prefill_row
             self._prefill_done = 0
             started = time.perf_counter()
-            from qwen36_35b_a3b.metal41.chat import generation_cut
             from qwen36_35b_a3b.metal41.prefill import prefill_ids
+            from qwen36_35b_a3b.portable.chat import generation_cut
 
             cuts: list[int] = []
             stable = getattr(self, "_stable_cut", None)
@@ -2731,7 +2731,7 @@ class Qwen36Runtime:
         """
         if not out or not prompt:
             return out
-        from qwen36_35b_a3b.metal41.chat import decode_text, encode_text
+        from qwen36_35b_a3b.portable.chat import decode_text, encode_text
 
         text = decode_text(self.root, out)
         canonical = encode_text(self.root, text)

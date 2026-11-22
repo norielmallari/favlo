@@ -10,7 +10,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from z_image_turbo.metal41.chat import ImageRequestError, _fields, handle_image
+
+from favlo.media_meta import load_media
+from favlo.media_pipeline import MediaPaused
+from favlo.reply import MemoryReply
 from z_image_turbo.metal41.formats import (
     dequant_fp4,
     pack_fp4,
@@ -29,13 +32,10 @@ from z_image_turbo.metal41.progress import (
     sample_total,
 )
 from z_image_turbo.metal41.record import Plane, load, quantize, weight_bytes
-from z_image_turbo.metal41.runtime import Runtime, _patchify, _unpatchify, open_runtime
+from z_image_turbo.metal41.runtime import Runtime, _patchify, _unpatchify, open_device
 from z_image_turbo.metal41.schedule import sigmas, timestep
 from z_image_turbo.metal41.scratch import MAX_EDGE, Scratch, scratch_bytes
-
-from favlo.media_meta import load_media
-from favlo.media_pipeline import MediaPaused
-from favlo.reply import MemoryReply
+from z_image_turbo.portable.chat import ImageRequestError, _fields, handle_image
 
 
 class _Gate:
@@ -146,7 +146,7 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("z_image_turbo.metal41.runtime.Runtime", fake)
     monkeypatch.setattr("z_image_turbo.metal41.runtime.memory.set_max_memory", caps.append)
-    assert open_runtime(Path("record"), owner="z_image_turbo:7", max_memory="16GiB") == "runtime"
+    assert open_device(Path("record"), owner="z_image_turbo:7", max_memory="16GiB") == "runtime"
     assert captured["owner"] == "z_image_turbo:7"
     assert "max_memory" not in captured
     assert caps == ["16GiB"]
@@ -1027,7 +1027,7 @@ def test_quantize_accepts_a_directory_of_safetensors(tmp_path: Path) -> None:
 def test_a_custom_safetensors_file_is_its_own_registry_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from z_image_turbo.metal41.commands import main
+    from z_image_turbo.portable.commands import main
 
     def models_dir(root: Path | None = None) -> Path:
         del root
@@ -1089,7 +1089,7 @@ def test_a_custom_safetensors_file_is_its_own_registry_id(
 def test_int8_quantize_fills_an_empty_image_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from z_image_turbo.metal41.commands import main
+    from z_image_turbo.portable.commands import main
 
     def models_dir(root: Path | None = None) -> Path:
         del root

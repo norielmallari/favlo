@@ -4,7 +4,7 @@ As-built detail for the `z_image_base` package. [README.md](README.md) is the su
 
 Text-to-image for [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image).
 
-- `favlo --z_image_base` loads `pipelines/z_image_base/metal41/`.
+- `favlo --z_image_base` loads `z_image_base.portable`. That package is the serve entry. `metal41` is the Metal device it opens.
 - The DiT, the Qwen3 caption encoder, the VAE decoder, and the shaders live in `pipelines/z_image/metal41/z_image/`.
 - This pipeline chooses the step count, the shift, and the classifier-free guidance.
 

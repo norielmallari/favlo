@@ -2,7 +2,7 @@
 
 Text-to-image for [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image). Those weights are under the Apache License, Version 2.0.
 
-`favlo --z_image_base` loads this package. With `favlo serve` listening, draw through `favlo media --pipeline z_image_base` or the MCP tool `z_image_base__generate_image`.
+`favlo --z_image_base` loads `z_image_base.portable`. That package is the serve entry. `metal41` is the Metal device it opens. With `favlo serve` listening, draw through `favlo media --pipeline z_image_base` or the MCP tool `z_image_base__generate_image`.
 
 - The default packed record is `Z-Image-int8`.
 - The DiT, Qwen3 caption encoder, VAE, and Metal shaders live under `pipelines/z_image/metal41/z_image/`.

@@ -105,6 +105,8 @@ def alive(pid: int) -> bool:
     """True when ``pid`` is a running process. A zombie child counts as gone."""
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_alive(pid)
     try:
         waited, _status = os.waitpid(pid, os.WNOHANG)
     except ChildProcessError:
@@ -117,6 +119,17 @@ def alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    return True
+
+
+def _windows_alive(pid: int) -> bool:
+    import ctypes
+
+    kernel = ctypes.windll.kernel32
+    handle = kernel.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    kernel.CloseHandle(handle)
     return True
 
 
@@ -413,7 +426,7 @@ def stop_pid(pid: int) -> None:
     except KeyboardInterrupt:
         pass
     if alive(pid):
-        _signal(pid, signal.SIGKILL)
+        _signal(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 def release_pid(port: int, pid: int, home: Path | None = None) -> None:
@@ -528,25 +541,10 @@ def ensure(
 
 
 def _process_rows() -> list[tuple[int, int, str]]:
-    """Pid, parent pid, and command for every process ``ps`` lists."""
-    completed = subprocess.run(
-        ["ps", "-axww", "-o", "pid=,ppid=,command="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    rows: list[tuple[int, int, str]] = []
-    for line in completed.stdout.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) < 3:
-            continue
-        try:
-            pid = int(parts[0])
-            parent = int(parts[1])
-        except ValueError:
-            continue
-        rows.append((pid, parent, parts[2]))
-    return rows
+    """Pid, parent pid, and command for every process this host lists."""
+    from favlo.processes import process_rows
+
+    return process_rows()
 
 
 def _ancestors(rows: list[tuple[int, int, str]]) -> set[int]:
@@ -581,7 +579,19 @@ def _process_kind(command: str) -> str | None:
     return None
 
 
+def _session_flags() -> dict[str, int | bool]:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
 def _signal(pid: int, signum: int) -> None:
+    if os.name == "nt":
+        try:
+            os.kill(pid, signum)
+        except OSError:
+            return
+        return
     try:
         os.killpg(pid, signum)
     except ProcessLookupError:
@@ -684,7 +694,7 @@ def _spawn(
         stderr=subprocess.DEVNULL,
         env=env,
         cwd=str(root),
-        start_new_session=True,
+        **_session_flags(),
     )
 
 

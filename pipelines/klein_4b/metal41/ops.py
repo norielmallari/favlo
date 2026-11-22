@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from .constants import NORM_EPS, VAE_EPS, VAE_GROUPS
+from klein_4b.portable.constants import NORM_EPS, VAE_EPS, VAE_GROUPS
+from klein_4b.portable.rope import apply_dit, apply_text
+
 from .metal import Gpu
-from .rope import apply_dit, apply_text
 
 _F16 = np.float32(65504)
 

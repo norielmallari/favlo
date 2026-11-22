@@ -30,7 +30,6 @@ import objc
 
 from favlo.console import format_note, format_rate, publish_count
 from favlo.memory import memory
-from favlo.pipeline import ClientClosed
 from qwen38_27b.metal41.attn import bind_plane, value_block_bytes
 from qwen38_27b.metal41.budget import (
     SAMPLE_KEEP,
@@ -72,11 +71,7 @@ from qwen38_27b.metal41.prefill import _Workspace
 from qwen38_27b.metal41.prefix import open_session, pack_plane, unpack_plane
 from qwen38_27b.metal41.resident import DeviceImage
 from qwen38_27b.metal41.session import Session, release_buffers
-
-
-class RequestClosed(ClientClosed):
-    """The client went away or the process was signaled."""
-
+from qwen38_27b.portable.closed import RequestClosed
 
 _ARGMAX_GROUPS = (VOCAB + 255) // 256
 
@@ -1379,8 +1374,8 @@ class Qwen38Runtime:
             self._prefill_progress = prefill_row
             self._prefill_noted = 0
             started = time.perf_counter()
-            from qwen38_27b.metal41.chat import generation_cut
             from qwen38_27b.metal41.prefill import prefill_ids
+            from qwen38_27b.portable.chat import generation_cut
 
             root = getattr(self, "root", None)
             cuts: list[int] = []
@@ -1617,7 +1612,7 @@ class Qwen38Runtime:
         """
         if not out or not prompt:
             return out
-        from qwen38_27b.metal41.chat import decode_text, encode_text
+        from qwen38_27b.portable.chat import decode_text, encode_text
 
         text = decode_text(self.root, out)
         canonical = encode_text(self.root, text)
@@ -1820,7 +1815,7 @@ class Qwen38Runtime:
         """Store the template close when a tool call arrives before ``</think>``."""
         if self._tool_open is None or not self._think_empty_close:
             return None
-        from qwen38_27b.metal41.chat import redirect_open_think
+        from qwen38_27b.portable.chat import redirect_open_think
 
         return redirect_open_think(
             int(sampled),
@@ -1878,7 +1873,7 @@ class Qwen38Runtime:
     def _tokenizer(self) -> Any:
         tokenizer = getattr(self, "_loaded_tokenizer", None)
         if tokenizer is None:
-            from qwen38_27b.metal41.chat import load_tokenizer
+            from qwen38_27b.portable.chat import load_tokenizer
 
             tokenizer = load_tokenizer(self.root)
             self._loaded_tokenizer = tokenizer
@@ -1890,7 +1885,7 @@ class Qwen38Runtime:
         The next prompt encodes the decoded completion. A token that would
         resegment the text already drawn is skipped, and the draw repeats.
         """
-        from qwen38_27b.metal41.chat import keeps_token_ids
+        from qwen38_27b.portable.chat import keeps_token_ids
 
         tokenizer = self._tokenizer()
         if keeps_token_ids(tokenizer, produced, chosen):

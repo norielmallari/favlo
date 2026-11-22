@@ -14,17 +14,19 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from qwen36_35b_a3b.metal41.chat import (
+
+from qwen36_35b_a3b.metal41.commands import CARROT_PROMPT
+from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
+from qwen36_35b_a3b.portable.chat import (
     STOP,
     decode_text,
     encode_chat,
     think_close_ids,
     think_open_id,
 )
-from qwen36_35b_a3b.metal41.commands import CARROT_PROMPT
-from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
-from qwen36_35b_a3b.metal41.sampling import VARIANTS
-from qwen36_35b_a3b.metal41.tools import split_thinking
+from qwen36_35b_a3b.portable.sampling import VARIANTS
+from qwen36_35b_a3b.portable.tools import split_thinking
+
 
 def _installed_record() -> Path:
     """The packed folder this machine can smoke. e30 is the current record."""

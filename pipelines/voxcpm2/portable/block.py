@@ -10,7 +10,7 @@ import math
 
 import numpy as np
 
-from voxcpm2.metal41.config import RopeScaling
+from voxcpm2.portable.config import RopeScaling
 
 
 def embedding_scale(use_mup: bool, scale_emb: float) -> float:

@@ -12,7 +12,6 @@ from favlo.media_pipeline import checkpoint
 from favlo.videos import encode_mp4, reported_quality, store_source
 from wan22_ti2v_5b.metal41.avi import encode_avi
 from wan22_ti2v_5b.metal41.dit import DiT
-from wan22_ti2v_5b.metal41.request import VideoRequest
 from wan22_ti2v_5b.metal41.schedule import (
     image_mask,
     latent_grid,
@@ -25,6 +24,7 @@ from wan22_ti2v_5b.metal41.schedule import (
 from wan22_ti2v_5b.metal41.spec import LATENT_CHANNELS
 from wan22_ti2v_5b.metal41.text import TextEncoder
 from wan22_ti2v_5b.metal41.vae import WanVae
+from wan22_ti2v_5b.portable.request import VideoRequest
 
 
 @dataclass

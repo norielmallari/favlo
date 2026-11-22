@@ -7,15 +7,15 @@ from typing import Any
 
 import numpy as np
 
-from voxcpm2.metal41.block import rope_factors, rope_scale
-from voxcpm2.metal41.config import ModelConfig
 from voxcpm2.metal41.dit import condition, fuse, project_patch, quantize, sample_patch, stop_token
 from voxcpm2.metal41.metal import Session
-from voxcpm2.metal41.progress import VoiceProgress, patch_limit, sample_total
 from voxcpm2.metal41.stack import Cache, Stack
 from voxcpm2.metal41.store import Store
-from voxcpm2.metal41.tokenize import LineTokenizer
 from voxcpm2.metal41.vae import Decoder
+from voxcpm2.portable.block import rope_factors, rope_scale
+from voxcpm2.portable.config import ModelConfig
+from voxcpm2.portable.progress import VoiceProgress, patch_limit, sample_total
+from voxcpm2.portable.tokenize import LineTokenizer
 
 
 def generate(

@@ -28,14 +28,14 @@ import numpy as np
 
 from wan22_i2v.metal41.blob import blob_ready, fill_span, load_index, plane_array, write_blob
 from wan22_i2v.metal41.metal import BufferView, Gpu
-from wan22_i2v.metal41.schedule import (
+from wan22_i2v.metal41.source import VAE_FILE, vae_dir
+from wan22_i2v.portable.schedule import (
     LATENT_MEAN,
     LATENT_STD,
     P480_HEIGHT,
     P480_WIDTH,
     geometry,
 )
-from wan22_i2v.metal41.source import VAE_FILE, vae_dir
 
 _EPS = np.float32(1e-12)
 ENCODER_BLOCKS = 16

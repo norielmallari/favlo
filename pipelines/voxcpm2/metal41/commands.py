@@ -7,7 +7,6 @@ import json
 import sys
 from pathlib import Path
 
-from voxcpm2.metal41.checkpoint import summarize, tensor_header
 from voxcpm2.metal41.checks import (
     activation_matches,
     attention_matches,
@@ -17,8 +16,9 @@ from voxcpm2.metal41.checks import (
     rope_matches,
     stack_matches,
 )
-from voxcpm2.metal41.fetch import checkout, download
-from voxcpm2.metal41.sampling import CONTEXT_LENGTH
+from voxcpm2.portable.checkpoint import summarize, tensor_header
+from voxcpm2.portable.fetch import checkout, download
+from voxcpm2.portable.sampling import CONTEXT_LENGTH
 
 
 def main(argv: list[str] | None = None) -> int:

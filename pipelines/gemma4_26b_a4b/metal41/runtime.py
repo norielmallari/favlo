@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from gemma4_26b_a4b.metal41.chat import handle_responses
 from gemma4_26b_a4b.metal41.forward import Gemma4Runtime
+from gemma4_26b_a4b.portable.chat import handle_responses
 
 
-def open_runtime(
+def open_device(
     path: Path,
     *,
     kv_cache: str = "half",
@@ -33,4 +33,4 @@ def open_runtime(
     )
 
 
-__all__ = ["handle_responses", "open_runtime"]
+__all__ = ["handle_responses", "open_device"]

@@ -7,11 +7,11 @@ from typing import Any
 
 import numpy as np
 
-from voxcpm2.metal41.block import silu
-from voxcpm2.metal41.fsq import quantize_bound
 from voxcpm2.metal41.metal import Plane, Session
 from voxcpm2.metal41.stack import Cache, Stack
 from voxcpm2.metal41.store import Store
+from voxcpm2.portable.block import silu
+from voxcpm2.portable.fsq import quantize_bound
 
 
 def diffusion_schedule(steps: int, sway: float = 1.0) -> np.ndarray:

@@ -5,7 +5,7 @@ This page is the as-built detail for the `wan22_i2v` package.
 [README.md](README.md) is the summary.
 
 - Four-step image-to-video for [Wan-AI/Wan2.2-I2V-A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B).
-- `favlo --wan22_i2v` loads `pipelines/wan22_i2v/metal41/`.
+- The serve entry is `wan22_i2v.portable`. `favlo --wan22_i2v` and `favlo serve` load that package. `metal41` is the Metal device that entry opens.
 - The high-noise expert runs while the timestep is at least 900.
 - The low-noise expert runs after that.
 - One expert is on device at a time.
@@ -268,6 +268,9 @@ save_registry(data)
 - `mtp`, `mtp_depth`, `enable_thinking`, `reasoning_effort`, `context_length`, and `max_prompt_tokens` may sit on the row and are not read.
 - `context_length` is 512 at registration, the text length from the Wan config.
 - `pipeline`, `runtime`, `source`, and `pipeline_root` are the row's identity.
+- The serve entry is `wan22_i2v.portable`. `metal41` is the device that entry opens.
+- A row whose runtime is `metal41` still loads `portable`.
+- `metal41` re-exports that pipeline object. The device opens from `portable` `open_runtime`.
 
 ## Listener
 

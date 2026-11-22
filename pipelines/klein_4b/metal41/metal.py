@@ -11,9 +11,8 @@ import Metal
 import numpy as np
 
 from favlo.memory import device_buffer, memory
-
-from .constants import BN_EPS, GROUP, NORM_EPS, TILE_M, TILE_N, VAE_EPS, VAE_GROUPS
-from .formats import pad_rows
+from klein_4b.portable.constants import BN_EPS, GROUP, NORM_EPS, TILE_M, TILE_N, VAE_EPS, VAE_GROUPS
+from klein_4b.portable.formats import pad_rows
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _LOAD_CHUNK = 8 << 20

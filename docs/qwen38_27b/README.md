@@ -4,10 +4,11 @@ Summary for the `qwen38_27b` language pipeline on Metal 4.1. Kernels, the packed
 
 - The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
 - Those weights are under the Apache License, Version 2.0.
-- Clients reach this pipeline through `favlo serve`.
+- Clients reach this pipeline through `favlo serve`, which loads `qwen38_27b.portable`.
+- `portable` is the serve entry. `metal41` is the Metal device that entry opens on Apple Silicon.
 - `GET /v1/models` lists registered ids.
 - The `model` field on `POST /v1/responses` or `POST /v1/chat/completions` loads it.
-- Package commands (`download`, `quantize`, `mtp-half`, `delete`, `kernels`, `bf16`, `complete`, `models`) require `favlo --qwen38_27b`.
+- Package commands (`download`, `quantize`, `mtp-half`, `delete`, `kernels`, `bf16`, `complete`, `models`) require `favlo --qwen38_27b`, which loads that same entry.
 
 - A bare model id uses the thinking sampling card.
 - The served context window stops at 131072 tokens.

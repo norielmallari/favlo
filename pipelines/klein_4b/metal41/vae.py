@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from klein_4b.portable.store import Store
+
 from .metal import Gpu, View
-from .store import Store
 
 _SAME = (1, 1, 1, 1)
 _NONE = (0, 0, 0, 0)

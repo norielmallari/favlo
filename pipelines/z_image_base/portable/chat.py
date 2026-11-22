@@ -7,21 +7,34 @@ streaming partial are not produced. JPEG and WebP are not encoded.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import secrets
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
-from z_image.metal41.hold import ImageHold, ImageJob
-from z_image.metal41.png import REPORTED_QUALITY, pack_rgb, write_png
-from z_image.metal41.scratch import MAX_EDGE
 
 from favlo.images import load_image, store_source, sweep_images
-from favlo.media_pipeline import MediaTool, MediaCall, MediaPaused, MediaPipeline, MediaRequestError, checkpoint
-from z_image_base.metal41.schedule import MAX_STEPS, sampler_defaults
+from favlo.media_pipeline import (
+    MediaCall,
+    MediaPaused,
+    MediaPipeline,
+    MediaRequestError,
+    MediaTool,
+    checkpoint,
+)
+
+if TYPE_CHECKING:
+    from z_image.metal41.hold import ImageHold, ImageJob
+
+
+def _device_packages() -> frozenset[str]:
+    """Device directories shipped beside this entry. The host picks one."""
+    root = Path(__file__).resolve().parent.parent
+    return frozenset(
+        name for name in ("metal41", "cuda") if (root / name / "__init__.py").is_file()
+    )
 
 
 class ImageRequestError(MediaRequestError):
@@ -101,6 +114,8 @@ class Pipeline(MediaPipeline):
         stop: Any,
         call: MediaCall,
     ) -> ImageJob:
+        from z_image.metal41.hold import ImageJob
+
         del job
         home = call.home
         image = hold if isinstance(hold, ImageJob) else ImageJob(
@@ -153,6 +168,8 @@ class Pipeline(MediaPipeline):
     def working(
         self, request: ImageFields, job: dict[str, Any], hold: Any
     ) -> dict[str, Any] | None:
+        from z_image.metal41.hold import ImageJob
+
         del job
         if isinstance(hold, ImageJob):
             return _working(hold, request)
@@ -165,10 +182,16 @@ class Pipeline(MediaPipeline):
         return int(cli_main(argv))
 
     def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from z_image_base.metal41.runtime import open_runtime as open_rt
+        from favlo.host import select_device
         from favlo.pipelines import bind_open_runtime
 
-        return bind_open_runtime(open_rt, path, **kwargs)
+        chosen = select_device(_device_packages())
+        if chosen != "metal41":
+            message = "this runtime cannot run here"
+            raise RuntimeError(message)
+        from z_image_base.metal41.runtime import open_device
+
+        return bind_open_runtime(open_device, path, **kwargs)
 
     def mcp_tools(self) -> Sequence[MediaTool]:
         return [
@@ -191,7 +214,10 @@ class Pipeline(MediaPipeline):
                             "type": "number",
                             "description": "CFG scale. 0 skips the negative.",
                         },
-                        "shift": {"type": "number", "description": "Flow-matching shift. Default 6."},
+                        "shift": {
+                            "type": "number",
+                            "description": "Flow-matching shift. Default 6.",
+                        },
                         "cfg_truncation": {
                             "type": "number",
                             "description": "Drop the negative after this 1-sigma.",
@@ -211,6 +237,8 @@ class Pipeline(MediaPipeline):
 
 pipeline = Pipeline()
 handle_image = pipeline
+
+
 def _draw(
     runtime: Any,
     fields: ImageFields,
@@ -252,6 +280,8 @@ def _draw(
 
 
 def _store(pixels: np.ndarray, quality: str, root: Path | None) -> dict[str, str]:
+    from z_image.metal41.png import pack_rgb, write_png
+
     image_id = "image_" + secrets.token_hex(12)
     write_png(store_source(image_id, pack_rgb(pixels), home=root), quality)
     sweep_images(home=root)
@@ -262,6 +292,8 @@ def _store(pixels: np.ndarray, quality: str, root: Path | None) -> dict[str, str
 
 
 def _decoded(pixels: np.ndarray, timing: dict[str, Any], fields: ImageFields) -> ImageHold:
+    from z_image.metal41.hold import ImageHold
+
     steps = timing.get("steps")
     return ImageHold(
         stage="decode",
@@ -373,6 +405,9 @@ def _timing(hold: ImageHold) -> dict[str, Any]:
 
 
 def _fields(body: dict[str, Any]) -> ImageFields:
+    from z_image.metal41.png import REPORTED_QUALITY
+    from z_image_base.metal41.schedule import MAX_STEPS
+
     _absent_or(body, "response_format", {"b64_json"}, "response_format must be b64_json")
     output_format = _absent_or(body, "output_format", {"png"}, "output_format must be png")
     _absent_or(body, "stream", {False}, "stream must be false")
@@ -421,7 +456,12 @@ def _fields(body: dict[str, Any]) -> ImageFields:
             f"steps must be from 1 to {MAX_STEPS}",
         ),
         guidance=_bounded_float(
-            body, "guidance", float(sampler["guidance"]), 0.0, 100.0, "guidance must be from 0 to 100"
+            body,
+            "guidance",
+            float(sampler["guidance"]),
+            0.0,
+            100.0,
+            "guidance must be from 0 to 100",
         ),
         shift=_bounded_float(
             body,
@@ -504,6 +544,8 @@ def _optional_int(body: dict[str, Any], key: str, default: int, message: str) ->
 
 
 def _sampler(model: object) -> dict[str, int | float]:
+    from z_image_base.metal41.schedule import sampler_defaults
+
     name = model if isinstance(model, str) else None
     try:
         return sampler_defaults(name)
@@ -540,6 +582,8 @@ def _safety_identifier(body: dict[str, Any]) -> str | None:
 
 
 def _size(value: Any) -> tuple[int, int, str]:
+    from z_image.metal41.scratch import MAX_EDGE
+
     if value is None or value == "auto":
         return 1024, 1024, "1024x1024"
     if not isinstance(value, str) or "x" not in value:

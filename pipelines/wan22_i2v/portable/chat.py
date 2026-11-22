@@ -11,24 +11,29 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from favlo.bulk_media_pipeline import BulkMediaPipeline
-from favlo.media_pipeline import MediaTool, MediaCall, MediaRequestError, checkpoint
+from favlo.media_pipeline import MediaCall, MediaRequestError, MediaTool, checkpoint
 from favlo.videos import reported_quality, store_source, sweep_videos
-from wan22_i2v.metal41.hold import ClipHold
-from wan22_i2v.metal41.png import decode_png, resize_rgb
-from wan22_i2v.metal41.progress import ClipProgress, clip_label
-from wan22_i2v.metal41.schedule import (
-    apply_split,
-    frames_from_duration,
+from wan22_i2v.portable.progress import ClipProgress, clip_label
+from wan22_i2v.portable.schedule import (
     FIVE_SEC_FRAMES,
     FPS,
     P320_HEIGHT,
     P320_WIDTH,
     STEPS,
+    apply_split,
+    frames_from_duration,
     require_geometry,
     require_guidance,
     require_steps,
 )
-from wan22_i2v.metal41.video import write_mp4
+
+
+def _device_packages() -> frozenset[str]:
+    """Device directories shipped beside this entry. The host picks one."""
+    root = Path(__file__).resolve().parent.parent
+    return frozenset(
+        name for name in ("metal41", "cuda") if (root / name / "__init__.py").is_file()
+    )
 
 
 class VideoRequestError(MediaRequestError):
@@ -128,6 +133,8 @@ class Pipeline(BulkMediaPipeline):
         stop: Any,
         call: MediaCall,
     ) -> bytes:
+        from wan22_i2v.metal41.hold import ClipHold
+
         progress = ClipProgress(
             job=job,
             console=getattr(runtime, "console", None),
@@ -168,6 +175,8 @@ class Pipeline(BulkMediaPipeline):
         call: MediaCall,
     ) -> None:
         del runtime
+        from wan22_i2v.metal41.video import write_mp4
+
         progress = call.progress
         source = store_source(job["id"], result, home=home)
         if request.mp4:
@@ -207,10 +216,16 @@ class Pipeline(BulkMediaPipeline):
         return int(cli_main(argv))
 
     def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from wan22_i2v.metal41.runtime import open_runtime as open_rt
+        from favlo.host import select_device
         from favlo.pipelines import bind_open_runtime
 
-        return bind_open_runtime(open_rt, path, **kwargs)
+        chosen = select_device(_device_packages())
+        if chosen != "metal41":
+            message = "this runtime cannot run here"
+            raise RuntimeError(message)
+        from wan22_i2v.metal41.runtime import open_device
+
+        return bind_open_runtime(open_device, path, **kwargs)
 
     def mcp_tools(self) -> Sequence[MediaTool]:
         return [
@@ -256,6 +271,8 @@ pipeline = Pipeline()
 handle_video = pipeline
 def video_fields(body: dict[str, Any]) -> VideoFields:
     """One clip request. Omitted size is 320p. Omitted length is 81 frames."""
+    from wan22_i2v.metal41.png import decode_png, resize_rgb
+
     prompt = body.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise VideoRequestError("prompt is required", "prompt")
@@ -369,6 +386,8 @@ def _last_image(body: dict[str, Any], height: int, width: int, frames: int) -> n
         raw = body.get("end_image")
     if raw in (None, ""):
         return None
+    from wan22_i2v.metal41.png import decode_png, resize_rgb
+
     try:
         image = decode_png(_png_bytes(raw, "last_image"))
     except VideoRequestError:

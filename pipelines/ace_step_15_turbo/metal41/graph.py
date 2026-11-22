@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
 from ace_step_15_turbo.metal41.hold import ClipHold
 from ace_step_15_turbo.metal41.pcm import wav_bytes
-from ace_step_15_turbo.metal41.record import Plane, plane
 from ace_step_15_turbo.metal41.schedule import (
     HOP,
-    LATENT_RATE,
     SAMPLE_RATE,
     STEPS,
     TEXT_LIMIT,
@@ -21,7 +20,7 @@ from ace_step_15_turbo.metal41.schedule import (
     timestep_schedule,
 )
 from ace_step_15_turbo.metal41.tiles import plan
-
+from ace_step_15_turbo.portable.record import Plane, plane
 from favlo.media_pipeline import checkpoint
 
 HEAD_DIM = 128

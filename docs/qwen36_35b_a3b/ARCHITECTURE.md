@@ -10,7 +10,8 @@ Kernels, the packed record layout, the registry field table, and the forward pat
 - Clients reach this pipeline through `favlo serve`.
 - `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/responses` loads it.
 - `kernels`, `quantize`, `mtp-fp8`, `bf16`, `complete`, and `models` require `favlo --qwen36_35b_a3b`.
-- That flag loads `qwen36_35b_a3b.metal41`.
+- That flag loads `qwen36_35b_a3b.portable`.
+- `portable` is the serve entry. `metal41` is the Metal device that entry opens.
 - The package does not import `qwen38_flash_next` or `qwen38_27b`.
 
 - The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B).
@@ -152,7 +153,8 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 
 - `pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity.
 - `runtime` is `metal41`, `cuda`, or `portable`.
-- `serve` opens `directory` and imports `{pipeline}.{runtime}`.
+- `serve` opens `directory` and imports `qwen36_35b_a3b.portable`.
+- A row that still says `metal41` loads that same entry. `metal41` re-exports the pipeline object. The device opens from `portable` `open_runtime`.
 - `source` is the BF16 checkout quantize checks.
 - `resident_percent` is stored as null and discarded at open.
 - This pipeline does not read `parts`.

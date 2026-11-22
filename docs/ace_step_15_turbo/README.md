@@ -6,6 +6,8 @@ The official base model is [ACE-Step/acestep-v15-xl-turbo](https://huggingface.c
 
 With `favlo serve` listening, clips come from `favlo media --pipeline ace_step_15_turbo` or the published `ace_step_15_turbo__generate_music` MCP tool.
 
+`ace_step_15_turbo.portable` is the serve entry. `favlo serve` and `favlo --ace_step_15_turbo` load that package. `metal41` is the Metal device the entry opens on Apple Silicon.
+
 - [ARCHITECTURE.md](ARCHITECTURE.md) is the as-built record: packed weights, registry, listener contract, forward path, smoke, and citations.
 - [research/dit-mlp-fp4-error.md](research/dit-mlp-fp4-error.md) records DiT MLP fp4 layer scores.
 

@@ -10,9 +10,9 @@ from __future__ import annotations
 import numpy as np
 
 from favlo.memory import memory
-from voxcpm2.metal41.block import rope_angles
 from voxcpm2.metal41.metal import Plane, Session
 from voxcpm2.metal41.store import Store
+from voxcpm2.portable.block import rope_angles
 
 
 class Cache:

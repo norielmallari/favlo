@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from voxcpm2.metal41.audio import encode_wav
-from voxcpm2.metal41.runtime import open_runtime
+from voxcpm2.metal41.runtime import open_device
+from voxcpm2.portable.audio import encode_wav
 
 _CHECKOUT = Path("models/openbmb/VoxCPM2")
 
@@ -19,7 +19,7 @@ def test_basic_line_writes_a_48k_wav(tmp_path: Path) -> None:
     weights = _CHECKOUT / "model.safetensors"
     if not weights.is_file():
         pytest.skip("checkout missing")
-    runtime = open_runtime(_CHECKOUT, owner="voxcpm2:smoke")
+    runtime = open_device(_CHECKOUT, owner="voxcpm2:smoke")
     try:
         samples = runtime.speak(
             "Hello.",

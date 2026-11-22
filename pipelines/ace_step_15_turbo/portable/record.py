@@ -17,7 +17,13 @@ from typing import Any
 
 import numpy as np
 
-from ace_step_15_turbo.metal41.pack import pack_fp4, pack_fp8, promote_count, promoted_ids, relative_error
+from ace_step_15_turbo.metal41.pack import (
+    pack_fp4,
+    pack_fp8,
+    promote_count,
+    promoted_ids,
+    relative_error,
+)
 
 PACKED_NAME = "acestep-v15-xl-turbo-fp8-fp4"
 MLP_FP8_PERCENT = 20.0

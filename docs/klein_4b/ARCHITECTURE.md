@@ -2,7 +2,7 @@
 
 As-built detail for the `klein_4b` package. [README.md](README.md) is the summary.
 
-The checkpoint is [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B), Apache-2.0. The package is `pipelines/klein_4b/metal41/`. It subclasses `MediaPipeline` with `kind` `image` and publishes `generate_image` and `edit_image`. It does not import another pipeline.
+The checkpoint is [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B), Apache-2.0. The serve entry is `pipelines/klein_4b/portable/`. It subclasses `MediaPipeline` with `kind` `image` and publishes `generate_image` and `edit_image`. `metal41` is the device that entry opens. The shell does not import that device until `open_runtime`. It does not import another pipeline.
 
 The DiT is the rectified-flow MMDiT in Esser et al., *Scaling Rectified Flow Transformers for High-Resolution Image Synthesis* (2024), with the FLUX.2 changes in the Hugging Face model card and `transformer/config.json`: shared modulation, no linear bias, SwiGLU, and a parallel single block. The text tower is Qwen3-4B (Yang et al., *Qwen3 Technical Report*, 2025). The VAE is `AutoencoderKLFlux2` from `vae/config.json`.
 

@@ -9,14 +9,26 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from wan22_i2v.metal41.chat import VideoRequestError, _seconds_label, handle_video, video_fields
+from favlo.media_pipeline import MediaPaused
 from wan22_i2v.metal41.formats import block_winners, pack_linear, relative_error, restore_linear
 from wan22_i2v.metal41.hold import ClipHold, reload_quietly
 from wan22_i2v.metal41.latent import condition_volume, unpatchify
 from wan22_i2v.metal41.png import decode_png, encode_png
-from wan22_i2v.metal41.progress import ClipProgress, clip_label, stage_shares
 from wan22_i2v.metal41.record import load_expert, quantize, quantize_int8, write_graph_source
-from wan22_i2v.metal41.schedule import (
+from wan22_i2v.metal41.source import (
+    FILES,
+    dit_dir,
+    expert_paths,
+    mask_from_prefix,
+    vae_dir,
+)
+from wan22_i2v.metal41.text import tokenizer_path
+from wan22_i2v.metal41.umt5_pack import shared_pack_dir
+from wan22_i2v.metal41.vae import vae_path
+from wan22_i2v.metal41.video import avi_meta, social_frame, write_avi, write_mp4
+from wan22_i2v.portable.chat import VideoRequestError, _seconds_label, handle_video, video_fields
+from wan22_i2v.portable.progress import ClipProgress, clip_label, stage_shares
+from wan22_i2v.portable.schedule import (
     FIVE_SEC_FRAMES,
     P320_HEIGHT,
     P320_WIDTH,
@@ -33,19 +45,6 @@ from wan22_i2v.metal41.schedule import (
     velocity_walks,
     video_modes,
 )
-from wan22_i2v.metal41.source import (
-    FILES,
-    dit_dir,
-    expert_paths,
-    mask_from_prefix,
-    vae_dir,
-)
-from wan22_i2v.metal41.text import tokenizer_path
-from wan22_i2v.metal41.umt5_pack import shared_pack_dir
-from wan22_i2v.metal41.vae import vae_path
-from wan22_i2v.metal41.video import avi_meta, social_frame, write_avi, write_mp4
-
-from favlo.media_pipeline import MediaPaused
 
 
 def test_setup_writes_each_repo_under_models() -> None:
@@ -166,7 +165,7 @@ def test_tied_block_keeps_the_lower_index() -> None:
 def test_image_bytes_read_a_filename_in_the_images_folder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from wan22_i2v.metal41.chat import _image_bytes
+    from wan22_i2v.portable.chat import _image_bytes
 
     monkeypatch.setattr("favlo.logs.favlo_home", lambda: tmp_path)
     folder = tmp_path / "images"
@@ -298,7 +297,7 @@ def test_stride_encode_keeps_the_end_still_in_the_last_chunk() -> None:
 
 
 def test_split_lands_on_a_whole_number_of_windows() -> None:
-    from wan22_i2v.metal41.schedule import apply_split, chunk_overlap, latent_windows
+    from wan22_i2v.portable.schedule import apply_split, chunk_overlap, latent_windows
 
     assert apply_split(81, None, 1) == (81, None)
     assert apply_split(81, 1, 1) == (81, None)
@@ -336,7 +335,7 @@ def test_blend_pair_averages_the_doubled_frame() -> None:
 
 def test_crossfade_keeps_the_ends_and_mixes_the_middle() -> None:
     from wan22_i2v.metal41.latent import crossfade
-    from wan22_i2v.metal41.schedule import overlap_origin
+    from wan22_i2v.portable.schedule import overlap_origin
 
     assert overlap_origin(0) == 0
     assert overlap_origin(9) == 33
@@ -369,7 +368,7 @@ def test_known_opening_stays_on_the_noise_schedule() -> None:
 
 def test_handoff_reencodes_the_tail_as_a_first_frame() -> None:
     from wan22_i2v.metal41.latent import stride_encode_clip
-    from wan22_i2v.metal41.schedule import handoff_frames
+    from wan22_i2v.portable.schedule import handoff_frames
 
     assert handoff_frames(1) == 1
     assert handoff_frames(2) == 5
@@ -386,7 +385,7 @@ def test_handoff_reencodes_the_tail_as_a_first_frame() -> None:
 
 
 def test_later_chunk_keeps_the_finished_tail() -> None:
-    from wan22_i2v.metal41.schedule import (
+    from wan22_i2v.portable.schedule import (
         apply_split,
         chunk_overlap,
         commit_span,
@@ -578,7 +577,7 @@ def _png() -> str:
 
 
 def test_duration_floors_to_four_n_plus_one() -> None:
-    from wan22_i2v.metal41.schedule import frames_from_duration
+    from wan22_i2v.portable.schedule import frames_from_duration
 
     assert frames_from_duration(5.0) == 77
     assert video_fields({"prompt": "move", "image": _png(), "duration": 5.0}).frames == 77
@@ -675,7 +674,7 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
 
 def test_mp4_false_stores_the_avi(tmp_path, monkeypatch) -> None:
     from favlo.media_pipeline import MediaCall
-    from wan22_i2v.metal41.chat import Pipeline
+    from wan22_i2v.portable.chat import Pipeline
 
     encoded = _png()
     fields = video_fields(
@@ -693,9 +692,9 @@ def test_mp4_false_stores_the_avi(tmp_path, monkeypatch) -> None:
         encoded_mp4["ran"] = True
         raise AssertionError("mp4 encode ran")
 
-    monkeypatch.setattr("wan22_i2v.metal41.chat.store_source", store)
-    monkeypatch.setattr("wan22_i2v.metal41.chat.write_mp4", encode)
-    monkeypatch.setattr("wan22_i2v.metal41.chat.sweep_videos", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("wan22_i2v.portable.chat.store_source", store)
+    monkeypatch.setattr("wan22_i2v.metal41.video.write_mp4", encode)
+    monkeypatch.setattr("wan22_i2v.portable.chat.sweep_videos", lambda *_args, **_kwargs: None)
     Pipeline().pack(None, fields, b"RIFF", {"id": "video_raw"}, tmp_path, {}, MediaCall())
     assert (tmp_path / "video_raw.avi").read_bytes() == b"RIFF"
     assert encoded_mp4["ran"] is False
@@ -1345,7 +1344,7 @@ def test_open_runtime_sets_the_ledger_cap(monkeypatch) -> None:
 
     monkeypatch.setattr(runtime_mod, "Runtime", fake)
     monkeypatch.setattr(runtime_mod.memory, "set_max_memory", caps.append)
-    opened = runtime_mod.open_runtime(Path("record"), owner="wan22_i2v:4", max_memory="16GiB")
+    opened = runtime_mod.open_device(Path("record"), owner="wan22_i2v:4", max_memory="16GiB")
     assert opened == "runtime"
     assert seen == {"owner": "wan22_i2v:4"}
     assert caps == ["16GiB"]

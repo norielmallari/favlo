@@ -1,14 +1,11 @@
-"""Qwen3.6-35B-A3B pipeline. It does not import another pipeline package."""
+"""Qwen3.6-35B-A3B Metal device.
 
-from __future__ import annotations
+The pipeline entry is ``qwen36_35b_a3b.portable``. This package re-exports that
+pipeline so a listener that still imports the device name serves the same
+object. The device opens from ``portable`` ``open_runtime``.
+"""
 
-from qwen36_35b_a3b.metal41.chat import pipeline
 from qwen36_35b_a3b.metal41.firing import idle_heartbeat
+from qwen36_35b_a3b.portable import pipeline
 
-PIPELINE = "qwen36_35b_a3b"
-
-handle_responses = pipeline
-main = pipeline.main
-open_runtime = pipeline.open_runtime
-
-__all__ = ["pipeline", "handle_responses", "idle_heartbeat", "main", "open_runtime"]
+__all__ = ["idle_heartbeat", "pipeline"]

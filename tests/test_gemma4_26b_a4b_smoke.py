@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from gemma4_26b_a4b.metal41.chat import decode_text, encode_chat, reply_text
 from gemma4_26b_a4b.metal41.commands import CARROT_PROMPT
 from gemma4_26b_a4b.metal41.forward import Gemma4Runtime
-from gemma4_26b_a4b.metal41.sampling import VARIANTS
+from gemma4_26b_a4b.portable.chat import decode_text, encode_chat, reply_text
+from gemma4_26b_a4b.portable.sampling import VARIANTS
 
 _ROOT = Path("models/gemma-4-26B-A4B-it-fp8-e20")
 _INSTRUCT_TOKENS = 384

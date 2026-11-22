@@ -1,18 +1,19 @@
-"""ACE-Step 1.5 XL Turbo. Neural work stays in the Metal shaders."""
+"""ACE-Step 1.5 XL Turbo Metal device.
 
-from __future__ import annotations
+The pipeline entry is ``ace_step_15_turbo.portable``. This package re-exports
+that pipeline so a listener that still imports the device name serves the same
+object. The device opens from ``portable`` ``open_runtime``.
+"""
 
-from ace_step_15_turbo.metal41.runtime import handle_chat, pipeline
+from ace_step_15_turbo.portable import (
+    handle_chat,
+    handle_music,
+    main,
+    mcp_tools,
+    open_runtime,
+    pipeline,
+)
 
 PIPELINE = "ace_step_15_turbo"
-
-handle_music = pipeline
-main = pipeline.main
-open_runtime = pipeline.open_runtime
-
-
-def mcp_tools():
-    return pipeline.mcp_tools()
-
 
 __all__ = ["pipeline", "handle_chat", "handle_music", "main", "mcp_tools", "open_runtime"]

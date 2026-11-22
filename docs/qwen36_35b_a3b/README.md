@@ -4,7 +4,8 @@ Summary for the `qwen36_35b_a3b` language pipeline. Kernels, the packed record, 
 
 - `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
 - After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
-- `kernels`, `quantize`, `mtp-fp8`, `bf16`, `complete`, and `models` require `favlo --qwen36_35b_a3b`, which loads `qwen36_35b_a3b.metal41`.
+- `kernels`, `quantize`, `mtp-fp8`, `bf16`, `complete`, and `models` require `favlo --qwen36_35b_a3b`, which loads `qwen36_35b_a3b.portable`.
+- `portable` is the serve entry. `metal41` is the Metal device that entry opens.
 
 - The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B).
 - Those weights are under the Apache License, Version 2.0.

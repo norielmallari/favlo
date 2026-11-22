@@ -12,7 +12,6 @@ from wan22_ti2v_5b.metal41.activations import apply_rope
 from wan22_ti2v_5b.metal41.avi import encode_avi
 from wan22_ti2v_5b.metal41.png import decode_png, encode_png
 from wan22_ti2v_5b.metal41.quant import pack_fp4, pack_int8, relative_rms, score_matrix
-from wan22_ti2v_5b.metal41.request import VideoRequestError, list_resolutions, parse_request, video_modes
 from wan22_ti2v_5b.metal41.runtime import _require_int8_pack
 from wan22_ti2v_5b.metal41.schedule import (
     blend,
@@ -24,6 +23,12 @@ from wan22_ti2v_5b.metal41.schedule import (
     token_count,
 )
 from wan22_ti2v_5b.metal41.vae import _patch, _unpatch
+from wan22_ti2v_5b.portable.request import (
+    VideoRequestError,
+    list_resolutions,
+    parse_request,
+    video_modes,
+)
 
 
 def test_video_modes_cover_text_and_image() -> None:
@@ -179,7 +184,7 @@ def test_open_sets_the_ledger_cap_and_refuses_a_short_budget(tmp_path: Path, mon
     monkeypatch.setattr(runtime_mod.memory, "set_max_memory", caps.append)
     monkeypatch.setattr(runtime_mod.memory, "budget", lambda: runtime_mod._MIN_FRAME * 3 - 1)
     try:
-        runtime_mod.open_runtime(record, "fp8", None, None, max_memory="16GiB")
+        runtime_mod.open_device(record, "fp8", None, None, max_memory="16GiB")
     except RuntimeError as exc:
         assert "does not fit" in str(exc)
     else:
@@ -188,8 +193,8 @@ def test_open_sets_the_ledger_cap_and_refuses_a_short_budget(tmp_path: Path, mon
 
 
 def test_a_later_budget_raises_the_tile_and_a_dip_does_not(monkeypatch) -> None:
-    from wan22_ti2v_5b.metal41.request import VideoRequest
     from wan22_ti2v_5b.metal41.runtime import Runtime, _require_fit
+    from wan22_ti2v_5b.portable.request import VideoRequest
 
     sequence = [2_000_000_000, 4_000_000_000, 1_000_000_000]
     held = {"n": sequence[0]}

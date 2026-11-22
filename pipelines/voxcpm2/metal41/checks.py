@@ -9,10 +9,10 @@ from pathlib import Path
 
 import numpy as np
 
-from voxcpm2.metal41.block import residual_add, rmsnorm, rope_angles, silu, swiglu
 from voxcpm2.metal41.metal import Session
 from voxcpm2.metal41.stack import Cache, Stack, _angles
 from voxcpm2.metal41.store import Store
+from voxcpm2.portable.block import residual_add, rmsnorm, rope_angles, silu, swiglu
 
 
 def rmsnorm_matches() -> None:

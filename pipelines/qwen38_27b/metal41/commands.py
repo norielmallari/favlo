@@ -25,7 +25,6 @@ from favlo.registry import (
     set_alias,
     stored_directory,
 )
-from qwen38_27b.metal41.chat import STOP, decode_text, encode_chat
 from qwen38_27b.metal41.checks import format_report, run_checks
 from qwen38_27b.metal41.convert import quantize, repack_mtp_half
 from qwen38_27b.metal41.fetch import (
@@ -36,7 +35,7 @@ from qwen38_27b.metal41.fetch import (
     remaining_download,
     shortfall,
 )
-from qwen38_27b.metal41.runtime import open_runtime
+from qwen38_27b.portable.chat import STOP, decode_text, encode_chat
 
 PIPELINE = "qwen38_27b"
 CARROT_PROMPT = (
@@ -233,6 +232,8 @@ def _quantize(args: argparse.Namespace) -> int:
 def _complete(args: argparse.Namespace) -> int:
     try:
         path, _selection = choose_complete(model=None, record=None, pipeline=PIPELINE)
+        from qwen38_27b.portable import open_runtime
+
         runtime = open_runtime(path, kv_cache=args.kv_cache, max_memory=args.max_memory)
         try:
             messages = [{"role": "user", "content": CARROT_PROMPT}]

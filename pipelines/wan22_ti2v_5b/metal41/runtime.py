@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import json
 from pathlib import Path
 
 from favlo.cli import repo_root
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.bulk_media_pipeline import BulkMediaPipeline
-from favlo.media_pipeline import MediaTool, MediaCall, MediaPaused
 from favlo.memory import memory
 from favlo.registry import models_dir
-from wan22_ti2v_5b.metal41.clip import Clip, ClipHold
+from wan22_ti2v_5b.metal41.clip import Clip
 from wan22_ti2v_5b.metal41.dit import DiT
 from wan22_ti2v_5b.metal41.gpu import Gpu
-from wan22_ti2v_5b.metal41.request import VideoRequest, VideoRequestError, parse_request
 from wan22_ti2v_5b.metal41.text import TextEncoder
 from wan22_ti2v_5b.metal41.vae import WanVae
+from wan22_ti2v_5b.portable import handle_chat, handle_video, pipeline
+from wan22_ti2v_5b.portable.request import VideoRequest, VideoRequestError
 
 _MIN_FRAME = 256 * (704 // 2) * (1280 // 2) * 4
 
@@ -119,7 +116,7 @@ class Runtime:
         return max(1, int(self.refresh_budget() * 0.45 / max(wide, 1)))
 
 
-def open_runtime(
+def open_device(
     path: Path,
     kv_cache: str,
     console: object,
@@ -128,6 +125,7 @@ def open_runtime(
     max_memory: str | None = None,
     parts: dict | None = None,
 ) -> Runtime:
+    """Load the packed DiT, the umT5 record, and the float32 VAE."""
     del kv_cache, console, resident_percent
     memory.set_max_memory(max_memory)
     record = Path(path)
@@ -142,100 +140,6 @@ def open_runtime(
     vae_path = repo_root() / str(manifest["vae"])
     owner_name = stamp_owner("wan22_ti2v_5b", owner, id(record))
     return Runtime(record, owner_name, umt5, vae_path, tokenizer)
-
-
-class Pipeline(BulkMediaPipeline):
-    """Wan TI2V's listener contract. The clip sampler stays in this package."""
-
-    kind = "video"
-    id_prefix = "video_"
-    object_name = "video"
-    table_name = "videos"
-    id_hex = 4
-
-    def parse(self, body: dict) -> VideoRequest:
-        return parse_request(body)
-
-    def describe(self, request: VideoRequest) -> dict:
-        return {
-            "prompt": request.prompt,
-            "seconds": request.seconds,
-            "size": request.size,
-            "frames": request.frames,
-            "quality": request.quality,
-        }
-
-    def generate(self, runtime, request, hold, job, stop, call: MediaCall):
-        kept = hold if isinstance(hold, ClipHold) else None
-        try:
-            return runtime.clip.sample(
-                request,
-                video_id=job["id"],
-                home=call.home,
-                videos=call.table,
-                hold=kept,
-                stop=stop,
-            )
-        except MediaPaused as paused:
-            if isinstance(paused.hold, ClipHold):
-                job["progress"] = min(99, int(100 * paused.hold.step / 4))
-                job["size"] = request.size
-                job["seconds"] = request.seconds
-            raise
-
-    def pack(self, runtime, request, result, job, home, table, call):
-        del runtime, request, job, home, table, call
-        if isinstance(result, dict) and result.get("status") == "completed":
-            result["progress"] = 100
-        if isinstance(result, dict):
-            return result
-        return None
-
-
-
-    def main(self, argv: Sequence[str]) -> int:
-        from wan22_ti2v_5b.metal41.commands import main as cli_main
-
-        return int(cli_main(argv))
-
-    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from wan22_ti2v_5b.metal41.runtime import open_runtime as open_rt
-        from favlo.pipelines import bind_open_runtime
-
-        return bind_open_runtime(open_rt, path, **kwargs)
-
-    def mcp_tools(self) -> Sequence[MediaTool]:
-        from wan22_ti2v_5b.metal41 import _video
-
-        rows = [
-            _video(
-                "generate_video_t2v",
-                "MP4 from text when the user asked for video or motion, not a still.",
-                still=False,
-            ),
-            _video(
-                "generate_video_i2v",
-                "MP4 from a still when the user asked for video or motion, not a still.",
-                still=True,
-            ),
-        ]
-        return [
-            MediaTool(
-                name=str(row["name"]),
-                description=str(row.get("description") or ""),
-                parameters=row.get("parameters") or {"type": "object", "properties": {}},
-                handler=str(row["handler"]),
-                result=str(row.get("result") or "video"),
-                task=bool(row.get("task", True)),
-            )
-            for row in rows
-        ]
-
-pipeline = Pipeline()
-handle_video = pipeline
-def handle_chat(reply, runtime, body, selection, args, state) -> None:
-    del runtime, body, selection, args, state
-    reply.json(400, {"error": "wan22_ti2v_5b does not complete a chat"})
 
 
 def _require_fit(runtime: Runtime, request: VideoRequest) -> None:
@@ -282,3 +186,12 @@ def _require_int8_pack(path: Path) -> Path:
         message = "umT5 pack is not int8"
         raise RuntimeError(message)
     return path
+
+
+__all__ = [
+    "Runtime",
+    "handle_chat",
+    "handle_video",
+    "open_device",
+    "pipeline",
+]

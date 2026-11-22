@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import numpy as np
 
-from .constants import (
+from klein_4b.portable.constants import (
     PROMPT_LENGTH,
     TEXT_CAPTURE,
-    TEXT_HEADS,
     TEXT_HEAD_DIM,
+    TEXT_HEADS,
     TEXT_HIDDEN,
     TEXT_KV_HEADS,
     TEXT_LAYERS,
 )
+from klein_4b.portable.prompt import encode
+from klein_4b.portable.rope import text_table
+from klein_4b.portable.store import Store
+
 from .metal import Gpu, View
-from .prompt import encode
-from .rope import text_table
-from .store import Store
 
 
 def embed(store: Store, prompt: str) -> tuple[np.ndarray, int]:

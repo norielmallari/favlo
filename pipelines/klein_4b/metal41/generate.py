@@ -8,13 +8,13 @@ from typing import Any
 import numpy as np
 
 from favlo.media_pipeline import MediaRequestError, checkpoint
+from klein_4b.portable.constants import PROMPT_LENGTH, ROPE_SCALE
+from klein_4b.portable.pixels import fit_input, read_image, to_model, to_u8
+from klein_4b.portable.rope import dit_table, latent_ids, text_ids
+from klein_4b.portable.schedule import sigmas
 
-from .constants import PROMPT_LENGTH, ROPE_SCALE
 from .dit import velocity
 from .metal import View
-from .pixels import fit_input, read_image, to_model, to_u8
-from .rope import dit_table, latent_ids, text_ids
-from .schedule import sigmas
 from .text import encode_prompt
 from .vae import decode, encode
 

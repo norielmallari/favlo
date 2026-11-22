@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from .constants import DIT_DIM, DIT_DOUBLE, DIT_HEAD_DIM, DIT_HEADS, DIT_SINGLE, PROMPT_LENGTH
+from klein_4b.portable.constants import (
+    DIT_DIM,
+    DIT_DOUBLE,
+    DIT_HEAD_DIM,
+    DIT_HEADS,
+    DIT_SINGLE,
+    PROMPT_LENGTH,
+)
+
 from .metal import Gpu, View
 
 

@@ -224,7 +224,7 @@ def test_prefix_pack_length_and_exact_file_refusal() -> None:
 
 
 def test_has_vision() -> None:
-    from gemma4_26b_a4b.metal41.chat import Pipeline
+    from gemma4_26b_a4b.portable.chat import Pipeline
 
     assert Pipeline().has_vision() is True
 

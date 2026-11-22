@@ -6,7 +6,7 @@ The official checkpoint is [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Ton
 
 Those weights are under the Apache License, Version 2.0.
 
-`favlo --z_image_turbo` loads this package for setup, quantize, and kernels.
+`z_image_turbo.portable` is the serve entry. `metal41` is the Metal device that entry opens. `favlo serve` and `favlo --z_image_turbo` import `portable`. Setup, quantize, and kernels run from that entry and open the device on Apple Silicon.
 
 Start `favlo serve`.
 

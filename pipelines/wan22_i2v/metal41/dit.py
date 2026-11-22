@@ -10,7 +10,7 @@ import numpy as np
 
 from wan22_i2v.metal41.formats import TILE_M, TILE_N, LinearPack, pad_to, slim_pack, stored_k
 from wan22_i2v.metal41.metal import BufferView, Gpu
-from wan22_i2v.metal41.schedule import rope_axes
+from wan22_i2v.portable.schedule import rope_axes
 
 
 @dataclass

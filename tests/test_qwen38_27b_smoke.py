@@ -13,11 +13,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from qwen38_27b.metal41.chat import STOP, decode_text, encode_chat
+
 from qwen38_27b.metal41.commands import CARROT_PROMPT, installed_record
 from qwen38_27b.metal41.forward import Qwen38Runtime
-from qwen38_27b.metal41.sampling import VARIANTS
-from qwen38_27b.metal41.tools import split_thinking
+from qwen38_27b.portable.chat import STOP, decode_text, encode_chat
+from qwen38_27b.portable.sampling import VARIANTS
+from qwen38_27b.portable.tools import split_thinking
+
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768
 _ANSWER = re.compile(

@@ -24,7 +24,7 @@ from wan22_i2v.metal41.formats import (
     relative_error,
     restore_linear,
 )
-from wan22_i2v.metal41.schedule import GRAPH, PROMOTE_PERCENT, promote_count
+from wan22_i2v.portable.schedule import GRAPH, PROMOTE_PERCENT, promote_count
 
 
 def linear_names(layers: int) -> list[str]:

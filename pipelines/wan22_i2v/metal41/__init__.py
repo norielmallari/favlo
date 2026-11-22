@@ -1,20 +1,22 @@
-"""Wan2.2 I2V pipeline."""
+"""Wan2.2 I2V Metal device.
 
-from __future__ import annotations
+The pipeline entry is ``wan22_i2v.portable``. This package re-exports that
+pipeline so a listener that still imports the device name serves the same
+object. The device opens from ``portable`` ``open_runtime``.
+"""
 
-from wan22_i2v.metal41.chat import handle_chat, pipeline
-from wan22_i2v.metal41.schedule import list_resolutions, video_modes
+from wan22_i2v.portable import (
+    handle_chat,
+    handle_video,
+    list_resolutions,
+    main,
+    mcp_tools,
+    open_runtime,
+    pipeline,
+    video_modes,
+)
 
 PIPELINE = "wan22_i2v"
-
-handle_video = pipeline
-main = pipeline.main
-open_runtime = pipeline.open_runtime
-
-
-def mcp_tools():
-    return pipeline.mcp_tools()
-
 
 __all__ = [
     "pipeline",

@@ -4,7 +4,7 @@ Summary for the `gemma4_26b_a4b` language pipeline. Kernels, the packed record, 
 
 - `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
 - After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
-- `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`, which loads `gemma4_26b_a4b.metal41`.
+- `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`, which loads `gemma4_26b_a4b.portable`. That entry opens the Metal device on Apple Silicon. `metal41` is the device.
 
 - The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it).
 - Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license).

@@ -299,17 +299,26 @@ def close_runtime(runtime: Any, owners: Any = None) -> None:
     """Close one runtime and sweep the owners recorded for that opening."""
     if runtime is None and not owners:
         return
-    import gc
-
-    import objc
-
     try:
         if runtime is not None:
-            with objc.autorelease_pool():
-                runtime.close()
-                gc.collect()
+            _close_device(runtime)
     finally:
         _sweep_owners(owners)
+
+
+def _close_device(runtime: Any) -> None:
+    import gc
+    import sys
+
+    if sys.platform == "darwin":
+        import objc
+
+        with objc.autorelease_pool():
+            runtime.close()
+            gc.collect()
+        return
+    runtime.close()
+    gc.collect()
 
 
 def start_pipeline(

@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 
 from favlo.reply import MemoryReply
-from gemma4_26b_a4b.metal41.chat import handle_responses
 from gemma4_26b_a4b.metal41.geometry import CONTEXT
+from gemma4_26b_a4b.portable.chat import handle_responses
 
 _TRACE = (
     "<|channel>thought\nLook at the notes.\n<channel|>"
@@ -67,18 +67,18 @@ def _install(monkeypatch: Any, runtime: _Runtime) -> list[tuple[Any, bool]]:
         seen.append((messages, thinking))
         return "<|turn>model\n", [1, 2, 3]
 
-    monkeypatch.setattr("gemma4_26b_a4b.metal41.chat._encode", encode)
+    monkeypatch.setattr("gemma4_26b_a4b.portable.chat._encode", encode)
     monkeypatch.setattr(
-        "gemma4_26b_a4b.metal41.chat.decode_text", lambda root, tokens: runtime.text if tokens else ""
+        "gemma4_26b_a4b.portable.chat.decode_text", lambda root, tokens: runtime.text if tokens else ""
     )
-    monkeypatch.setattr("gemma4_26b_a4b.metal41.chat.collect_images", lambda messages: [])
+    monkeypatch.setattr("gemma4_26b_a4b.metal41.vision.collect_images", lambda messages: [])
     monkeypatch.setattr("gemma4_26b_a4b.metal41.stream.launch", _launch_local)
     return seen
 
 
 def _launch_local(root: Path, lead: str, channel_open: bool) -> Any:
-    from gemma4_26b_a4b.metal41.chat import decode_text
     from gemma4_26b_a4b.metal41.stream import launch_local
+    from gemma4_26b_a4b.portable.chat import decode_text
 
     return launch_local(root, lead, channel_open, decode_text)
 
@@ -284,9 +284,9 @@ def test_a_stream_sends_one_delta_per_token(monkeypatch: Any) -> None:
         del root, messages, thinking, tools
         return "<|turn>model\n", [1]
 
-    monkeypatch.setattr("gemma4_26b_a4b.metal41.chat._encode", encode)
-    monkeypatch.setattr("gemma4_26b_a4b.metal41.chat.decode_text", decode)
-    monkeypatch.setattr("gemma4_26b_a4b.metal41.chat.collect_images", lambda messages: [])
+    monkeypatch.setattr("gemma4_26b_a4b.portable.chat._encode", encode)
+    monkeypatch.setattr("gemma4_26b_a4b.portable.chat.decode_text", decode)
+    monkeypatch.setattr("gemma4_26b_a4b.metal41.vision.collect_images", lambda messages: [])
     monkeypatch.setattr("gemma4_26b_a4b.metal41.stream.launch", _launch_local)
     reply = MemoryReply()
     handle_responses.handle_responses(
@@ -358,9 +358,9 @@ def test_truncation_auto_drops_the_oldest_item(monkeypatch: Any) -> None:
             return "x", [0] * (CONTEXT + 1)
         return "x", [1]
 
-    monkeypatch.setattr("gemma4_26b_a4b.metal41.chat._encode", encode)
-    monkeypatch.setattr("gemma4_26b_a4b.metal41.chat.decode_text", lambda root, tokens: "ok")
-    monkeypatch.setattr("gemma4_26b_a4b.metal41.chat.collect_images", lambda messages: [])
+    monkeypatch.setattr("gemma4_26b_a4b.portable.chat._encode", encode)
+    monkeypatch.setattr("gemma4_26b_a4b.portable.chat.decode_text", lambda root, tokens: "ok")
+    monkeypatch.setattr("gemma4_26b_a4b.metal41.vision.collect_images", lambda messages: [])
     reply = MemoryReply()
     handle_responses.handle_responses(
         reply,
@@ -388,7 +388,7 @@ def test_truncation_disabled_rejects_an_overlong_prompt(monkeypatch: Any) -> Non
         del args, kwargs
         return "x", [0] * (CONTEXT + 1)
 
-    monkeypatch.setattr("gemma4_26b_a4b.metal41.chat._encode", encode)
+    monkeypatch.setattr("gemma4_26b_a4b.portable.chat._encode", encode)
     reply = MemoryReply()
     handle_responses.handle_responses(reply, runtime, {"input": "Hi"}, None, None, {})
     assert reply.status == 400
@@ -398,7 +398,7 @@ def test_a_dropped_thought_shares_the_prompt_before_the_generation_suffix() -> N
     root = Path("models/gemma-4-26B-A4B-it-fp8-e20")
     if not (root / "tokenizer.json").is_file():
         pytest.skip("tokenizer is not installed")
-    from gemma4_26b_a4b.metal41.chat import decode_text, encode_chat, generation_cut
+    from gemma4_26b_a4b.portable.chat import decode_text, encode_chat, generation_cut
 
     picture = [
         {
@@ -537,7 +537,7 @@ def test_a_later_user_keeps_the_tool_trace() -> None:
     root = Path("models/gemma-4-26B-A4B-it-fp8-e20")
     if not (root / "tokenizer.json").is_file():
         pytest.skip("tokenizer is not installed")
-    from gemma4_26b_a4b.metal41.chat import decode_text, encode_chat
+    from gemma4_26b_a4b.portable.chat import decode_text, encode_chat
 
     tools = [
         {
@@ -584,7 +584,7 @@ def test_a_tool_trace_stays_and_the_previous_prompt_is_shared() -> None:
     root = Path("models/gemma-4-26B-A4B-it-fp8-e20")
     if not (root / "tokenizer.json").is_file():
         pytest.skip("tokenizer is not installed")
-    from gemma4_26b_a4b.metal41.chat import decode_text, encode_chat
+    from gemma4_26b_a4b.portable.chat import decode_text, encode_chat
 
     tools = [
         {
@@ -636,8 +636,8 @@ def test_a_tool_trace_stays_and_the_previous_prompt_is_shared() -> None:
 
 
 def test_an_image_pad_shifts_the_cut(monkeypatch: pytest.MonkeyPatch) -> None:
-    from gemma4_26b_a4b.metal41.chat import expanded_cut
     from gemma4_26b_a4b.metal41.geometry import IMAGE_TOKEN
+    from gemma4_26b_a4b.portable.chat import expanded_cut
 
     monkeypatch.setattr("gemma4_26b_a4b.metal41.vision.image_soft_tokens", lambda _blob: 4)
     text = [1, IMAGE_TOKEN, 2, 3]

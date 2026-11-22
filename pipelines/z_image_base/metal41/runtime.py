@@ -23,8 +23,8 @@ from z_image.metal41.progress import ImageProgress, LoadProgress, sample_total
 from z_image.metal41.record import Plane, load, weight_bytes
 from z_image.metal41.scratch import DIT_HIDDEN, MAX_CAPTION, MAX_EDGE, Scratch, scratch_bytes
 from z_image.metal41.text import embed_caption, prompt_ids
-from z_image_base.metal41.guide import applies, normalization_limit
 from z_image_base.metal41.schedule import MAX_STEPS, sigmas
+from z_image_base.portable.guide import applies, normalization_limit
 
 _ONES = 1024 * 4
 
@@ -469,7 +469,7 @@ class Runtime:
         )
 
 
-def open_runtime(
+def open_device(
     path: Path,
     *,
     kv_cache: str = "e4m3",

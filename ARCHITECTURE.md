@@ -88,18 +88,19 @@ src/favlo/              process entry; the pipeline manager loads the pipeline a
   reply.py              the object a pipeline writes; the server turns it into HTTP and fills chat usage
   responses.py          Responses helpers; listener Chat Completions translation (`chat_to_responses`, `ChatWire`, `ResponseWire`)
   usage.py              OpenAI token fields on a chat completion, including max_prompt_tokens
-  daemon.py             spawn and stop the listener; no pipeline imports
+  daemon.py             spawn and stop the listener on this host; no pipeline imports
+  processes.py          process list and worker start time for Darwin, Windows, and Linux
   console.py            status row; no pipeline imports
   host_progress.py      CPU consumer between the GPU thread and the console queue
   progress.py           sanitizes one raw progress event before the console paints it
   chat_client.py        Agent Framework chat client; reasoning stays on reasoning_content. It keeps max_prompt_tokens and leaves older messages out at half that cap
   persona.py            horse persona
   config_tools.py       configuration tool group for the web
-  prefix.py             SSD prefix store
-  memory.py             device, placement heaps, and span handles; the pipeline manager sweeps an owner on close and on crash
+  prefix.py             SSD prefix store; positioned reads and writes on each host
+  memory.py             device, placement heaps, and span handles; Darwin reclaimable pages, Windows available physical memory; the pipeline manager sweeps an owner on close and on crash
   memory_notes.py       ~/.favlo/memory.db for MCP remember, recall, and forget
   pipelines.py          the request in service, the runtime that serves it, and that runtime's owners
-  setup.py              empty-registry download
+  setup.py              empty-registry download; Metal on Darwin, a CUDA device on Windows
   logs.py               text logs; RotatingFileHandler rolls each file at settings.json log_max_bytes
   videos.py             stored AVI and the MP4 encoded from it; video_ttl_seconds moves an older clip to Trash
   images.py             stored RGB and the PNG encoded from it; image_ttl_seconds moves an older pair to Trash

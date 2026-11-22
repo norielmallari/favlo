@@ -6,7 +6,7 @@ This page is the as-built detail for the `z_image_turbo` package.
 
 Eight-step text-to-image for [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo).
 
-`favlo --z_image_turbo` loads `pipelines/z_image_turbo/metal41/z-image-turbo.py`.
+The serve entry is `pipelines/z_image_turbo/portable`. `metal41` is the device. `favlo serve` and `favlo --z_image_turbo` import `z_image_turbo.portable`. `open_runtime` selects `metal41` and calls `open_device`. `metal41` re-exports that pipeline so a listener that still imports the device name serves the same object.
 
 Those weights are under the Apache License, Version 2.0.
 

@@ -14,7 +14,7 @@ Download, pack, and the first chat are [README.md](README.md).
 - `GET /v1/models` lists it once a record is registered.
 - The `model` field on `POST /v1/responses` or `POST /v1/chat/completions` loads it.
 - `download`, `quantize`, `mtp-half`, `delete`, `kernels`, `bf16`, `complete`, and `models` require `favlo --qwen38_27b`.
-- That flag loads `qwen38_27b.metal41`.
+- That flag loads `qwen38_27b.portable`. `portable` is the serve entry. `metal41` is the Metal device it opens.
 - The package does not import `qwen38_flash_next` or `qwen36_35b_a3b`.
 
 - The official checkpoint is [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
@@ -83,7 +83,9 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 `pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity.
 
 - `runtime` is `metal41`, `cuda`, or `portable`.
-- `serve` opens `directory` and imports `{pipeline}.{runtime}`.
+- `serve` opens `directory` and imports `qwen38_27b.portable`.
+- A row that still says `metal41` loads that same entry when the listener was started with the portable entry rule.
+- `metal41` re-exports that pipeline object so a listener that still imports the device name serves it. The device opens from `portable` `open_runtime`.
 - `source` is the BF16 checkout quantize checks.
 - `resident_percent` is stored as null and discarded at open.
 - This pipeline does not read `parts`.

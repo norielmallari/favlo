@@ -391,7 +391,7 @@ class Runtime:
         )
 
 
-def open_runtime(
+def open_device(
     path: Path,
     *,
     kv_cache: str = "e4m3",

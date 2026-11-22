@@ -1,5 +1,7 @@
 # This package
 
+The pipeline entry is `z_image_base.portable`. `metal41` is the Metal device that entry opens. Serve and the CLI import `portable`. They do not construct the device runtime.
+
 This package is a media pipeline. It inherits `MediaPipeline`. Kind is `image`. `id_prefix` and `object_name` are set on the class. The smoke tool local name is `generate_image`. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder.
 
 A change to `parse`, `generate`, `pack`, pause, or the job dict loads the media-preemption skill. Do not paste those commands here.

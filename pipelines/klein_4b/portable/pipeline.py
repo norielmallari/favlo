@@ -24,6 +24,14 @@ from .constants import (
 from .png import pack_rgb, write_png
 
 
+def _device_packages() -> frozenset[str]:
+    """Device directories shipped beside this entry. The host picks one."""
+    root = Path(__file__).resolve().parent.parent
+    return frozenset(
+        name for name in ("metal41", "cuda") if (root / name / "__init__.py").is_file()
+    )
+
+
 @dataclass(frozen=True)
 class EditRequest:
     prompt: str
@@ -101,11 +109,16 @@ class Pipeline(MediaPipeline):
         return int(cli_main(list(argv)))
 
     def open_runtime(self, path: Path, **kwargs: Any) -> Any:
+        from favlo.host import select_device
         from favlo.pipelines import bind_open_runtime
 
-        from .runtime import open_runtime as open_rt
+        chosen = select_device(_device_packages())
+        if chosen != "metal41":
+            message = "this runtime cannot run here"
+            raise RuntimeError(message)
+        from klein_4b.metal41.runtime import open_device
 
-        return bind_open_runtime(open_rt, path, **kwargs)
+        return bind_open_runtime(open_device, path, **kwargs)
 
     def mcp_tools(self) -> Sequence[MediaTool]:
         return [

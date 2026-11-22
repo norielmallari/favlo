@@ -287,55 +287,18 @@ def unload_if_changed(
 def _worker_started() -> float | None:
     """Start time of the newest pipeline worker, or None when none is running.
 
-    Used when the listener has not written a resident stamp. The clock is
-    ``time.time()`` minus the elapsed time ``ps`` reports.
+    Used when the listener has not written a resident stamp.
     """
-    try:
-        completed = subprocess.run(
-            ["ps", "-axww", "-o", "etime=,command="],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return None
-    if completed.returncode != 0:
-        return None
-    newest: float | None = None
-    now = time.time()
-    for line in completed.stdout.splitlines():
-        if "favlo.pipeline_worker" not in line:
-            continue
-        elapsed = _etime_seconds(line.split(None, 1)[0])
-        if elapsed is None:
-            continue
-        started = now - elapsed
-        if newest is None or started > newest:
-            newest = started
-    return newest
+    from favlo.processes import worker_started
+
+    return worker_started()
 
 
 def _etime_seconds(text: str) -> int | None:
     """Parse ``ps`` elapsed time ``[[dd-]hh:]mm:ss``."""
-    days = 0
-    clock = text.strip()
-    if "-" in clock:
-        day, clock = clock.split("-", 1)
-        try:
-            days = int(day)
-        except ValueError:
-            return None
-    try:
-        pieces = [int(part) for part in clock.split(":")]
-    except ValueError:
-        return None
-    if len(pieces) == 2:
-        hours, minutes, seconds = 0, pieces[0], pieces[1]
-    elif len(pieces) == 3:
-        hours, minutes, seconds = pieces
-    else:
-        return None
-    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+    from favlo.processes import etime_seconds
+
+    return etime_seconds(text)
 
 
 def unload_model(*, host: str = _HOST, port: int = _PORT) -> str | None:

@@ -5,6 +5,8 @@ Embeddings pipeline `bge_m3` serves [BAAI/bge-m3](https://huggingface.co/BAAI/bg
 Chen et al., [arXiv:2402.03216](https://arxiv.org/abs/2402.03216).
 
 - `handle_embed` is an `EmbeddingsPipeline`.
+- `bge_m3.portable` is the serve entry. `favlo serve` and `favlo --bge_m3` load it.
+- `metal41` is the device that entry opens.
 - Clients call `POST /v1/embeddings` with `model` set to that folder.
 - Omit `model` when the registry `embeddings` key points at it.
 - `quantize`, `embed`, and `kernels` use `favlo --bge_m3`.

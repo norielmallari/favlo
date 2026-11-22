@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from wan22_i2v.metal41.formats import TILE_M, dequant_fp4, dequant_fp8, pack_linear
-from wan22_i2v.metal41.schedule import OFFICIAL, PROMOTE_PERCENT
+from wan22_i2v.portable.schedule import OFFICIAL, PROMOTE_PERCENT
 
 _FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _RECORD = "Wan2.2-I2V-A14B-fp4"

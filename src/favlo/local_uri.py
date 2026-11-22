@@ -10,6 +10,7 @@ import base64
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
+from urllib.request import url2pathname
 
 
 def is_file_uri(value: str) -> bool:
@@ -24,7 +25,7 @@ def file_uri(path: Path) -> str:
 def read_file_uri(value: str) -> bytes:
     """Bytes at an absolute ``file:///`` path."""
     parsed = urlsplit(value)
-    path = Path(unquote(parsed.path))
+    path = Path(url2pathname(unquote(parsed.path)))
     if parsed.scheme != "file" or parsed.netloc or not path.is_absolute():
         message = "file URI must be an absolute path"
         raise ValueError(message)

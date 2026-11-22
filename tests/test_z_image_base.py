@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from z_image_base.metal41.chat import ImageRequestError, Pipeline, _fields
-from z_image_base.metal41.guide import applies
+
 from z_image_base.metal41.runtime import _plan
 from z_image_base.metal41.schedule import sigmas
+from z_image_base.portable.chat import ImageRequestError, Pipeline, _fields
+from z_image_base.portable.guide import applies
 
 
 def test_default_knots_follow_the_base_scheduler() -> None:

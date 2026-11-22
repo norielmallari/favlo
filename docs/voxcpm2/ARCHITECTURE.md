@@ -10,6 +10,10 @@ This directory wins for this pipeline's records and kernels.
 
 Another pipeline does not edit it.
 
+- `favlo serve` and `favlo --voxcpm2` load `voxcpm2.portable`. That package is the serve entry.
+- `metal41` is the Metal device that entry opens.
+- The device package re-exports the pipeline object. The device opens from `portable` `open_runtime`.
+
 ## Checkpoint
 
 - Model card: [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2).

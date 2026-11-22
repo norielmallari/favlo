@@ -8,7 +8,7 @@ import wave
 from pathlib import Path
 
 from ace_step_15_turbo.metal41.schedule import MIN_SECONDS
-from wan22_i2v.metal41.schedule import frames_from_duration as i2v_frames
+from wan22_i2v.portable.schedule import frames_from_duration as i2v_frames
 from wan22_ti2v_5b.metal41.request import list_resolutions
 from wan22_ti2v_5b.metal41.schedule import frames_from_duration as ti2v_frames
 

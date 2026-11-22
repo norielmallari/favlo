@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import json
 import queue
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-
-import gemma4_26b_a4b.metal41.stream as stream_mod
 
 from jinja2 import Environment
 from tokenizers import Tokenizer
 
+import gemma4_26b_a4b.portable.sampling as _sampling_mod
 from favlo.language_pipeline import LanguagePipeline
-from . import sampling as _sampling_mod
 from favlo.pipeline import ClientClosed as RequestClosed
 from favlo.responses import (
     RequestError,
@@ -31,14 +28,21 @@ from favlo.responses import (
     usage_object,
     web_search_context,
 )
-from gemma4_26b_a4b.metal41.geometry import CONTEXT
-from gemma4_26b_a4b.metal41.sampling import mode_card
-from gemma4_26b_a4b.metal41.tools import (
+from gemma4_26b_a4b.portable.sampling import mode_card
+from gemma4_26b_a4b.portable.tools import (
     function_needs_arguments,
     parse_tool_calls,
     required_function,
 )
-from gemma4_26b_a4b.metal41.vision import collect_images
+
+
+def _device_packages() -> frozenset[str]:
+    """Device directories shipped beside this entry. The host picks one."""
+    root = Path(__file__).resolve().parent.parent
+    return frozenset(
+        name for name in ("metal41", "cuda") if (root / name / "__init__.py").is_file()
+    )
+
 
 _DEFAULT_LIMIT = 4096
 # An open thought that runs past this many tokens is closed, then the reply continues.
@@ -462,10 +466,16 @@ class Pipeline(LanguagePipeline):
         return int(cli_main(argv))
 
     def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from gemma4_26b_a4b.metal41.runtime import open_runtime as open_rt
+        from favlo.host import select_device
         from favlo.pipelines import bind_open_runtime
 
-        return bind_open_runtime(open_rt, path, **kwargs)
+        chosen = select_device(_device_packages())
+        if chosen != "metal41":
+            message = "this runtime cannot run here"
+            raise RuntimeError(message)
+        from gemma4_26b_a4b.metal41.runtime import open_device
+
+        return bind_open_runtime(open_device, path, **kwargs)
 
 pipeline = Pipeline()
 handle_responses = pipeline
@@ -518,6 +528,8 @@ def _respond(
         _reject(reply, str(exc))
         return
     _prefix_run(runtime, prepared)
+    from gemma4_26b_a4b.metal41.vision import collect_images
+
     pictures = collect_images(messages)
     channel_open = rendered.endswith("<|channel>thought\n")
     emit_tools = prepared.get("tool_choice") != "none"
@@ -601,6 +613,8 @@ def _fit_prompt(
     tools: list[dict[str, Any]],
     thinking: bool,
 ) -> tuple[str, list[int]]:
+    from gemma4_26b_a4b.metal41.geometry import CONTEXT
+
     rendered, prompt = _encode(runtime.root, messages, thinking, tools)
     if len(prompt) <= CONTEXT:
         return rendered, prompt
@@ -819,6 +833,8 @@ def _stream(
     )
     event({"type": "response.created", "response": shell})
     event({"type": "response.in_progress", "response": shell})
+    from gemma4_26b_a4b.metal41 import stream as stream_mod
+
     handle = stream_mod.launch(runtime.root, lead, channel_open)
     failed: list[BaseException] = []
     opened: set[str] = set()

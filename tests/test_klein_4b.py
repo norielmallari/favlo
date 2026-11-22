@@ -8,14 +8,14 @@ import numpy as np
 import pytest
 
 from favlo.media_pipeline import MediaRequestError
-from klein_4b.metal41 import mcp_tools
-from klein_4b.metal41.formats import pack_matrix, reconstruct_row
-from klein_4b.metal41.pipeline import Pipeline
-from klein_4b.metal41.pixels import fit_input, snap_crop
-from klein_4b.metal41.png import decode_png, encode_png
-from klein_4b.metal41.prompt import wrap
-from klein_4b.metal41.rope import dit_table, latent_ids, text_ids
-from klein_4b.metal41.schedule import empirical_mu, sigmas
+from klein_4b.portable import mcp_tools
+from klein_4b.portable.formats import pack_matrix, reconstruct_row
+from klein_4b.portable.pipeline import Pipeline
+from klein_4b.portable.pixels import fit_input, snap_crop
+from klein_4b.portable.png import decode_png, encode_png
+from klein_4b.portable.prompt import wrap
+from klein_4b.portable.rope import dit_table, latent_ids, text_ids
+from klein_4b.portable.schedule import empirical_mu, sigmas
 
 _HORSE = Path(__file__).resolve().parent / "assets" / "favlo-horse.png"
 

@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from tokenizers import Tokenizer
 
-from gemma4_26b_a4b.metal41.tools import StreamText
+from gemma4_26b_a4b.portable.tools import StreamText
 
 _READY_S = 120.0
 _POLL_S = 0.5

@@ -9,28 +9,16 @@ import pytest
 from qwen38_27b.metal41.budget import (
     choose_wire,
     group_tensors,
-    layout_copies,
     growth_budget,
+    layout_copies,
     same_weight_image,
     startup_bytes,
     tensor_span,
 )
 from qwen38_27b.metal41.cache import cache_bytes, plane_bytes, sequence_cache_bytes
-from qwen38_27b.metal41.chat import (
-    _reasoning_effort,
-    _stream,
-    decode_text,
-    encode_chat,
-    encode_text,
-    generation_cut,
-    keeps_token_ids,
-    load_tokenizer,
-    redirect_open_think,
-    think_closes,
-)
+from qwen38_27b.metal41.checks import run_checks
 from qwen38_27b.metal41.commands import installed_record
 from qwen38_27b.metal41.convert import record_name
-from qwen38_27b.metal41.checks import run_checks
 from qwen38_27b.metal41.formats import (
     dequant_fp4,
     dequant_fp8,
@@ -44,7 +32,19 @@ from qwen38_27b.metal41.formats import (
 from qwen38_27b.metal41.forward import Qwen38Runtime, repeated_tail
 from qwen38_27b.metal41.layout import FULL_LAYERS
 from qwen38_27b.metal41.prefill import prefill_ids
-from qwen38_27b.metal41.tools import StreamText, parse_tool_calls
+from qwen38_27b.portable.chat import (
+    _reasoning_effort,
+    _stream,
+    decode_text,
+    encode_chat,
+    encode_text,
+    generation_cut,
+    keeps_token_ids,
+    load_tokenizer,
+    redirect_open_think,
+    think_closes,
+)
+from qwen38_27b.portable.tools import StreamText, parse_tool_calls
 
 
 def _config() -> dict:
@@ -113,7 +113,7 @@ def test_a_new_27b_row_defaults_mtp_on(tmp_path: Path) -> None:
 
 
 def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    from qwen38_27b.metal41.runtime import open_runtime
+    from qwen38_27b.metal41.runtime import open_device
 
     captured: dict[str, object] = {}
     caps: list[object] = []
@@ -125,12 +125,12 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("qwen38_27b.metal41.runtime.Qwen38Runtime", fake)
     monkeypatch.setattr("favlo.memory.memory.set_max_memory", caps.append)
-    assert open_runtime(Path("record"), owner="qwen38_27b:7") == "runtime"
+    assert open_device(Path("record"), owner="qwen38_27b:7") == "runtime"
     assert captured["owner"] == "qwen38_27b:7"
     assert "max_memory" not in captured
     assert captured["mtp"] is False
     assert caps == [None]
-    assert open_runtime(Path("record"), mtp=True, max_memory="16GiB") == "runtime"
+    assert open_device(Path("record"), mtp=True, max_memory="16GiB") == "runtime"
     assert captured["mtp"] is True
     assert caps == [None, "16GiB"]
 
@@ -285,7 +285,7 @@ def test_reasoning_effort_none_uses_the_template_default() -> None:
 
 
 def test_resolve_effort_maps_onto_the_template_set() -> None:
-    from qwen38_27b.metal41.sampling import mode_card, resolve_effort
+    from qwen38_27b.portable.sampling import mode_card, resolve_effort
 
     assert resolve_effort(None) is None
     assert resolve_effort("none") == "none"
@@ -296,7 +296,7 @@ def test_resolve_effort_maps_onto_the_template_set() -> None:
     assert resolve_effort("high") == "xhigh"
     assert resolve_effort("max") == "xhigh"
 
-    from qwen38_27b.metal41.chat import _request_effort
+    from qwen38_27b.portable.chat import _request_effort
 
     instruct = SimpleNamespace(
         variant="instruct",
@@ -330,7 +330,7 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
     from pathlib import Path
 
     from favlo.reply import MemoryReply
-    from qwen38_27b.metal41.chat import handle_responses
+    from qwen38_27b.portable.chat import handle_responses
 
     seen: dict[str, object] = {}
     rendered: list[tuple[object, object]] = []
@@ -343,13 +343,13 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
         seen["tools"] = _args[2] if len(_args) > 2 else None
         return [1, 2]
 
-    monkeypatch.setattr("qwen38_27b.metal41.chat.encode_chat", encode)
+    monkeypatch.setattr("qwen38_27b.portable.chat.encode_chat", encode)
     monkeypatch.setattr(
-        "qwen38_27b.metal41.chat.decode_text",
+        "qwen38_27b.portable.chat.decode_text",
         lambda _root, _ids: "<think>\nplan\n</think>\nsix carrots",
     )
     monkeypatch.setattr("qwen38_27b.metal41.vision.collect_images", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr("qwen38_27b.metal41.chat._forced_call", lambda *_args, **_kwargs: ([], False))
+    monkeypatch.setattr("qwen38_27b.portable.chat._forced_call", lambda *_args, **_kwargs: ([], False))
 
     class Runtime:
         root = Path(".")
@@ -395,7 +395,7 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
     assert seen["depth"] == 3
 
     open_think = MemoryReply("qwen38_27b")
-    monkeypatch.setattr("qwen38_27b.metal41.chat.decode_text", lambda _root, _ids: "still planning")
+    monkeypatch.setattr("qwen38_27b.portable.chat.decode_text", lambda _root, _ids: "still planning")
     handle_responses.handle_responses(
         open_think,
         Runtime(),
@@ -467,12 +467,12 @@ def test_responses_body_is_the_generation_path(monkeypatch: pytest.MonkeyPatch) 
 
 def test_auto_truncation_drops_the_oldest_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     from favlo.responses import RequestError
-    from qwen38_27b.metal41.chat import _fit_prompt
+    from qwen38_27b.portable.chat import _fit_prompt
 
     def render(_runtime, messages, _tools, _thinking, _effort, _keep):
         return [0] * (len(messages) * 10)
 
-    monkeypatch.setattr("qwen38_27b.metal41.chat._render", render)
+    monkeypatch.setattr("qwen38_27b.portable.chat._render", render)
 
     class Runtime:
         _limit = 25
@@ -560,7 +560,7 @@ def test_a_retokenized_split_is_not_kept() -> None:
 
 
 def test_the_tokenizer_and_template_load_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from qwen38_27b.metal41 import chat
+    from qwen38_27b.portable import chat
 
     root = tmp_path / "example-model"
     root.mkdir()
@@ -600,7 +600,7 @@ def test_the_tokenizer_and_template_load_once(tmp_path: Path, monkeypatch: pytes
 
 
 def test_a_template_without_the_empty_think_block_is_not_cached(tmp_path: Path) -> None:
-    from qwen38_27b.metal41 import chat
+    from qwen38_27b.portable import chat
 
     root = tmp_path / "example-model"
     root.mkdir()
@@ -613,7 +613,7 @@ def test_a_template_without_the_empty_think_block_is_not_cached(tmp_path: Path) 
 
 
 def test_think_closes_are_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    from qwen38_27b.metal41 import chat
+    from qwen38_27b.portable import chat
 
     root = Path("example-model")
     chat._MARKERS.pop(str(root), None)
@@ -646,7 +646,7 @@ def test_the_draw_tokenizer_is_not_the_lookup_method(monkeypatch: pytest.MonkeyP
             return SimpleNamespace(ids=[1])
 
     codec = _Codec()
-    monkeypatch.setattr("qwen38_27b.metal41.chat.load_tokenizer", lambda root: codec)
+    monkeypatch.setattr("qwen38_27b.portable.chat.load_tokenizer", lambda root: codec)
     runtime = object.__new__(Qwen38Runtime)
     runtime.root = Path(".")
     assert runtime._tokenizer() is codec
@@ -654,7 +654,7 @@ def test_the_draw_tokenizer_is_not_the_lookup_method(monkeypatch: pytest.MonkeyP
 
 
 def test_preserve_thinking_defaults_off_and_either_field_overrides() -> None:
-    from qwen38_27b.metal41.chat import preserve_thinking
+    from qwen38_27b.portable.chat import preserve_thinking
 
     assert preserve_thinking({}) is False
     assert preserve_thinking({"preserve_thinking": True}) is True
@@ -685,7 +685,7 @@ def test_preserve_thinking_false_reaches_the_template(monkeypatch: pytest.Monkey
     from pathlib import Path
 
     from favlo.reply import MemoryReply
-    from qwen38_27b.metal41.chat import handle_responses
+    from qwen38_27b.portable.chat import handle_responses
 
     seen: dict[str, object] = {}
 
@@ -693,10 +693,10 @@ def test_preserve_thinking_false_reaches_the_template(monkeypatch: pytest.Monkey
         seen["preserve"] = kwargs.get("preserve_thinking")
         return [1, 2]
 
-    monkeypatch.setattr("qwen38_27b.metal41.chat.encode_chat", encode)
-    monkeypatch.setattr("qwen38_27b.metal41.chat.decode_text", lambda _root, _ids: "apple")
+    monkeypatch.setattr("qwen38_27b.portable.chat.encode_chat", encode)
+    monkeypatch.setattr("qwen38_27b.portable.chat.decode_text", lambda _root, _ids: "apple")
     monkeypatch.setattr("qwen38_27b.metal41.vision.collect_images", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr("qwen38_27b.metal41.chat._forced_call", lambda *_args, **_kwargs: ([], False))
+    monkeypatch.setattr("qwen38_27b.portable.chat._forced_call", lambda *_args, **_kwargs: ([], False))
 
     class Runtime:
         root = Path(".")
@@ -937,7 +937,7 @@ def test_a_later_turn_shares_the_user_turn_not_the_open_think() -> None:
     root = installed_record()
     if root is None or not (root / "chat_template.jinja").is_file():
         pytest.skip("quantized record is not installed")
-    from qwen38_27b.metal41.chat import encode_chat, generation_cut, user_turn_cut
+    from qwen38_27b.portable.chat import encode_chat, generation_cut, user_turn_cut
 
     tools = [
         {
@@ -983,7 +983,7 @@ def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
     root = installed_record()
     if root is None or not (root / "chat_template.jinja").is_file():
         pytest.skip("quantized record is not installed")
-    from qwen38_27b.metal41.chat import encode_chat
+    from qwen38_27b.portable.chat import encode_chat
 
     tools = [
         {
@@ -1023,8 +1023,8 @@ def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
 
 
 def test_an_image_pad_before_the_cut_shifts_the_expanded_index() -> None:
-    from qwen38_27b.metal41.chat import _expanded_cut
     from qwen38_27b.metal41.vision import IMAGE_PAD
+    from qwen38_27b.portable.chat import _expanded_cut
 
     text = [1, IMAGE_PAD, 2, 3]
     assert _expanded_cut(text, 3, [4]) == 6
@@ -1592,7 +1592,7 @@ def test_openai_chunk_streams_one_delta_per_token() -> None:
 
 
 def test_completion_usage_reports_the_served_window() -> None:
-    from qwen38_27b.metal41.chat import _usage
+    from qwen38_27b.portable.chat import _usage
 
     runtime = SimpleNamespace(
         _limit=131072,
@@ -1614,7 +1614,7 @@ def test_completion_usage_reports_the_served_window() -> None:
 
 
 def test_usage_rate_is_zero_when_the_clock_is_zero() -> None:
-    from qwen38_27b.metal41.chat import _usage
+    from qwen38_27b.portable.chat import _usage
 
     runtime = SimpleNamespace(
         _limit=131072,
@@ -2118,7 +2118,7 @@ def test_vision_disk_cache_round_trip(tmp_path, monkeypatch) -> None:
     assert int(body["grid_h"]) == 4
     assert int(body["grid_w"]) == 2
     from qwen38_27b.metal41 import vision
-    from qwen38_27b.metal41.chat import Pipeline
+    from qwen38_27b.portable.chat import Pipeline
 
     assert callable(vision.embed_image)
     assert Pipeline().has_vision() is True
@@ -2403,7 +2403,7 @@ def test_draft_window_stops_before_feeding_a_stop_token() -> None:
 def test_mtp_flag_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    from qwen38_27b.metal41.chat import _mtp_depth, _mtp_flag
+    from qwen38_27b.portable.chat import _mtp_depth, _mtp_flag
 
     assert _mtp_flag({}) is False
     assert _mtp_flag({"mtp": False}) is False

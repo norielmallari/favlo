@@ -9,14 +9,19 @@ import pytest
 
 from ace_step_15_turbo.metal41.graph import _boundary_device, generate
 from ace_step_15_turbo.metal41.hold import ClipHold
-from ace_step_15_turbo.metal41.pack import dequant_fp4, dequant_fp8, pack_fp4, pack_fp8, promote_count, promoted_ids
+from ace_step_15_turbo.metal41.pack import (
+    dequant_fp4,
+    dequant_fp8,
+    pack_fp4,
+    pack_fp8,
+    promote_count,
+    promoted_ids,
+)
 from ace_step_15_turbo.metal41.pcm import wav_bytes, wav_info
-from ace_step_15_turbo.metal41.request import parse_music
 from ace_step_15_turbo.metal41.runtime import (
     Runtime,
     decoder_bytes,
-    handle_music,
-    open_runtime,
+    open_device,
     step_scratch_bytes,
 )
 from ace_step_15_turbo.metal41.schedule import (
@@ -27,6 +32,8 @@ from ace_step_15_turbo.metal41.schedule import (
     timestep_schedule,
 )
 from ace_step_15_turbo.metal41.tiles import dependency, plan, tile_frames
+from ace_step_15_turbo.portable import handle_music
+from ace_step_15_turbo.portable.request import parse_music
 from favlo.media_pipeline import MediaPaused
 from favlo.music import music_dir, store_wav
 
@@ -47,7 +54,7 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
         return "runtime"
 
     monkeypatch.setattr("ace_step_15_turbo.metal41.runtime.Runtime", fake)
-    assert open_runtime(
+    assert open_device(
         Path("record"),
         kv_cache="e4m3",
         console=None,
@@ -626,7 +633,7 @@ class _HostGpu:
 
 
 def test_a_short_weight_read_names_the_file(tmp_path: Path) -> None:
-    from ace_step_15_turbo.metal41.record import _read_file
+    from ace_step_15_turbo.portable.record import _read_file
 
     path = tmp_path / "00000.fp8"
     path.write_bytes(b"abc")
@@ -639,7 +646,7 @@ def test_load_reads_each_weight_file_into_its_span(
 ) -> None:
     import json
 
-    from ace_step_15_turbo.metal41 import record
+    from ace_step_15_turbo.portable import record
 
     assert record._CHUNK == 8 * 1024 * 1024
     monkeypatch.setattr(record, "_CHUNK", 8)

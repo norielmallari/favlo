@@ -143,7 +143,7 @@ _STOP = (1, 106, 50)
 
 
 def _contains_stop(root: Path, tokens: list[int], stops: list[str]) -> bool:
-    from gemma4_26b_a4b.metal41.chat import decode_text
+    from gemma4_26b_a4b.portable.chat import decode_text
 
     text = decode_text(root, tokens)
     return any(stop in text for stop in stops)
@@ -382,7 +382,7 @@ class Gemma4Runtime:
         pin = getattr(self, "_pin_cut", True)
         self._body_len = None
         self._pin_cut = True
-        from gemma4_26b_a4b.metal41.chat import expanded_cut, generation_cut
+        from gemma4_26b_a4b.portable.chat import expanded_cut, generation_cut
 
         # A forced tool lead is appended after the generation suffix. The cut
         # is the suffix of the body, then image pads shift that index.
@@ -486,7 +486,7 @@ class Gemma4Runtime:
             close_ids: list[int] = []
             budget = int(thought_budget or 0)
             if budget > 0:
-                from gemma4_26b_a4b.metal41.chat import advance_thought, encode_text
+                from gemma4_26b_a4b.portable.chat import advance_thought, encode_text
 
                 open_ids = encode_text(self.root, "<|channel>thought\n")
                 close_ids = encode_text(self.root, "<channel|>")
@@ -566,13 +566,13 @@ class Gemma4Runtime:
         temperature: float | None = None,
         seed: int = 0,
     ) -> str:
-        from gemma4_26b_a4b.metal41.chat import (
+        from gemma4_26b_a4b.portable.chat import (
             THOUGHT_BUDGET,
             decode_text,
             encode_chat,
             reply_text,
         )
-        from gemma4_26b_a4b.metal41.sampling import DEFAULT_VARIANT, VARIANTS
+        from gemma4_26b_a4b.portable.sampling import DEFAULT_VARIANT, VARIANTS
 
         card = VARIANTS[DEFAULT_VARIANT]
         prompt = encode_chat(self.root, messages, thinking)

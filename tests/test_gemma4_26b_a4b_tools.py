@@ -7,7 +7,7 @@ import json
 import pytest
 
 from favlo.responses import chat_to_responses, template_messages
-from gemma4_26b_a4b.metal41.chat import (
+from gemma4_26b_a4b.portable.chat import (
     _stop_strings,
     advance_thought,
     close_model_turn,
@@ -18,7 +18,7 @@ from gemma4_26b_a4b.metal41.chat import (
     render_chat,
     reply_text,
 )
-from gemma4_26b_a4b.metal41.tools import StreamText, parse_tool_calls
+from gemma4_26b_a4b.portable.tools import StreamText, parse_tool_calls
 
 
 def test_gemma_tool_call_quotes() -> None:
@@ -195,7 +195,7 @@ def test_a_spent_thought_budget_closes_the_channel() -> None:
 
 
 def test_chat_template_compiles_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    from gemma4_26b_a4b.metal41 import chat
+    from gemma4_26b_a4b.portable import chat
 
     calls = {"n": 0}
     original = chat.Environment.from_string
@@ -215,7 +215,7 @@ def test_tokenizer_loads_once(monkeypatch: pytest.MonkeyPatch, tmp_path: object)
     from pathlib import Path
     from types import SimpleNamespace
 
-    from gemma4_26b_a4b.metal41 import chat
+    from gemma4_26b_a4b.portable import chat
 
     root = Path(str(tmp_path))
     loads = {"n": 0}
@@ -450,7 +450,7 @@ def test_a_stop_string_is_left_out_of_the_reply() -> None:
 
 
 def test_unsupported_effort_steps_up_or_falls_back() -> None:
-    from gemma4_26b_a4b.metal41.sampling import resolve_effort
+    from gemma4_26b_a4b.portable.sampling import resolve_effort
 
     assert resolve_effort(None) is None
     assert resolve_effort("minimal") == "minimal"
@@ -465,8 +465,8 @@ def test_unsupported_effort_steps_up_or_falls_back() -> None:
 def test_effort_opens_thinking_without_changing_the_card() -> None:
     from types import SimpleNamespace
 
-    from gemma4_26b_a4b.metal41.chat import _request_effort
-    from gemma4_26b_a4b.metal41.sampling import VARIANTS, mode_card
+    from gemma4_26b_a4b.portable.chat import _request_effort
+    from gemma4_26b_a4b.portable.sampling import VARIANTS, mode_card
 
     instruct = SimpleNamespace(
         variant="instruct",

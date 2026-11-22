@@ -18,7 +18,7 @@ SIZES = ((512, 512), (1024, 1024))
 
 
 def test_kernels() -> None:
-    from z_image_turbo.metal41.commands import kernels
+    from z_image_turbo.portable.commands import kernels
 
     assert kernels() == 0
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from wan22_i2v.metal41.schedule import LATENT_MEAN, LATENT_STD, geometry, mask_latent
+from wan22_i2v.portable.schedule import LATENT_MEAN, LATENT_STD, geometry, mask_latent
 
 
 def stride_encode(

@@ -7,11 +7,10 @@ use the OpenAI logit update.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import json
 import queue
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +18,8 @@ import numpy as np
 from jinja2 import Environment
 from tokenizers import Tokenizer
 
+import qwen38_27b.portable.sampling as _sampling_mod
 from favlo.language_pipeline import LanguagePipeline
-from . import sampling as _sampling_mod
 from favlo.responses import (
     RequestError,
     format_instruction,
@@ -32,16 +31,15 @@ from favlo.responses import (
     usage_object,
     web_search_context,
 )
-from qwen38_27b.metal41.cache import DEFAULT_CONTEXT_LENGTH
-from qwen38_27b.metal41.forward import RequestClosed
-from qwen38_27b.metal41.sampling import (
+from qwen38_27b.portable.closed import RequestClosed
+from qwen38_27b.portable.sampling import (
     DEFAULT_VARIANT,
     VARIANTS,
     mode_card,
     resolve_effort,
     template_effort,
 )
-from qwen38_27b.metal41.tools import (
+from qwen38_27b.portable.tools import (
     StreamText,
     function_has_parameters,
     normalize_messages,
@@ -49,6 +47,15 @@ from qwen38_27b.metal41.tools import (
     required_function,
     split_thinking,
 )
+
+
+def _device_packages() -> frozenset[str]:
+    """Device directories shipped beside this entry. The host picks one."""
+    root = Path(__file__).resolve().parent.parent
+    return frozenset(
+        name for name in ("metal41", "cuda") if (root / name / "__init__.py").is_file()
+    )
+
 
 STOP = {248046, 248044}
 THINK_END = 248069
@@ -531,10 +538,16 @@ class Pipeline(LanguagePipeline):
         return int(cli_main(argv))
 
     def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from qwen38_27b.metal41.runtime import open_runtime as open_rt
+        from favlo.host import select_device
         from favlo.pipelines import bind_open_runtime
 
-        return bind_open_runtime(open_rt, path, **kwargs)
+        chosen = select_device(_device_packages())
+        if chosen != "metal41":
+            message = "this runtime cannot run here"
+            raise RuntimeError(message)
+        from qwen38_27b.metal41.runtime import open_device
+
+        return bind_open_runtime(open_device, path, **kwargs)
 
 pipeline = Pipeline()
 handle_responses = pipeline
@@ -767,6 +780,8 @@ def _fit_prompt(
     keep_thinking: bool,
     prompt: list[int],
 ) -> list[int]:
+    from qwen38_27b.metal41.cache import DEFAULT_CONTEXT_LENGTH
+
     ceiling = getattr(runtime, "_limit", None)
     if not isinstance(ceiling, int) or ceiling < 1:
         ceiling = DEFAULT_CONTEXT_LENGTH
@@ -899,6 +914,8 @@ def _stream_delta(decoded: str, shown: str, *, final: bool) -> tuple[str, str]:
 
 def _context_length(runtime: Any) -> int:
     """The served window. The live cache length is not the model context."""
+    from qwen38_27b.metal41.cache import DEFAULT_CONTEXT_LENGTH
+
     window = getattr(runtime, "_limit", None)
     if isinstance(window, int) and window > 0:
         return min(window, DEFAULT_CONTEXT_LENGTH)

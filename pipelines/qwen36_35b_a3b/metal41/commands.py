@@ -25,7 +25,6 @@ from favlo.registry import (
     set_alias,
     stored_directory,
 )
-from qwen36_35b_a3b.metal41.chat import STOP, decode_text, encode_chat, instruct_forbid
 from qwen36_35b_a3b.metal41.checks import format_report, run_checks
 from qwen36_35b_a3b.metal41.convert import quantize, record_name, requant_mtp
 from qwen36_35b_a3b.metal41.fetch import (
@@ -37,6 +36,7 @@ from qwen36_35b_a3b.metal41.fetch import (
     shortfall,
 )
 from qwen36_35b_a3b.metal41.formats import promote_count
+from qwen36_35b_a3b.portable.chat import STOP, decode_text, encode_chat, instruct_forbid
 
 PIPELINE = "qwen36_35b_a3b"
 CARROT_PROMPT = (
@@ -404,9 +404,9 @@ def _quantize(args: argparse.Namespace) -> int:
 def _complete(args: argparse.Namespace) -> int:
     try:
         path, _selection = choose_complete(model=None, record=None, pipeline=PIPELINE)
-        from qwen36_35b_a3b.metal41.runtime import open_runtime
+        from qwen36_35b_a3b.metal41.runtime import open_device
 
-        runtime = open_runtime(
+        runtime = open_device(
             path,
             kv_cache=args.kv_cache,
             max_memory=args.max_memory,

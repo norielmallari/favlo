@@ -2,33 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import json
 import queue
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment
 from tokenizers import Tokenizer
 
-from qwen36_35b_a3b.metal41.cache import DEFAULT_CONTEXT_LENGTH
+import qwen36_35b_a3b.portable.sampling as _sampling_mod
 from favlo.language_pipeline import LanguagePipeline
-from . import sampling as _sampling_mod
-from qwen36_35b_a3b.metal41.forward import RequestClosed
-from qwen36_35b_a3b.metal41.sampling import DEFAULT_VARIANT, VARIANTS, mode_card
-from qwen36_35b_a3b.metal41.tools import (
-    StreamText,
-    completion_fields,
-    decode_shown_text,
-    decode_unicode_escapes,
-    function_has_parameters,
-    normalize_messages,
-    parse_tool_calls,
-    required_function,
-)
-from qwen36_35b_a3b.metal41.vision import prepare_prompt
 from favlo.responses import (
     RequestError,
     format_instruction,
@@ -40,8 +25,27 @@ from favlo.responses import (
     usage_object,
     web_search_context,
 )
+from qwen36_35b_a3b.portable.sampling import DEFAULT_VARIANT, VARIANTS, mode_card
+from qwen36_35b_a3b.portable.tools import (
+    StreamText,
+    completion_fields,
+    decode_shown_text,
+    decode_unicode_escapes,
+    function_has_parameters,
+    normalize_messages,
+    parse_tool_calls,
+    required_function,
+)
 
 STOP = {248046, 248044}
+
+
+def _device_packages() -> frozenset[str]:
+    """Device directories shipped beside this entry. The host picks one."""
+    root = Path(__file__).resolve().parent.parent
+    return frozenset(
+        name for name in ("metal41", "cuda") if (root / name / "__init__.py").is_file()
+    )
 
 
 def _sampling(
@@ -476,10 +480,16 @@ class Pipeline(LanguagePipeline):
         return int(cli_main(argv))
 
     def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from qwen36_35b_a3b.metal41.runtime import open_runtime as open_rt
+        from favlo.host import select_device
         from favlo.pipelines import bind_open_runtime
 
-        return bind_open_runtime(open_rt, path, **kwargs)
+        chosen = select_device(_device_packages())
+        if chosen != "metal41":
+            message = "this runtime cannot run here"
+            raise RuntimeError(message)
+        from qwen36_35b_a3b.metal41.runtime import open_device
+
+        return bind_open_runtime(open_device, path, **kwargs)
 
 pipeline = Pipeline()
 handle_responses = pipeline
@@ -544,6 +554,8 @@ def _respond(
         prompt = _fit_prompt(runtime, prepared, messages, tools, thinking, keep_thinking, prompt)
         text_cut = None if keep_thinking else user_turn_cut(runtime.root, messages, tools, thinking)
         text_prompt = prompt
+        from qwen36_35b_a3b.metal41.vision import prepare_prompt
+
         prompt = prepare_prompt(runtime, messages, prompt)
         runtime._stable_cut = _expanded_cut(runtime, text_prompt, text_cut)
     except RequestError as exc:
@@ -661,6 +673,8 @@ def _stream_delta(decoded: str, shown: str, *, final: bool) -> tuple[str, str]:
 
 
 def _context_length(runtime: Any) -> int:
+    from qwen36_35b_a3b.metal41.cache import DEFAULT_CONTEXT_LENGTH
+
     live = getattr(runtime, "_context_limit", None)
     if isinstance(live, int) and live > 0:
         return min(live, DEFAULT_CONTEXT_LENGTH)
@@ -720,6 +734,8 @@ def _fit_prompt(
     prompt: list[int],
 ) -> list[int]:
     """The opening cache is not the prompt limit. The served window is."""
+    from qwen36_35b_a3b.metal41.cache import DEFAULT_CONTEXT_LENGTH
+
     ceiling = getattr(runtime, "_context_limit", None)
     if not isinstance(ceiling, int) or ceiling < 1:
         ceiling = DEFAULT_CONTEXT_LENGTH
@@ -859,6 +875,8 @@ def _stream(
     state: dict[str, Any] | None = None,
     search: dict[str, Any] | None = None,
 ) -> None:
+    from qwen36_35b_a3b.metal41.forward import RequestClosed
+
     decode = getattr(runtime, "decode", None)
     if not callable(decode):
         decode = load_tokenizer(runtime.root).decode

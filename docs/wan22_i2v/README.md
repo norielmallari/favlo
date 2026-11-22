@@ -6,7 +6,7 @@ The text encoder is [google/umt5-xxl](https://huggingface.co/google/umt5-xxl).
 
 Those weights are under the Apache License, Version 2.0.
 
-- `favlo --wan22_i2v` loads `pipelines/wan22_i2v/metal41/`.
+- The serve entry is `wan22_i2v.portable`. `favlo --wan22_i2v` and `favlo serve` load that package. `metal41` is the Metal device that entry opens.
 - With `favlo serve` listening, clips go through `favlo media --pipeline wan22_i2v`.
 - MCP clients call `wan22_i2v__generate_video` on `POST /mcp`.
 - The served record is `Wan2.2-I2V-A14B-int8`.

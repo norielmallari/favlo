@@ -37,7 +37,7 @@ def test_an_openai_image_part_is_one_image_pad() -> None:
     root = installed_record()
     if root is None or not (root / "tokenizer.json").is_file():
         pytest.skip("quantized record is not installed")
-    from qwen38_27b.metal41.chat import encode_chat
+    from qwen38_27b.portable.chat import encode_chat
 
     messages = chat_body(b"png")["messages"]
     ids = encode_chat(root, messages, None, False)

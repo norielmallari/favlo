@@ -39,9 +39,10 @@ def main(argv: list[str] | None = None) -> int:
 def kernels() -> int:
     import numpy as np
 
+    from klein_4b.metal41.metal import Gpu
+    from klein_4b.metal41.ops import reference_attention
+
     from .formats import pack_matrix, quantize_activation, reconstruct_groups, reconstruct_row
-    from .metal import Gpu
-    from .ops import reference_attention
 
     rng = np.random.default_rng(7)
     weight = rng.normal(0, 0.25, size=(7, 200)).astype(np.float32)
@@ -78,7 +79,8 @@ def kernels() -> int:
 def _elementwise(gpu: object) -> int:
     import numpy as np
 
-    from . import ops
+    from klein_4b.metal41 import ops
+
     from .rope import apply_dit, apply_text, dit_table, text_table
 
     rng = np.random.default_rng(11)

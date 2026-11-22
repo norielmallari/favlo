@@ -3,26 +3,15 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 import numpy as np
 
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.media_pipeline import (
-    MediaCall,
-    MediaPaused,
-    MediaPipeline,
-    MediaRequestError,
-    MediaTool,
-    checkpoint,
-)
+from favlo.media_pipeline import MediaPaused
 from favlo.memory import memory
-from voxcpm2.metal41.audio import encode_wav
-from voxcpm2.metal41.config import ModelConfig, load_config
 from voxcpm2.metal41.metal import Session
-from voxcpm2.metal41.progress import PATCH_CAP, VoiceProgress
 from voxcpm2.metal41.speak import generate
 from voxcpm2.metal41.store import (
     WEIGHTS_NAME,
@@ -32,9 +21,11 @@ from voxcpm2.metal41.store import (
     read_blob,
     weight_bytes,
 )
-from voxcpm2.metal41.text import style_line
-from voxcpm2.metal41.tokenize import LineTokenizer
 from voxcpm2.metal41.vae import Decoder
+from voxcpm2.portable.config import ModelConfig, load_config
+from voxcpm2.portable.progress import PATCH_CAP, VoiceProgress
+from voxcpm2.portable.text import style_line
+from voxcpm2.portable.tokenize import LineTokenizer
 
 _SCRATCH = 256 << 20
 
@@ -222,7 +213,7 @@ class Runtime:
         return self._session, self._store, self._decoder, self._tokenizer
 
 
-def open_runtime(
+def open_device(
     path: str | Path,
     *,
     kv_cache: str = "e4m3",
@@ -253,137 +244,3 @@ def open_runtime(
         console=console,
     )
 
-
-def handle_chat(
-    reply: Any,
-    runtime: Any,
-    body: dict[str, Any],
-    selection: Any,
-    args: Any,
-    state: dict[str, Any],
-) -> None:
-    """This pipeline speaks. It does not complete a chat."""
-    del runtime, body, selection, args, state
-    reply.json(
-        500,
-        {
-            "error": {
-                "message": "voxcpm2 does not complete a chat",
-                "type": "RuntimeError",
-            }
-        },
-    )
-
-
-class VoiceRequest(NamedTuple):
-    text: str
-    persona: str
-    output_format: str
-
-
-class Pipeline(MediaPipeline):
-    """VoxCPM2's listener contract. Speech stays in the runtime."""
-
-    kind = "voice"
-    id_prefix = "voice_"
-    object_name = "audio.voice"
-    table_name = "voice"
-    seeds = False
-
-    def parameters(self, request: Any) -> dict[str, Any]:
-        """Map the spoken line onto ``input`` for stored metadata."""
-        fields = super().parameters(request)
-        if "input" in fields:
-            return fields
-        text = getattr(request, "text", None)
-        if isinstance(text, str):
-            fields = dict(fields)
-            fields["input"] = text
-            return fields
-        if isinstance(request, dict) and isinstance(request.get("text"), str):
-            fields = dict(fields)
-            fields["input"] = request["text"]
-        return fields
-
-    def parse(self, body: dict[str, Any]) -> VoiceRequest:
-        text = body.get("input")
-        if not isinstance(text, str) or not text.strip():
-            raise MediaRequestError("input is required", "input")
-        named = body.get("voice")
-        if isinstance(named, str) and named.strip():
-            raise MediaRequestError(
-                "a named voice needs a reference clip; this opening speaks with an empty voice",
-                "voice",
-            )
-        fmt = body.get("response_format") or "mp3"
-        if fmt not in {"mp3", "wav", "flac"}:
-            raise MediaRequestError("response_format must be mp3, wav, or flac", "response_format")
-        persona = body.get("persona")
-        if not isinstance(persona, str) or not persona.strip():
-            raise MediaRequestError("persona is required", "persona")
-        return VoiceRequest(text.strip(), persona.strip(), fmt)
-
-    def describe(self, request: VoiceRequest) -> dict[str, Any]:
-        return {"response_format": request.output_format}
-
-    def generate(self, runtime: Runtime, request: VoiceRequest, hold: Any, job: dict[str, Any], stop: Any, call: MediaCall):
-        del hold, call
-
-        def gate() -> None:
-            checkpoint(stop, None)
-
-        return runtime.speak(request.text, persona=request.persona, stop=gate, job=job)
-
-    def pack(self, runtime: Runtime, request: VoiceRequest, result: Any, job: dict[str, Any], home: Path | None, table: dict[str, Any], call: MediaCall):
-        del call
-        from favlo.voice import store_wav
-
-        payload = encode_wav(result, runtime.config.out_sample_rate)
-        store_wav(job["id"], payload, home=home, voice=table, output_format=request.output_format)
-        table[job["id"]] = {"response_format": request.output_format}
-        return {
-            "id": job["id"],
-            "object": "audio.voice",
-            "status": "completed",
-            "response_format": request.output_format,
-        }
-
-
-
-    def main(self, argv: Sequence[str]) -> int:
-        from voxcpm2.metal41.commands import main as cli_main
-
-        return int(cli_main(argv))
-
-    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from voxcpm2.metal41.runtime import open_runtime as open_rt
-        from favlo.pipelines import bind_open_runtime
-
-        return bind_open_runtime(open_rt, path, **kwargs)
-
-    def mcp_tools(self) -> Sequence[MediaTool]:
-        return [
-            MediaTool(
-                name="generate_voice",
-                description="Speak one line as mp3, wav, or flac.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "input": {"type": "string", "description": "Line to speak."},
-                        "persona": {
-                            "type": "string",
-                            "description": "Joined in front of the line.",
-                        },
-                        "voice": {"type": "string", "description": "Empty speaks with no reference."},
-                        "response_format": {"type": "string", "description": "mp3, wav, or flac."},
-                    },
-                    "required": ["input", "persona"],
-                },
-                handler="handle_voice",
-                result="audio",
-                task=True,
-            )
-        ]
-
-pipeline = Pipeline()
-handle_voice = pipeline

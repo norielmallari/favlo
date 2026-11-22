@@ -1,13 +1,10 @@
-"""Qwen3.8-27B pipeline. It does not import the Flash Next package."""
+"""Qwen3.8-27B Metal device.
 
-from __future__ import annotations
+The pipeline entry is ``qwen38_27b.portable``. This package re-exports that
+pipeline so a listener that still imports the device name serves the same
+object. The device opens from ``portable`` ``open_runtime``.
+"""
 
-from qwen38_27b.metal41.chat import pipeline
+from qwen38_27b.portable import pipeline
 
-PIPELINE = "qwen38_27b"
-
-handle_responses = pipeline
-main = pipeline.main
-open_runtime = pipeline.open_runtime
-
-__all__ = ["pipeline", "handle_responses", "main", "open_runtime"]
+__all__ = ["pipeline"]

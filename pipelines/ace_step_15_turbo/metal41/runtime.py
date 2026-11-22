@@ -1,10 +1,7 @@
-"""Open the packed record and serve one music job."""
+"""Open the packed record on the Metal device."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
-import time
 from pathlib import Path
 from typing import Any
 
@@ -13,18 +10,14 @@ from tokenizers import Tokenizer
 from ace_step_15_turbo.metal41.graph import generate
 from ace_step_15_turbo.metal41.hold import ClipHold
 from ace_step_15_turbo.metal41.metal import Gpu
-from ace_step_15_turbo.metal41.record import load, weight_bytes
-from ace_step_15_turbo.metal41.request import MusicRequest, parse_music
-from ace_step_15_turbo.metal41.schedule import HOP, LYRIC_LIMIT, STEPS, TEXT_LIMIT, latent_frames
+from ace_step_15_turbo.metal41.schedule import HOP, LYRIC_LIMIT, TEXT_LIMIT, latent_frames
 from ace_step_15_turbo.metal41.tiles import tile_frames
+from ace_step_15_turbo.portable.record import load, weight_bytes
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
-from favlo.media_pipeline import MediaTool, MediaCall, MediaPipeline, MediaRequestError, checkpoint
 from favlo.memory import memory
 
-_UNITS = 28 + 8 + 4 + 32 * STEPS + 7
 
-
-def open_runtime(
+def open_device(
     path: Path,
     *,
     kv_cache: str,
@@ -32,145 +25,12 @@ def open_runtime(
     resident_percent: float | None,
     max_memory: str | int | None = None,
     owner: str | None = None,
-) -> "Runtime":
+) -> Runtime:
     del kv_cache, resident_percent
     memory.set_max_memory(max_memory)
     return Runtime(path, console, owner=owner, max_memory=max_memory)
 
 
-def handle_chat(reply: Any, runtime: Any, body: dict[str, Any], selection: Any, args: Any, state: dict[str, Any]) -> None:
-    del runtime, body, selection, args, state
-    reply.json(
-        404,
-        {
-            "error": {
-                "message": "ace_step_15_turbo generates music at POST /v1/audio/music",
-                "type": "not_found",
-            }
-        },
-    )
-
-
-class Pipeline(MediaPipeline):
-    """ACE-Step's listener contract. The graph stays in this package."""
-
-    kind = "music"
-    id_prefix = "music_"
-    object_name = "audio.music"
-    table_name = "music"
-    id_hex = 16
-
-    def parse(self, body: dict[str, Any]) -> MusicRequest:
-        model = body.get("model")
-        if not isinstance(model, str) or not model:
-            raise MediaRequestError("model is required", "model")
-        try:
-            return parse_music(body)
-        except ValueError as exc:
-            raise MediaRequestError(str(exc)) from exc
-
-    def describe(self, request: MusicRequest) -> dict[str, Any]:
-        from favlo.logs import favlo_home, load_settings, music_ttl_seconds
-
-        seconds = request.seconds
-        label = str(int(seconds)) if float(seconds).is_integer() else str(seconds)
-        created = int(time.time())
-        return {
-            "expires_at": created + music_ttl_seconds(load_settings(favlo_home())),
-            "stage": "text",
-            "prompt": request.prompt,
-            "lyrics": request.lyrics,
-            "seconds": label,
-            "response_format": request.output_format,
-        }
-
-    def identity(self, request: MusicRequest) -> tuple[Any, ...]:
-        return _identity(request)
-
-    def matches(self, request: MusicRequest, identity: Any) -> bool:
-        return identity == self.identity(request)
-
-    def halted(self, runtime: Any) -> bool:
-        return bool(getattr(runtime, "_halted", False))
-
-    def generate(
-        self,
-        runtime: Any,
-        request: MusicRequest,
-        hold: Any,
-        job: dict[str, Any],
-        stop: Any,
-        call: MediaCall,
-    ) -> bytes:
-        kept = hold if isinstance(hold, ClipHold) else None
-        progress = _Progress(job, done=0 if kept is None else kept.done)
-        progress.hold = kept
-        progress.interrupt = stop
-        call.progress = progress
-        if kept is not None and kept.wav is not None:
-            wav = kept.wav
-        else:
-            wav = runtime.generate(request, progress, kept)
-        checkpoint(stop, ClipHold(stage="encode", wav=wav, done=progress.done))
-        return wav
-
-    def pack(
-        self,
-        runtime: Any,
-        request: MusicRequest,
-        result: bytes,
-        job: dict[str, Any],
-        home: Path | None,
-        table: dict[str, Any],
-        call: MediaCall,
-    ) -> None:
-        del runtime, call
-        from favlo.music import store_wav
-
-        job["stage"] = "encode"
-        store_wav(job["id"], result, home=home, music=table, output_format=request.output_format)
-        return None
-
-
-    def main(self, argv: Sequence[str]) -> int:
-        from ace_step_15_turbo.metal41.commands import main as cli_main
-
-        return int(cli_main(argv))
-
-    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from ace_step_15_turbo.metal41.runtime import open_runtime as open_rt
-        from favlo.pipelines import bind_open_runtime
-
-        return bind_open_runtime(open_rt, path, **kwargs)
-
-    def mcp_tools(self) -> Sequence[MediaTool]:
-        return [
-            MediaTool(
-                name="generate_music",
-                description="One music clip as mp3, wav, or flac.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "prompt": {"type": "string", "description": "Caption or style."},
-                        "response_format": {"type": "string", "description": "mp3, wav, or flac."},
-                        "lyrics": {"type": "string", "description": "Lyrics, when used."},
-                        "seconds": {"type": "number", "description": "Duration in seconds."},
-                        "seed": {"type": "integer", "description": "Omit for random."},
-                        "vocal_language": {"type": "string", "description": "Vocal language."},
-                        "bpm": {"type": "integer", "description": "Tempo."},
-                        "keyscale": {"type": "string", "description": "Key."},
-                        "timesignature": {"type": "string", "description": "Meter."},
-                    },
-                    "required": ["prompt"],
-                },
-                handler="handle_music",
-                result="audio",
-                task=True,
-            )
-        ]
-
-pipeline = Pipeline()
-handle_music = pipeline
 class Runtime:
     def __init__(
         self,
@@ -197,7 +57,7 @@ class Runtime:
 
     def ensure_open(self, request: Any) -> None:
         """Wait for prior releases, then load when closed and check this duration."""
-        seconds = float(getattr(request, "seconds"))
+        seconds = float(request.seconds)
         need = self.working_set_bytes(request)
         if self._closed:
             open_gate(need, detail=f"{seconds:g} seconds")
@@ -206,7 +66,7 @@ class Runtime:
 
     def working_set_bytes(self, request: Any) -> int:
         """Weights plus the larger of one step or the decoder peak."""
-        seconds = float(getattr(request, "seconds"))
+        seconds = float(request.seconds)
         scratch = max(step_scratch_bytes(seconds), decoder_bytes(seconds))
         return weight_bytes(self.path) + scratch
 
@@ -287,22 +147,6 @@ class Runtime:
         if max(step_scratch_bytes(seconds), decoder_bytes(seconds)) > self._room():
             message = f"scratch for {seconds:g} seconds does not fit"
             raise RuntimeError(message)
-
-
-class _Progress:
-    def __init__(self, job: dict[str, Any], done: int = 0) -> None:
-        self.job = job
-        self.done = done
-        self.started = time.monotonic()
-        self.interrupt = lambda: None
-
-    def __call__(self, stage: str) -> None:
-        self.done += 1
-        self.job["stage"] = stage
-        self.job["progress"] = min(99, int(100 * self.done / _UNITS))
-        elapsed = time.monotonic() - self.started
-        remain = _UNITS - self.done
-        self.job["eta"] = 0 if self.done == 0 or remain <= 0 else int(elapsed / self.done * remain)
 
 
 def decoder_bytes(seconds: float) -> int:
@@ -386,17 +230,3 @@ def step_scratch_bytes(seconds: float) -> int:
         add(count)
         add(max(count // 32, 1))
     return total
-
-
-def _identity(fields: MusicRequest) -> tuple[Any, ...]:
-    return (
-        fields.prompt,
-        fields.lyrics,
-        fields.seconds,
-        fields.seed,
-        fields.vocal_language,
-        fields.bpm,
-        fields.keyscale,
-        fields.timesignature,
-        fields.output_format,
-    )

@@ -8,7 +8,7 @@ As-built detail for the `gemma4_26b_a4b` package. [README.md](README.md) is the 
 - Clients reach this pipeline through `favlo serve`.
 - `GET /v1/models` lists it once a record is registered, and the `model` field on `POST /v1/responses` loads it.
 - `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`.
-- That flag loads `gemma4_26b_a4b.metal41`.
+- That flag loads `gemma4_26b_a4b.portable`. `portable` is the serve entry. `metal41` is the device it opens.
 
 - The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it).
 - Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license).
@@ -83,7 +83,9 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - `pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity.
 
 - `runtime` is `metal41`, `cuda`, or `portable`.
-- `serve` opens `directory` and imports `{pipeline}.{runtime}`.
+- `serve` opens `directory` and imports `gemma4_26b_a4b.portable`.
+- A row that still says `metal41` loads that same entry.
+- `metal41` re-exports that pipeline object so a listener that still imports the device name serves it. The device opens from `portable` `open_runtime`.
 - `source` is the BF16 checkout quantize checks.
 - `resident_percent` is stored as null and discarded at open.
 - `mtp` and `mtp_depth` may sit on the row.

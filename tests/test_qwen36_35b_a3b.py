@@ -41,7 +41,7 @@ from qwen36_35b_a3b.metal41.forward import (
     decode_steps,
     limit_keeps_piece,
 )
-from qwen36_35b_a3b.metal41.tools import (
+from qwen36_35b_a3b.portable.tools import (
     StreamText,
     completion_fields,
     function_has_parameters,
@@ -51,7 +51,7 @@ from qwen36_35b_a3b.metal41.tools import (
 
 
 def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    from qwen36_35b_a3b.metal41.runtime import open_runtime
+    from qwen36_35b_a3b.metal41.runtime import open_device
 
     captured: dict[str, object] = {}
 
@@ -61,7 +61,7 @@ def test_open_runtime_forwards_owner(monkeypatch: pytest.MonkeyPatch) -> None:
         return "runtime"
 
     monkeypatch.setattr("qwen36_35b_a3b.metal41.runtime.Qwen36Runtime", fake)
-    assert open_runtime(Path("record"), owner="qwen36_35b_a3b:7") == "runtime"
+    assert open_device(Path("record"), owner="qwen36_35b_a3b:7") == "runtime"
     assert captured["owner"] == "qwen36_35b_a3b:7"
     assert "max_memory" not in captured
 
@@ -232,7 +232,7 @@ def test_load_row_opens_when_the_console_shows_bars() -> None:
 
 
 def test_an_omitted_completion_cap_is_the_context_room() -> None:
-    from qwen36_35b_a3b.metal41.chat import completion_limit, requested_limit
+    from qwen36_35b_a3b.portable.chat import completion_limit, requested_limit
 
     assert requested_limit({}) is None
     assert requested_limit({"max_tokens": None, "max_completion_tokens": 16}) == 16
@@ -267,7 +267,7 @@ def test_a_closed_think_tool_call_is_a_prefix_of_the_next_prompt() -> None:
     root = _chat_root()
     if root is None:
         pytest.skip("chat template is not installed")
-    from qwen36_35b_a3b.metal41.chat import encode_chat, encode_text
+    from qwen36_35b_a3b.portable.chat import encode_chat, encode_text
 
     user = "Call read_file with path qwen38_flash_next/runtime.py."
     tools = [
@@ -365,7 +365,7 @@ def test_a_later_turn_shares_the_user_turn_not_the_open_think() -> None:
     root = _chat_root()
     if root is None:
         pytest.skip("chat template is not installed")
-    from qwen36_35b_a3b.metal41.chat import encode_chat, generation_cut, user_turn_cut
+    from qwen36_35b_a3b.portable.chat import encode_chat, generation_cut, user_turn_cut
 
     tools = [
         {
@@ -411,7 +411,7 @@ def test_a_dropped_think_shares_the_prompt_before_the_generation_suffix() -> Non
     root = _chat_root()
     if root is None:
         pytest.skip("chat template is not installed")
-    from qwen36_35b_a3b.metal41.chat import encode_chat, generation_cut
+    from qwen36_35b_a3b.portable.chat import encode_chat, generation_cut
 
     first = [{"role": "user", "content": "Describe the picture."}]
     follow_up = [
@@ -439,7 +439,7 @@ def test_an_omitted_assistant_turn_stays_a_prefix_of_the_next_prompt() -> None:
     root = _chat_root()
     if root is None:
         pytest.skip("chat template is not installed")
-    from qwen36_35b_a3b.metal41.chat import encode_chat
+    from qwen36_35b_a3b.portable.chat import encode_chat
 
     tools = [
         {
@@ -483,7 +483,7 @@ def test_the_chat_codec_loads_once(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     from tokenizers.models import WordLevel
     from tokenizers.pre_tokenizers import WhitespaceSplit
 
-    from qwen36_35b_a3b.metal41 import chat
+    from qwen36_35b_a3b.portable import chat
 
     vocab = {
         "[UNK]": 0,
@@ -538,7 +538,7 @@ def test_a_passed_reasoning_effort_is_not_rendered(tmp_path: Path) -> None:
         "{{ messages[0].content }}",
         encoding="utf-8",
     )
-    from qwen36_35b_a3b.metal41.chat import decode_text, encode_chat
+    from qwen36_35b_a3b.portable.chat import decode_text, encode_chat
 
     messages = [{"role": "user", "content": "Hello"}]
     plain = decode_text(tmp_path, encode_chat(tmp_path, messages, None, True))
@@ -707,13 +707,13 @@ def test_a_repeated_image_reuses_the_vision_rows(monkeypatch: pytest.MonkeyPatch
 
 
 def test_qwen36_reports_vision() -> None:
-    from qwen36_35b_a3b.metal41.chat import Pipeline
+    from qwen36_35b_a3b.portable.chat import Pipeline
 
     assert Pipeline().has_vision() is True
 
 
 def test_stream_delta_holds_a_partial_character() -> None:
-    from qwen36_35b_a3b.metal41.chat import _stream_delta
+    from qwen36_35b_a3b.portable.chat import _stream_delta
 
     piece, shown = _stream_delta("hello\ufffd", "", final=False)
     assert piece == "hello"
@@ -724,7 +724,7 @@ def test_stream_delta_holds_a_partial_character() -> None:
 
 
 def test_completion_usage_uses_the_phase_clocks() -> None:
-    from qwen36_35b_a3b.metal41.chat import _usage
+    from qwen36_35b_a3b.portable.chat import _usage
 
     runtime = SimpleNamespace(
         _context_limit=131072,
@@ -754,7 +754,7 @@ def test_a_zero_clock_prints_a_zero_rate() -> None:
 
 def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
     from favlo.reply import MemoryReply
-    from qwen36_35b_a3b.metal41.chat import _stream
+    from qwen36_35b_a3b.portable.chat import _stream
 
     class _Runtime:
         _hit_limit = False
@@ -804,7 +804,7 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
 
 def test_a_thinking_off_reply_streams_before_the_response_completes() -> None:
     from favlo.reply import MemoryReply
-    from qwen36_35b_a3b.metal41.chat import _stream
+    from qwen36_35b_a3b.portable.chat import _stream
 
     class _Runtime:
         _hit_limit = False
@@ -860,7 +860,7 @@ def test_a_thinking_off_reply_streams_before_the_response_completes() -> None:
 
 def test_a_thinking_reply_completes_after_the_text_deltas() -> None:
     from favlo.reply import MemoryReply
-    from qwen36_35b_a3b.metal41.chat import _stream
+    from qwen36_35b_a3b.portable.chat import _stream
 
     class _Runtime:
         _hit_limit = False
@@ -959,7 +959,7 @@ def test_a_tool_call_before_the_close_ends_the_trace() -> None:
 
 def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
     from favlo.reply import MemoryReply
-    from qwen36_35b_a3b.metal41.chat import _stream
+    from qwen36_35b_a3b.portable.chat import _stream
 
     call = "<tool_call>\n<function=read_file>\n</function>\n</tool_call>"
 
@@ -1007,7 +1007,7 @@ def test_a_tool_call_is_not_sent_as_a_chat_message() -> None:
 def test_a_thinking_stream_sends_the_tool_name_before_the_arguments() -> None:
     from favlo.reply import MemoryReply
     from favlo.responses import ChatWire
-    from qwen36_35b_a3b.metal41.chat import _stream
+    from qwen36_35b_a3b.portable.chat import _stream
 
     class _Runtime:
         _hit_limit = False
@@ -1850,7 +1850,7 @@ def test_kv_widths_and_atlas_budget() -> None:
 
 
 def test_preserve_thinking_defaults_off_and_the_request_wins() -> None:
-    from qwen36_35b_a3b.metal41.chat import preserve_thinking
+    from qwen36_35b_a3b.portable.chat import preserve_thinking
 
     assert preserve_thinking({}) is False
     assert preserve_thinking({}, None) is False
@@ -1911,7 +1911,7 @@ def test_historical_reasoning_follows_the_preserve_setting() -> None:
     root = _chat_root()
     if root is None:
         pytest.skip("chat template is not installed")
-    from qwen36_35b_a3b.metal41.chat import decode_text, encode_chat
+    from qwen36_35b_a3b.portable.chat import decode_text, encode_chat
 
     history = [
         {"role": "user", "content": "First question"},
@@ -1942,7 +1942,7 @@ def test_historical_reasoning_follows_the_preserve_setting() -> None:
 
 
 def test_unsupported_effort_steps_up_or_falls_back() -> None:
-    from qwen36_35b_a3b.metal41.sampling import resolve_effort
+    from qwen36_35b_a3b.portable.sampling import resolve_effort
 
     assert resolve_effort(None) is None
     assert resolve_effort("none") == "none"
@@ -1957,8 +1957,8 @@ def test_unsupported_effort_steps_up_or_falls_back() -> None:
 def test_effort_opens_thinking_without_changing_the_card() -> None:
     from types import SimpleNamespace
 
-    from qwen36_35b_a3b.metal41.chat import _request_effort
-    from qwen36_35b_a3b.metal41.sampling import mode_card
+    from qwen36_35b_a3b.portable.chat import _request_effort
+    from qwen36_35b_a3b.portable.sampling import mode_card
 
     instruct = SimpleNamespace(
         variant="instruct",
@@ -1992,8 +1992,8 @@ def test_effort_opens_thinking_without_changing_the_card() -> None:
 def test_omitted_sampling_uses_the_pipeline_card() -> None:
     from types import SimpleNamespace
 
-    from qwen36_35b_a3b.metal41.chat import _presence, _sampling
-    from qwen36_35b_a3b.metal41.sampling import mode_card
+    from qwen36_35b_a3b.portable.chat import _presence, _sampling
+    from qwen36_35b_a3b.portable.sampling import mode_card
 
     thinking, card = mode_card(None, None)
     assert thinking is True
@@ -2143,7 +2143,7 @@ def test_resident_mtp_base_is_the_dense_suffix() -> None:
 def test_a_prompt_past_the_opening_cache_fits_the_served_window() -> None:
     from favlo.responses import RequestError
     from qwen36_35b_a3b.metal41.cache import DEFAULT_CONTEXT_LENGTH
-    from qwen36_35b_a3b.metal41.chat import _fit_prompt
+    from qwen36_35b_a3b.portable.chat import _fit_prompt
 
     runtime = SimpleNamespace(max_pos=2048, _context_limit=DEFAULT_CONTEXT_LENGTH)
     prompt = [1] * 3000
@@ -2156,7 +2156,7 @@ def test_a_prompt_past_the_opening_cache_fits_the_served_window() -> None:
 def test_mtp_flag_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    from qwen36_35b_a3b.metal41.chat import _mtp_depth, _mtp_flag
+    from qwen36_35b_a3b.portable.chat import _mtp_depth, _mtp_flag
 
     body = {"temperature": 0.7, "presence_penalty": 1.5, "enable_thinking": False}
     assert _mtp_flag(body) is False

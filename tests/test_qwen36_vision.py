@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from AppKit import NSBitmapImageRep, NSColor, NSGIFFileType, NSJPEGFileType
 
-from qwen36_35b_a3b.metal41.chat import encode_text
+from qwen36_35b_a3b.portable.chat import encode_text
 from qwen36_35b_a3b.metal41.vision import (
     MIN_PIXELS,
     _image_bytes,

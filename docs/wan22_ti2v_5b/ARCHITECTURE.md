@@ -4,7 +4,8 @@ This page is the as-built detail for the `wan22_ti2v_5b` package. [README.md](RE
 
 - Text-to-video and image-to-video on the Metal 4.1 GPU.
 - The weights are the 5B transformer from the [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) card.
-- `favlo --wan22_ti2v_5b` loads `pipelines/wan22_ti2v_5b/metal41/`.
+- `wan22_ti2v_5b.portable` is the serve entry. `favlo --wan22_ti2v_5b` and `favlo serve` import it.
+- `metal41` is the Metal device. The entry's `open_runtime` opens that device.
 - The record is `models/Wan2.2-TI2V-5B-int8`.
 - The umT5 encoder is the int8 pack named by `parts.umt5` on the registry row, `models/google/umt5-xxl-int8`.
 - A clip reads that pack and does not open the BF16 encoder file.

@@ -8,9 +8,8 @@ from typing import Any
 
 from favlo.media_memory import begin_release, finish_release, open_gate, stamp_owner
 from favlo.memory import memory
-
-from .constants import FORMAT, SCRATCH_BYTES
-from .store import Store
+from klein_4b.portable.constants import FORMAT, SCRATCH_BYTES
+from klein_4b.portable.store import Store
 
 
 class Runtime:
@@ -89,7 +88,7 @@ class Runtime:
         return 6_000_000_000
 
 
-def open_runtime(
+def open_device(
     path: Path,
     *,
     kv_cache: str = "int8",

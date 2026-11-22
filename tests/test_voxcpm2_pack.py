@@ -15,7 +15,7 @@ import numpy as np
 from voxcpm2.metal41.commands import mark_complete
 from voxcpm2.metal41.metal import Resident, Span, _binding, device_argument, pad_linear
 from voxcpm2.metal41.pack import write_pack
-from voxcpm2.metal41.runtime import _SCRATCH, Runtime, open_runtime
+from voxcpm2.metal41.runtime import _SCRATCH, Runtime, open_device
 from voxcpm2.metal41.store import (
     EMBED_NAME,
     PACK_NAME,
@@ -267,7 +267,7 @@ def test_complete_accepts_the_blob_or_the_safetensors(tmp_path: Path) -> None:
 def test_open_accepts_the_blob_without_safetensors(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
     try:
-        open_runtime(tmp_path)
+        open_device(tmp_path)
     except FileNotFoundError as exc:
         assert "model.safetensors" in str(exc)
     else:
@@ -277,7 +277,7 @@ def test_open_accepts_the_blob_without_safetensors(tmp_path: Path) -> None:
     packed.mkdir()
     (packed / "config.json").write_text(json.dumps(_CONFIG), encoding="utf-8")
     (packed / WEIGHTS_NAME).write_bytes(b"blob")
-    runtime = open_runtime(packed, resident_percent=None)
+    runtime = open_device(packed, resident_percent=None)
     assert runtime.path == packed
     assert not (packed / "model.safetensors").exists()
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from favlo.registry import models_dir, register_quantized
 from gemma4_26b_a4b.metal41.quantize import SOURCE_DIR, estimate, quantize, record_name
-from gemma4_26b_a4b.metal41.sampling import DEFAULT_VARIANT
+from gemma4_26b_a4b.portable.sampling import DEFAULT_VARIANT
 
 PIPELINE = "gemma4_26b_a4b"
 CARROT_PROMPT = (
@@ -85,14 +85,14 @@ def _quantize(src: Path | None, name: str | None) -> int:
 
 
 def _complete(name: str | None) -> int:
-    from gemma4_26b_a4b.metal41.runtime import open_runtime
+    from gemma4_26b_a4b.metal41.runtime import open_device
 
     folder = name if name is not None else record_name()
     path = models_dir() / folder
     if not (path / "manifest.json").is_file():
         sys.stderr.write(f"missing record: {folder}\n")
         return 2
-    runtime = open_runtime(
+    runtime = open_device(
         path,
         kv_cache="half",
         console=None,

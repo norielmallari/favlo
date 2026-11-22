@@ -4,6 +4,8 @@ Tokenizer-free text-to-speech from [openbmb/VoxCPM2](https://huggingface.co/open
 
 Those weights are under the Apache License, Version 2.0.
 
+`favlo --voxcpm2` loads `voxcpm2.portable`. That package is the serve entry. `metal41` is the Metal device it opens.
+
 `setup` downloads the checkout into `models/openbmb/VoxCPM2`.
 
 `pack` writes `weights.bin` and `pack.json` beside the checkout.

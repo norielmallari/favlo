@@ -7,11 +7,11 @@ import json
 import shutil
 import sys
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from ace_step_15_turbo.metal41.measure import run_kernels
-from ace_step_15_turbo.metal41.record import HUB, PACKED_NAME, SOURCE_NAME, quantize
+from ace_step_15_turbo.portable.record import HUB, PACKED_NAME, SOURCE_NAME, quantize
 
 
 def main(argv: Sequence[str] | None = None) -> int:

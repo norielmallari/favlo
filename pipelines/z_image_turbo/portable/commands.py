@@ -10,8 +10,6 @@ from typing import Any
 
 import numpy as np
 
-from z_image_turbo.metal41.formats import TILE_M, TILE_N, dequant_fp4, pack_fp4, pack_int8
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --z_image_turbo")
@@ -141,6 +139,7 @@ def kernels() -> int:
 
 
 def _kernel_checks(gpu: Any) -> int:
+    from z_image_turbo.metal41.formats import TILE_M, TILE_N, dequant_fp4, pack_fp4
     from z_image_turbo.metal41.metal import linear
 
     rng = np.random.default_rng(0)
@@ -201,6 +200,8 @@ def _kernel_checks(gpu: Any) -> int:
 
 def _int8(gpu: Any) -> bool:
     """One padded int8 tile against the same quantize and the int32 product."""
+    from z_image_turbo.metal41.formats import TILE_M, pack_int8
+
     rows = TILE_M
     logical_n = 96
     logical_k = 144
@@ -241,6 +242,8 @@ def _int8(gpu: Any) -> bool:
 
 
 def _attention(gpu: object) -> bool:
+    from z_image_turbo.metal41.formats import TILE_M
+
     seq = 4
     heads = 2
     dim = 128

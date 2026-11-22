@@ -1,11 +1,10 @@
 """Load ``models/bge-m3-int8`` and return one dense vector.
 
+This module is the Metal session. The serve shell is ``bge_m3.portable``.
 This module does not quantize and does not open the float32 checkout.
 """
 
 from __future__ import annotations
-
-from collections.abc import Sequence
 
 import json
 from dataclasses import dataclass
@@ -15,8 +14,6 @@ from typing import Any
 import numpy as np
 from tokenizers import Tokenizer
 
-from favlo.embeddings_pipeline import EmbeddingsPipeline
-from . import sampling as _sampling_mod
 from bge_m3.metal41.gpu import Bound, Gpu, fit_length
 from bge_m3.metal41.text import (
     HIDDEN,
@@ -203,7 +200,7 @@ def _workspace(gpu: Gpu, length: int) -> dict[str, Any]:
     return work
 
 
-def open_runtime(
+def open_device(
     path: str | Path,
     kv_cache: str | None = None,
     console: Any = None,
@@ -214,31 +211,3 @@ def open_runtime(
     """Open the packed record. The extra arguments are the listener's."""
     del kv_cache, console, resident_percent
     return Runtime(Path(path), owner=owner, max_memory=max_memory)
-
-
-class Pipeline(EmbeddingsPipeline):
-    """``POST /v1/embeddings``. One string in, one dense vector out."""
-
-    context_length = _sampling_mod.CONTEXT_LENGTH
-    variants = _sampling_mod.VARIANTS
-    default_variant = _sampling_mod.DEFAULT_VARIANT
-
-    def embed(self, runtime: Runtime, text: str) -> tuple[list[float], int]:
-        result = runtime.embed(text)
-        return result.vector, result.tokens
-
-
-
-    def main(self, argv: Sequence[str]) -> int:
-        from bge_m3.metal41.commands import main as cli_main
-
-        return int(cli_main(argv))
-
-    def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from bge_m3.metal41.runtime import open_runtime as open_rt
-        from favlo.pipelines import bind_open_runtime
-
-        return bind_open_runtime(open_rt, path, **kwargs)
-
-pipeline = Pipeline()
-handle_embed = pipeline

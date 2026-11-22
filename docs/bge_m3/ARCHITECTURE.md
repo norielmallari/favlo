@@ -5,6 +5,10 @@ As-built detail for the `bge_m3` embeddings pipeline. [README.md](README.md) is 
 - The listener and the write set are the [process contract](../../ARCHITECTURE.md).
 - Papers for this pipeline are in [references.md](references.md).
 - `handle_embed` is an `EmbeddingsPipeline`.
+- `bge_m3.portable` is the serve entry. `serve` imports that package.
+- `metal41` is the device. The GPU session, shaders, quantize, and pack stay there.
+- `metal41` re-exports the pipeline, so an import of the device package still returns the embeddings pipeline.
+- The device opens from `portable` `open_runtime`. The sampling card is `portable/sampling.py`.
 - Clients reach this pipeline through `favlo serve` once the record is registered.
 - The packed directory is `models/bge-m3-int8`.
 

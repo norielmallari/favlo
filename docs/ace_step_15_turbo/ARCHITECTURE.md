@@ -2,9 +2,9 @@
 
 This page is the as-built detail for the `ace_step_15_turbo` package. [README.md](README.md) is the summary.
 
-`favlo --ace_step_15_turbo` loads `pipelines/ace_step_15_turbo/metal41/ace-step-15-turbo.py`.
+`ace_step_15_turbo.portable` is the serve entry. `favlo serve` and `favlo --ace_step_15_turbo` import that package. `metal41` is the Metal device. The entry opens it from `open_runtime` and does not construct the device runtime itself. `metal41` re-exports the same pipeline object.
 
-Device spans come from the process memory manager. `MediaPipeline` calls `ensure_open` before the clip and always calls `close` when the request returns. `ensure_open` runs the shared open gate against weights plus the larger of one diffusion step or the decoder tile for the named duration, and reloads when closed. `open_runtime` stamps the owner and calls `memory.set_max_memory`. This package does not keep a private memory cap.
+Device spans come from the process memory manager. `MediaPipeline` calls `ensure_open` before the clip and always calls `close` when the request returns. `ensure_open` runs the shared open gate against weights plus the larger of one diffusion step or the decoder tile for the named duration, and reloads when closed. The device opener stamps the owner and calls `memory.set_max_memory`. This package does not keep a private memory cap.
 
 - A diffusion step returns the activations it does not keep, so the live scratch is one step.
 - The decoder does the same, in one-second tiles.
@@ -73,7 +73,7 @@ save_registry(data)
 - The file key `media.music` is the folder `favlo media` uses when the command omits `--model` and that folder is this pipeline.
 - When the key is empty, music registration fills it.
 - A stored key stays.
-- The sampling card (`default`, temperature 0) is copied at registration.
+- The sampling card (`default`, temperature 0) is copied at registration from `portable/sampling.py`.
 - The DiT schedule does not read it.
 - A request `steps` other than 8, or a `cfg_scale` other than 1, is rejected.
 - Those are not registry keys.

@@ -26,31 +26,12 @@ from wan22_i2v.metal41.hold import ClipHold, reload_quietly
 from wan22_i2v.metal41.latent import blend_pair, crossfade, stride_decode, stride_encode
 from wan22_i2v.metal41.metal import _NAMES, Gpu
 from wan22_i2v.metal41.png import resize_rgb
-from wan22_i2v.metal41.progress import ClipProgress, clip_label
 from wan22_i2v.metal41.record import (
     half_names,
     linear_names,
     load_embed,
     load_manifest,
     stream_expert,
-)
-from wan22_i2v.metal41.schedule import (
-    STEPS,
-    apply_split,
-    expert_name,
-    geometry,
-    guide_scale,
-    latent_windows,
-    mask_latent,
-    require_guidance,
-    require_steps,
-    resolved_negative,
-    sigmas,
-    timesteps,
-    velocity_walks,
-    chunk_overlap,
-    commit_span,
-    overlap_origin,
 )
 from wan22_i2v.metal41.text import _LAYERS, encode_prompt, tokenizer_path
 from wan22_i2v.metal41.vae import (
@@ -65,6 +46,25 @@ from wan22_i2v.metal41.vae import (
     vae_present,
 )
 from wan22_i2v.metal41.video import write_avi
+from wan22_i2v.portable.progress import ClipProgress, clip_label
+from wan22_i2v.portable.schedule import (
+    STEPS,
+    apply_split,
+    chunk_overlap,
+    commit_span,
+    expert_name,
+    geometry,
+    guide_scale,
+    latent_windows,
+    mask_latent,
+    overlap_origin,
+    require_guidance,
+    require_steps,
+    resolved_negative,
+    sigmas,
+    timesteps,
+    velocity_walks,
+)
 
 
 class Runtime:
@@ -1202,7 +1202,7 @@ class Runtime:
         return self.path / name
 
 
-def open_runtime(
+def open_device(
     path: Path,
     *,
     kv_cache: str = "e4m3",
