@@ -63,3 +63,25 @@ The banner prints the loaded plane, MTP, thinking, and the decode cap.
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+19 November 2026. The same command passed on `Qwen3.6-35B-A3B-int4`, where every routed expert is int4. The banner printed `kv int8`, `mtp off`, `thinking on`, and nonce `1c5b9714`.
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 389.41 tok/s (512 tok in 1.31 s) | 21.84 tok/s (128 tok in 5.86 s) | 89.26 tok/s (640 tok in 7.17 s) |
+| 1024 | 369.61 tok/s (1024 tok in 2.77 s) | 18.94 tok/s (128 tok in 6.76 s) | 120.88 tok/s (1152 tok in 9.53 s) |
+| 4096 | 302.71 tok/s (4096 tok in 13.53 s) | 10.18 tok/s (128 tok in 12.57 s) | 161.84 tok/s (4224 tok in 26.10 s) |
+| 10000 | 272.87 tok/s (10000 tok in 36.65 s) | 5.32 tok/s (128 tok in 24.04 s) | 166.88 tok/s (10128 tok in 60.69 s) |
+
+Query: "389.41 OR 369.61 OR 302.71 OR 272.87 Qwen3.6-35B-A3B tok/s". The search did not find 389.41 and 21.84, 369.61 and 18.94, 302.71 and 10.18, or 272.87 and 5.32. [Token Atlas](https://tokatlas.github.io/models/qwen3-6-35b-a3b/) does not list those pairs. A DGX Spark total of 301.74 tok/s is not 302.71 with 10.18. The predecessors above still stand.
+
+20 November 2026. The same command passed again on that int4 record after decode reused one activation from shared memory, split the key span across the streaming multiprocessors, and copied expert images on a side stream while the shared expert ran. The banner printed `kv int8`, `mtp off`, `thinking on`, and nonce `81badcde`.
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 393.69 tok/s (512 tok in 1.30 s) | 24.75 tok/s (128 tok in 5.17 s) | 98.92 tok/s (640 tok in 6.47 s) |
+| 1024 | 379.38 tok/s (1024 tok in 2.70 s) | 24.13 tok/s (128 tok in 5.30 s) | 144.00 tok/s (1152 tok in 8.00 s) |
+| 4096 | 313.29 tok/s (4096 tok in 13.07 s) | 20.48 tok/s (128 tok in 6.25 s) | 218.63 tok/s (4224 tok in 19.32 s) |
+| 10000 | 283.46 tok/s (10000 tok in 35.28 s) | 15.99 tok/s (128 tok in 8.00 s) | 234.01 tok/s (10128 tok in 43.28 s) |
+
+Query: "393.69 OR 379.38 OR 313.29 OR 283.46 Qwen3.6-35B-A3B tok/s". The search did not find 393.69 and 24.75, 379.38 and 24.13, 313.29 and 20.48, or 283.46 and 15.99. [Token Atlas](https://tokatlas.github.io/models/qwen3-6-35b-a3b/) does not list those pairs. An M5 Ultra oQ4e row at 313.7 tok/s is not 313.29 with 20.48. The predecessors above still stand.

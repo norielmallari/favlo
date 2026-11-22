@@ -29,6 +29,23 @@ from qwen36_35b_a3b.cuda.closed import RequestClosed
 from qwen36_35b_a3b.cuda.layout import CONTEXT_CAP, EOS, IM_END
 from qwen36_35b_a3b.cuda.sampling import mode_card, resolve_effort, thinking_on
 
+
+def _stream_text():
+    """The think-block splitter. Load the file, not the Metal package."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "metal41" / "tools.py"
+    spec = importlib.util.spec_from_file_location("qwen36_stream_text", path)
+    if spec is None or spec.loader is None:
+        message = f"cannot load {path}"
+        raise ImportError(message)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.StreamText
+
+
+StreamText = _stream_text()
+
 STOP = {EOS, IM_END}
 _THINK_END = "</think>"
 _GENERATION = re.compile(r"\{%-?\s*(?:end)?generation\s*-?%\}")
@@ -196,6 +213,8 @@ def _stream(
             raise RequestClosed() from err
 
     response_id = new_id("resp_")
+    reasoning_id = new_id("rs_")
+    message_id = new_id("msg_")
     created = response_object(
         model=getattr(reply, "model_id", "") or prepared.get("model") or "",
         output=[],
@@ -206,6 +225,7 @@ def _stream(
         response_id=response_id,
     )
     event({"type": "response.created", "response": created})
+    event({"type": "response.in_progress", "response": created})
     pending: queue.Queue[int | None] = queue.Queue()
     failed: list[BaseException] = []
     produced: list[int] = []
@@ -230,20 +250,36 @@ def _stream(
 
     worker = threading.Thread(target=produce, name="qwen36-cuda-decode")
     worker.start()
-    tokenizer = load_tokenizer(runtime.root)
+    decode = getattr(runtime, "decode", None)
+    if not callable(decode):
+        decode = load_tokenizer(runtime.root).decode
     shown = ""
+    gate = StreamText(thinking, keep_calls=False)
+    opened: set[str] = set()
+
+    def emit_piece(channel: str, visible: str) -> None:
+        if not visible:
+            return
+        if channel not in opened:
+            opened.add(channel)
+            _open_item(event, channel, reasoning_id, message_id)
+        _emit_response(event, channel, visible, reasoning_id, message_id)
+
     try:
         while True:
             token = pending.get()
-            if token is None:
-                break
-            produced.append(int(token))
-            text = tokenizer.decode(produced)
+            final = token is None
+            if not final:
+                produced.append(int(token))
+            text = decode(produced) if produced else ""
             delta = text[len(shown) :]
             shown = text
-            if not delta:
-                continue
-            event({"type": "response.output_text.delta", "delta": delta})
+            for channel, visible in gate.push(delta):
+                emit_piece(channel, visible)
+            if final:
+                for channel, visible in gate.finish():
+                    emit_piece(channel, visible)
+                break
         worker.join()
         if failed:
             raise failed[0]
@@ -253,7 +289,13 @@ def _stream(
         raise RequestClosed() from exc
     finished = _object(reply, prepared, prompt, produced, runtime, thinking, search, limit)
     for index, item in enumerate(finished.get("output") or []):
-        if not isinstance(item, dict) or item.get("type") != "function_call":
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "reasoning":
+            item["id"] = reasoning_id
+            event({"type": "response.output_item.done", "output_index": index, "item": item})
+            continue
+        if item.get("type") != "function_call":
             continue
         opened = dict(item)
         opened["arguments"] = ""
@@ -284,20 +326,27 @@ def _object(
     search: dict[str, Any] | None,
     limit: int,
 ) -> dict[str, Any]:
-    tokenizer = load_tokenizer(runtime.root)
-    text = tokenizer.decode(tokens)
+    decode = getattr(runtime, "decode", None)
+    if not callable(decode):
+        decode = load_tokenizer(runtime.root).decode
+    text = decode(tokens)
     reasoning, content, calls = _split(text, thinking)
     output: list[dict[str, Any]] = []
     if search is not None:
         output.append(search)
     if reasoning:
-        output.append(
-            {
-                "id": new_id("rs_"),
-                "type": "reasoning",
-                "content": [{"type": "reasoning_text", "text": reasoning}],
-            }
-        )
+        item: dict[str, Any] = {
+            "id": new_id("rs_"),
+            "type": "reasoning",
+            "summary": [],
+            "status": "completed",
+            "content": [{"type": "reasoning_text", "text": reasoning}],
+            "encrypted_content": reasoning,
+        }
+        summary = prepared.get("reasoning")
+        if isinstance(summary, dict) and summary.get("summary"):
+            item["summary"] = [{"type": "summary_text", "text": reasoning}]
+        output.append(item)
     for call in calls:
         function = call.get("function") if isinstance(call.get("function"), dict) else {}
         output.append(
@@ -402,12 +451,64 @@ def _coerce(value: str) -> Any:
 
 
 def _split(text: str, thinking: bool) -> tuple[str, str, list[dict[str, Any]]]:
-    if not thinking or _THINK_END not in text:
+    if not thinking:
         visible, calls = parse_tool_calls(text)
         return "", visible, calls
-    reasoning, _, content = text.partition(_THINK_END)
-    visible, calls = parse_tool_calls(content.lstrip("\n"))
-    return reasoning, visible, calls
+    if _THINK_END in text:
+        reasoning, _, content = text.partition(_THINK_END)
+        visible, calls = parse_tool_calls(content.lstrip("\n"))
+        return reasoning, visible, calls
+    tool = text.find("<tool_call>")
+    if tool >= 0:
+        visible, calls = parse_tool_calls(text[tool:])
+        return text[:tool], visible, calls
+    return text, "", []
+
+
+def _open_item(event: Any, channel: str, reasoning_id: str, message_id: str) -> None:
+    if channel == "reasoning":
+        item: dict[str, Any] = {
+            "type": "reasoning",
+            "id": reasoning_id,
+            "summary": [],
+            "content": [],
+            "status": "in_progress",
+        }
+        index = 0
+    else:
+        item = {
+            "type": "message",
+            "id": message_id,
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [{"type": "output_text", "text": "", "annotations": []}],
+        }
+        index = 1
+    event({"type": "response.output_item.added", "output_index": index, "item": item})
+
+
+def _emit_response(event: Any, channel: str, visible: str, reasoning_id: str, message_id: str) -> None:
+    if channel == "reasoning":
+        event(
+            {
+                "type": "response.reasoning_text.delta",
+                "content_index": 0,
+                "delta": visible,
+                "item_id": reasoning_id,
+                "output_index": 0,
+            }
+        )
+        return
+    event(
+        {
+            "type": "response.output_text.delta",
+            "content_index": 0,
+            "delta": visible,
+            "item_id": message_id,
+            "output_index": 1,
+            "logprobs": [],
+        }
+    )
 
 
 def _effort(body: dict[str, Any]) -> str | None:

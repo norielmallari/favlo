@@ -2,8 +2,9 @@
 
 Dense int8 projections use a 512-token prefill tile and a one-warp decode GEMV.
 Each of those dense halves is captured once and replayed. The expert atlas stays
-in host memory. Routing stays outside the graph. Leftover device memory keeps
-the expert images last used, and a miss streams that image from the host atlas.
+in host memory. Routing stays outside the graph. Device memory left after the
+key/value cache keeps hot expert images, and a miss streams that image from
+the host atlas.
 """
 
 from __future__ import annotations
@@ -36,8 +37,10 @@ from qwen36_35b_a3b.cuda.layout import (
     GDN_Z,
     HEAD_DIM,
     HIDDEN,
+    INT4_IMAGE,
     KV_HEADS,
     KV_RECORD,
+    KV_TOKEN_BYTES,
     KV_ROWS,
     LAYERS,
     LINEAR_HEAD_DIM,
@@ -99,6 +102,7 @@ class Qwen36Runtime:
         self.engine = Engine()
         self.atlas: ExpertAtlas | None = None
         self._product_room = False
+        self._moe_host = None
         self.session: Any = None
         manifest = self.root / "manifest.json"
         weights = self.root / "resident.bin"
@@ -127,7 +131,9 @@ class Qwen36Runtime:
             self._workspace()
             self._open_cache(self.max_pos)
             self._bind_layers()
-            self.atlas = ExpertAtlas(self.root, self.engine)
+            self.atlas = ExpertAtlas(
+                self.root, self.engine, reserve=CONTEXT_STEP * KV_TOKEN_BYTES
+            )
             from qwen36_35b_a3b.cuda.prefix import open_session
 
             self.session = open_session(self)
@@ -445,9 +451,30 @@ class Qwen36Runtime:
         self.engine.d2h(ids, self.route_ids)
         assert self.atlas is not None
         chosen = [int(ids[slot]) for slot in range(TOP_K)]
-        placed = [self.atlas.place(layer, expert, slot) for slot, expert in enumerate(chosen)]
+        self.atlas.begin(layer, chosen)
+        staged: list[tuple[int, int, int, int]] = []
+        for slot, expert in enumerate(chosen):
+            pointer, source, nbytes = self.atlas.bind(layer, expert)
+            if nbytes and pointer == self.atlas.stage:
+                pointer = self.atlas.stage + slot * INT4_IMAGE
+            plane = int(self.atlas.widths[layer, expert])
+            staged.append((pointer, source, nbytes, plane))
+        self.atlas.end()
+        queued: list[tuple[int, int, int]] = []
+        for pointer, source, nbytes, plane in staged:
+            event = self.engine.copy_async(pointer, source, nbytes) if nbytes else -1
+            queued.append((pointer, plane, event))
+        shared = base + "shared_expert."
         self.engine.zero_f32(self.moe, HIDDEN)
-        for slot, (image, plane) in enumerate(placed):
+        self._gemv(shared + "gate_up", normed, HIDDEN, self.up, GATE_ROWS)
+        self.engine.silu_mul(self.up, self.up + DOWN_INNER * 4, self.silu, DOWN_INNER)
+        self._gemv(shared + "down_proj.weight", self.silu, DOWN_INNER, self.proj, DOWN_ROWS)
+        coeff, _scale, _entry = self._at(base + "shared_expert_gate.weight")
+        self.engine.gemv_f16(coeff, normed, self.coeff, 1, HIDDEN)
+        self.engine.sig_add(self.moe, self.proj, self.coeff, HIDDEN)
+        for slot, (image, plane, event) in enumerate(queued):
+            if event >= 0:
+                self.engine.wait_copy(event)
             bits = 8 if plane == 8 else 4
             _gate_n, gate_scale, down, down_scale = expert_parts("int8" if bits == 8 else "int4")
             self._quant_gemv(image, image + gate_scale, normed, HIDDEN, self.up, GATE_ROWS, bits)
@@ -455,13 +482,6 @@ class Qwen36Runtime:
             self._quant_gemv(image + down, image + down_scale, self.silu, DOWN_INNER, self.proj,
                 DOWN_ROWS, bits)
             self.engine.scale_add_at(self.moe, self.proj, self.route_w + slot * 4, HIDDEN)
-        shared = base + "shared_expert."
-        self._gemv(shared + "gate_up", normed, HIDDEN, self.up, GATE_ROWS)
-        self.engine.silu_mul(self.up, self.up + DOWN_INNER * 4, self.silu, DOWN_INNER)
-        self._gemv(shared + "down_proj.weight", self.silu, DOWN_INNER, self.proj, DOWN_ROWS)
-        coeff, _scale, _entry = self._at(base + "shared_expert_gate.weight")
-        self.engine.gemv_f16(coeff, normed, self.coeff, 1, HIDDEN)
-        self.engine.sig_add(self.moe, self.proj, self.coeff, HIDDEN)
         self.engine.add(hidden, self.moe, HIDDEN)
 
     def _moe_tile(self, layer: int, count: int) -> None:
@@ -473,17 +493,16 @@ class Qwen36Runtime:
         self.engine.topk_tokens(self.moe_rows, self.route_ids_tile, self.route_w_tile, rows, TOP_K, count)
         chosen = np.empty(count * TOP_K, dtype=np.int32)
         self.engine.d2h(chosen, self.route_ids_tile)
-        groups: dict[int, list[tuple[int, int]]] = {}
-        for token in range(count):
-            start = token * TOP_K
-            for slot in range(TOP_K):
-                groups.setdefault(int(chosen[start + slot]), []).append((token, slot))
+        self._moe_host = None
         self.engine.zero_f32(self.moe_rows, HIDDEN * count)
+        experts, first = np.unique(chosen, return_index=True)
+        experts = experts[np.argsort(first)]
         assert self.atlas is not None
         if not self._product_room:
             self.atlas.release(64 << 20)
             self._product_room = True
-        width = len(groups)
+        self.atlas.begin(layer, [int(expert) for expert in experts])
+        width = int(experts.shape[0])
         device = np.empty(width, dtype=np.int64)
         host_src = np.empty(width, dtype=np.int64)
         copy_bytes = np.empty(width, dtype=np.int32)
@@ -496,7 +515,9 @@ class Qwen36Runtime:
         slot_index = np.empty(count * TOP_K, dtype=np.int32)
         parts = {"8": expert_parts("int8"), "4": expert_parts("int4")}
         cursor = 0
-        for index, (expert, members) in enumerate(groups.items()):
+        for index, expert_id in enumerate(experts):
+            expert = int(expert_id)
+            hits = np.flatnonzero(chosen == expert)
             pointer, source, nbytes = self.atlas.bind(layer, expert)
             plane = int(self.atlas.widths[layer, expert])
             _gate_n, gate_at, down_at, down_at_scale = parts["8" if plane == 8 else "4"]
@@ -504,19 +525,23 @@ class Qwen36Runtime:
             host_src[index] = source
             copy_bytes[index] = nbytes
             bits[index] = plane
-            group_n[index] = len(members)
+            group_n[index] = int(hits.shape[0])
             gate_scale[index] = gate_at
             down[index] = down_at
             down_scale[index] = down_at_scale
-            for token, slot in members:
-                token_index[cursor] = token
-                slot_index[cursor] = slot
-                cursor += 1
+            token_index[cursor : cursor + hits.shape[0]] = hits // TOP_K
+            slot_index[cursor : cursor + hits.shape[0]] = hits % TOP_K
+            cursor += int(hits.shape[0])
+        self.atlas.end()
         self.engine.grouped_mlp(
             device, host_src, copy_bytes, bits, token_index[:cursor], slot_index[:cursor], group_n,
             gate_scale, down, down_scale, self.normed, self.gather, self.up_rows, self.silu_rows,
             self.proj, self.moe_rows, self.route_w_tile, self.group_token, self.group_slot, HIDDEN,
             GATE_ROWS, DOWN_INNER, DOWN_ROWS, TOP_K,
+        )
+        self._moe_host = (
+            device, host_src, copy_bytes, bits, token_index, slot_index, group_n, gate_scale, down,
+            down_scale,
         )
         shared = base + "shared_expert."
         self._project(shared + "gate_up", self.normed, self.up_rows, GATE_ROWS, HIDDEN, count)

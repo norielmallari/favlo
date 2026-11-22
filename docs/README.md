@@ -52,6 +52,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen36_35b_a3b/research/synthetic-prompt-half.md](qwen36_35b_a3b/research/synthetic-prompt-half.md) | Qwen3.6-35B-A3B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e30-24h pack with half keys and values |
 | [qwen36_35b_a3b/research/synthetic-prompt-thinking-cuda.md](qwen36_35b_a3b/research/synthetic-prompt-thinking-cuda.md) | Qwen3.6-35B-A3B cold 512, 1024, 4096, and 10000-token prompts on CUDA int8-e10, thinking on |
 | [qwen36_35b_a3b/research/synthetic-prompt-cuda.md](qwen36_35b_a3b/research/synthetic-prompt-cuda.md) | Qwen3.6-35B-A3B cold 512, 1024, 4096, and 10000-token prompts on CUDA int8-e10 |
+| [qwen36_35b_a3b/research/synthetic-prompt-int4-cuda.md](qwen36_35b_a3b/research/synthetic-prompt-int4-cuda.md) | Qwen3.6-35B-A3B cold 512, 1024, 4096, and 10000-token prompts on CUDA int4 |
 | [qwen36_35b_a3b/performance.md](qwen36_35b_a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |
 | [gemma4_26b_a4b/README.md](gemma4_26b_a4b/README.md) | Gemma 4 26B-A4B summary |
 | [qwen35_4b/README.md](qwen35_4b/README.md) | Qwen3.5-4B language pipeline |

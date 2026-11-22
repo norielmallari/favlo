@@ -1,9 +1,8 @@
 """Qwen3.6-35B-A3B shapes and the CUDA opening.
 
 Activation planes, Gated DeltaNet state, and the key/value record match the
-Metal sizes. Weights do not: dense matrices are int8, and 10% of the routed
-experts are int8. The rest are int4. The int8 experts stay in VRAM. The int4
-experts stay in host RAM.
+Metal sizes. Dense matrices are int8. Routed experts are int4 and stay in
+host RAM. Device memory left after the key/value cache holds the hot images.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ HIDDEN = 2048
 LAYERS = 40
 EXPERTS = 256
 TOP_K = 8
-EXPERT_PERCENT = 10.0
+EXPERT_PERCENT = 0.0
 LANGUAGE_EXPERTS = LAYERS * EXPERTS
 VOCAB = 248_320
 EOS = 248_044

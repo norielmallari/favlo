@@ -39,9 +39,10 @@ def test_weight_and_cache_sizes() -> None:
     layout = _load("layout.py", "qwen36_cuda_layout_test")
     assert layout.INT8_IMAGE == 3_158_016
     assert layout.INT4_IMAGE == 1_585_152
-    assert layout.atlas_bytes() == 1_024 * layout.INT8_IMAGE + 9_216 * layout.INT4_IMAGE
-    assert layout.atlas_bytes() == 17_842_569_216
-    assert layout.pinned_expert_bytes() == 1_024 * layout.INT8_IMAGE
+    assert layout.atlas_bytes(1_024) == 1_024 * layout.INT8_IMAGE + 9_216 * layout.INT4_IMAGE
+    assert layout.atlas_bytes(1_024) == 17_842_569_216
+    assert layout.atlas_bytes() == 10_240 * layout.INT4_IMAGE
+    assert layout.pinned_expert_bytes() == 0
     assert layout.stage_bytes() == 8 * layout.INT4_IMAGE
     assert layout.cache_slots(layout.INT8_IMAGE * 3) == 3
     assert layout.cache_slots(layout.INT8_IMAGE - 1) == 0
@@ -93,6 +94,84 @@ def test_sector_read_roundtrip(tmp_path: Path) -> None:
         assert ctypes.string_at(dest, len(payload) - 4096) == payload[4096:]
     finally:
         disk.free_pages(dest)
+
+
+def test_page_tail_is_addressed_after_the_pin() -> None:
+    import numpy as np
+
+    from qwen36_35b_a3b.cuda.atlas import ExpertAtlas
+
+    atlas = ExpertAtlas.__new__(ExpertAtlas)
+    page = np.zeros(4, dtype=np.uint8)
+    atlas.host = 0
+    atlas._host_chunks = [(0, 10, 1000)]
+    atlas._page = page
+    atlas._page_ptr = int(page.ctypes.data)
+    atlas._page_at = 10
+    assert atlas._at_host(0) == 1000
+    assert atlas._at_host(10) == atlas._page_ptr
+    assert atlas._at_host(12) == atlas._page_ptr + 2
+    assert atlas._room(8, 6) == 2
+    assert atlas._room(10, 6) == 6
+
+
+def test_pinned_span_addresses_a_later_chunk() -> None:
+    from qwen36_35b_a3b.cuda.atlas import host_pointer
+
+    chunks = [(0, 100, 1000), (100, 50, 5000)]
+    assert host_pointer(0, chunks, 0) == 1000
+    assert host_pointer(0, chunks, 100) == 5000
+    assert host_pointer(0, chunks, 120) == 5020
+    assert host_pointer(9000, [], 3) == 9003
+
+
+def test_stream_sends_reasoning_before_the_reply() -> None:
+    from favlo.reply import MemoryReply
+    from qwen36_35b_a3b.cuda.chat import _stream
+
+    class _Runtime:
+        def decode(self, ids: list[int]) -> str:
+            words = {1: "Need", 2: " to", 3: "</think>", 4: "4"}
+            return "".join(words[token] for token in ids)
+
+        def generate(self, prompt, **kwargs):
+            del prompt
+            for token in (1, 2, 3, 4):
+                kwargs["on_token"](token)
+
+    reply = MemoryReply("qwen36-35b-a3b")
+    _stream(reply, _Runtime(), {}, [9], 8, True, None, 0.0, 1.0, 1, 0.0, 0.0, False)
+    seen: list[tuple[str, object]] = []
+    for payload in reply.events:
+        kind = payload.get("type")
+        if kind == "response.reasoning_text.delta":
+            seen.append(("reasoning", payload.get("delta")))
+        elif kind == "response.output_text.delta":
+            seen.append(("content", payload.get("delta")))
+    assert seen == [("reasoning", "Need"), ("reasoning", " to"), ("content", "4")]
+    done = [
+        payload["item"]
+        for payload in reply.events
+        if payload.get("type") == "response.output_item.done"
+        and isinstance(payload.get("item"), dict)
+        and payload["item"].get("type") == "reasoning"
+    ]
+    assert done[0]["encrypted_content"] == "Need to"
+
+
+def test_s3_fifo_drops_a_one_hit_and_keeps_a_second_request() -> None:
+    from qwen36_35b_a3b.cuda.atlas import S3Fifo
+
+    policy = S3Fifo(10 * 16, 16)
+    policy.insert((0, 0))
+    policy.insert((0, 1))
+    policy.insert((0, 2))
+    policy.hit((0, 0))
+    dropped = policy.relieve(set())
+    assert dropped == (0, 1)
+    assert policy.place((0, 0)) == "m"
+    policy.insert((0, 1))
+    assert policy.place((0, 1)) == "m"
 
 
 def test_sampling_card() -> None:

@@ -27,6 +27,16 @@ static cudaGraphExec_t g_graph[kGraphs] = {};
 static cudaEvent_t g_forks[kForks] = {};
 static cudaEvent_t g_joins[kForks] = {};
 static int g_fork_at = 0;
+static int g_splits = 1;
+constexpr int kAttendHeads = 16;
+constexpr int kAttendDim = 256;
+constexpr int kAttendSplits = 128;
+constexpr int kCopies = 32;
+static float* g_attend_peak = nullptr;
+static float* g_attend_sum = nullptr;
+static float* g_attend_acc = nullptr;
+static cudaEvent_t g_copies[kCopies] = {};
+static int g_copy_next = 0;
 static int* g_step = nullptr;
 __device__ int* g_step_ptr;
 static int8_t* g_zero = nullptr;
@@ -194,6 +204,49 @@ __global__ void gemv_kernel(
     acc = block_sum(acc);
     if (threadIdx.x == 0) {
         destination[static_cast<long long>(token) * rows + row] = acc * wscale[row];
+    }
+}
+
+// One block converts the int4 activation once. Every warp in the block reuses it.
+__global__ void gemv_i4_cached(
+    const void* weight,
+    const float* wscale,
+    const void* codes,
+    const float* ascales,
+    float* destination,
+    int rows,
+    int inner) {
+    extern __shared__ __align__(16) char shared_mix[];
+    int packed = inner >> 1;
+    int blocks = inner >> 5;
+    auto* act = reinterpret_cast<uint8_t*>(shared_mix);
+    auto* scales = reinterpret_cast<float*>(act + packed);
+    const auto* raw = static_cast<const uint8_t*>(codes);
+    for (int col = threadIdx.x; col < packed; col += blockDim.x) {
+        act[col] = raw[col];
+    }
+    for (int block = threadIdx.x; block < blocks; block += blockDim.x) {
+        scales[block] = ascales[block];
+    }
+    __syncthreads();
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int warps = blockDim.x >> 5;
+    int row = blockIdx.x * warps + warp;
+    if (row >= rows) {
+        return;
+    }
+    const auto* line = static_cast<const uint8_t*>(weight) + (static_cast<long long>(row) * inner) / 2;
+    float acc = 0.0f;
+    for (int block = lane; block < blocks; block += 32) {
+        int dot = dot32_i4(line + block * 16, act + block * 16);
+        acc += static_cast<float>(dot) * scales[block];
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_xor_sync(0xffffffffu, acc, offset);
+    }
+    if (lane == 0) {
+        destination[row] = acc * wscale[row];
     }
 }
 
@@ -630,6 +683,86 @@ __global__ void attend_kernel(
         acc += prob * dequant_kv(v_cache + index * 264, col);
     }
     destination[head * 256 + col] = running_sum == 0.0f ? 0.0f : acc / running_sum;
+}
+
+// Each block owns one slice of the key span. The join mixes those partials.
+__global__ void attend_split_kernel(
+    const int8_t* k_cache,
+    const int8_t* v_cache,
+    const float* query,
+    int count,
+    int layer,
+    int full,
+    float scale,
+    int splits,
+    float* peaks,
+    float* sums,
+    float* acc) {
+    int head = blockIdx.x;
+    int split = blockIdx.y;
+    int col = threadIdx.x;
+    if (head >= kAttendHeads || col >= kAttendDim || split >= splits) {
+        return;
+    }
+    int kv = head >> 3;
+    int seen = count < 0 ? step_at(1) + 1 : count;
+    int chunk = (seen + splits - 1) / splits;
+    int pos0 = split * chunk;
+    int pos1 = pos0 + chunk;
+    if (pos1 > seen) {
+        pos1 = seen;
+    }
+    float q = query[head * kAttendDim + col];
+    float running_max = -1.0e30f;
+    float running_sum = 0.0f;
+    float mine = 0.0f;
+    for (int token = pos0; token < pos1; ++token) {
+        long long index = (static_cast<long long>(token) * full + layer) * 2 + kv;
+        float part = q * dequant_kv(k_cache + index * 264, col);
+        float score = block_sum(part) * scale;
+        if (score > running_max) {
+            float factor = expf(running_max - score);
+            mine *= factor;
+            running_sum *= factor;
+            running_max = score;
+        }
+        float prob = expf(score - running_max);
+        running_sum += prob;
+        mine += prob * dequant_kv(v_cache + index * 264, col);
+    }
+    int part = split * kAttendHeads + head;
+    if (col == 0) {
+        peaks[part] = running_max;
+        sums[part] = running_sum;
+    }
+    acc[static_cast<long long>(part) * kAttendDim + col] = mine;
+}
+
+__global__ void attend_join_kernel(
+    float* destination, int splits, const float* peaks, const float* sums, const float* acc) {
+    int head = blockIdx.x;
+    int col = threadIdx.x;
+    if (head >= kAttendHeads || col >= kAttendDim) {
+        return;
+    }
+    float running_max = -1.0e30f;
+    float running_sum = 0.0f;
+    float mine = 0.0f;
+    for (int split = 0; split < splits; ++split) {
+        int part = split * kAttendHeads + head;
+        float part_peak = peaks[part];
+        float part_sum = sums[part];
+        if (part_sum == 0.0f && part_peak < -1.0e20f) {
+            continue;
+        }
+        float next = fmaxf(running_max, part_peak);
+        float left = expf(running_max - next);
+        float right = expf(part_peak - next);
+        running_sum = running_sum * left + part_sum * right;
+        mine = acc[static_cast<long long>(part) * kAttendDim + col] * right + mine * left;
+        running_max = next;
+    }
+    destination[head * kAttendDim + col] = running_sum == 0.0f ? 0.0f : mine / running_sum;
 }
 
 __global__ void gate_mul_kernel(float* values, const float* gate, int width) {
@@ -1478,6 +1611,32 @@ API int engine_open() {
         return status;
     }
     g_stream = g_main;
+    g_splits = prop.multiProcessorCount * 2;
+    if (g_splits > kAttendSplits) {
+        g_splits = kAttendSplits;
+    }
+    if (g_splits < 1) {
+        g_splits = 1;
+    }
+    for (int copy = 0; copy < kCopies; ++copy) {
+        status = check(cudaEventCreateWithFlags(&g_copies[copy], cudaEventDisableTiming));
+        if (status != 0) {
+            return status;
+        }
+    }
+    size_t parts = static_cast<size_t>(g_splits) * kAttendHeads;
+    status = check(cudaMalloc(&g_attend_peak, parts * sizeof(float)));
+    if (status != 0) {
+        return status;
+    }
+    status = check(cudaMalloc(&g_attend_sum, parts * sizeof(float)));
+    if (status != 0) {
+        return status;
+    }
+    status = check(cudaMalloc(&g_attend_acc, parts * kAttendDim * sizeof(float)));
+    if (status != 0) {
+        return status;
+    }
     for (int fork = 0; fork < kForks; ++fork) {
         status = check(cudaEventCreateWithFlags(&g_forks[fork], cudaEventDisableTiming));
         if (status != 0) {
@@ -1544,6 +1703,21 @@ API void* engine_pin(size_t nbytes) {
     return pointer;
 }
 
+API void* engine_host_alloc(size_t nbytes) {
+    void* pointer = nullptr;
+    if (cudaHostAlloc(&pointer, nbytes == 0 ? 1 : nbytes, cudaHostAllocWriteCombined) != cudaSuccess) {
+        cudaGetLastError();
+        return nullptr;
+    }
+    return pointer;
+}
+
+API void engine_host_free(void* pointer) {
+    if (pointer != nullptr) {
+        cudaFreeHost(pointer);
+    }
+}
+
 API void engine_unpin(void* pointer) {
     if (pointer != nullptr) {
         cudaFreeHost(pointer);
@@ -1574,6 +1748,37 @@ API void engine_unregister(void* pointer) {
 
 API int engine_h2d(void* destination, const void* source, size_t nbytes) {
     return check(cudaMemcpyAsync(destination, source, nbytes, cudaMemcpyHostToDevice, g_stream));
+}
+
+API int engine_copy_async(void* destination, const void* source, size_t nbytes, int* event_id) {
+    if (destination == nullptr || source == nullptr || nbytes == 0 || event_id == nullptr || g_side == nullptr) {
+        return 1;
+    }
+    if (g_copy_next >= kCopies) {
+        int status = check(cudaStreamSynchronize(g_stream));
+        if (status != 0) {
+            return status;
+        }
+        g_copy_next = 0;
+    }
+    int slot = g_copy_next++;
+    int status = check(cudaMemcpyAsync(destination, source, nbytes, cudaMemcpyHostToDevice, g_side));
+    if (status != 0) {
+        return status;
+    }
+    status = check(cudaEventRecord(g_copies[slot], g_side));
+    if (status != 0) {
+        return status;
+    }
+    *event_id = slot;
+    return 0;
+}
+
+API int engine_wait_copy(int event_id) {
+    if (event_id < 0 || event_id >= kCopies || g_copies[event_id] == nullptr) {
+        return 1;
+    }
+    return check(cudaStreamWaitEvent(g_stream, g_copies[event_id], 0));
 }
 
 API int engine_d2h(void* destination, const void* source, size_t nbytes) {
@@ -1610,6 +1815,22 @@ API int engine_gemv(
     int bits,
     int tokens) {
     dim3 grid(rows, tokens);
+    if (tokens == 1 && inner <= 8192 && (inner & 31) == 0) {
+        int threads = 256;
+        int warps = threads / 32;
+        int blocks = (rows + warps - 1) / warps;
+        if (bits == 8) {
+            size_t smem = static_cast<size_t>(inner) + static_cast<size_t>(inner / 32) * sizeof(float);
+            gemv_i8_cached<<<blocks, threads, smem, g_stream>>>(
+                static_cast<const int8_t*>(weight), wscale, static_cast<const int8_t*>(codes), ascales, destination,
+                rows, inner);
+        } else {
+            size_t smem = static_cast<size_t>(inner / 2) + static_cast<size_t>(inner / 32) * sizeof(float);
+            gemv_i4_cached<<<blocks, threads, smem, g_stream>>>(
+                weight, wscale, codes, ascales, destination, rows, inner);
+        }
+        return check(cudaGetLastError());
+    }
     if (bits == 8) {
         gemv_i8_warp<<<grid, 32, 0, g_stream>>>(
             static_cast<const int8_t*>(weight),
@@ -1807,6 +2028,15 @@ API int engine_attend(
     int layer,
     int full,
     float scale) {
+    if (g_attend_peak != nullptr && g_splits > 1) {
+        dim3 grid(kAttendHeads, g_splits);
+        attend_split_kernel<<<grid, kAttendDim, 0, g_stream>>>(
+            static_cast<const int8_t*>(k_cache), static_cast<const int8_t*>(v_cache), query, count, layer, full, scale,
+            g_splits, g_attend_peak, g_attend_sum, g_attend_acc);
+        attend_join_kernel<<<kAttendHeads, kAttendDim, 0, g_stream>>>(
+            destination, g_splits, g_attend_peak, g_attend_sum, g_attend_acc);
+        return check(cudaGetLastError());
+    }
     attend_kernel<<<16, 256, 0, g_stream>>>(
         static_cast<const int8_t*>(k_cache),
         static_cast<const int8_t*>(v_cache),
@@ -2199,7 +2429,7 @@ API int engine_grouped_mlp(
     if (status != 0) {
         return status;
     }
-    int off[256];
+    static int off[256];
     int cursor = 0;
     for (int group = 0; group < groups; ++group) {
         off[group] = cursor;
@@ -2306,11 +2536,7 @@ API int engine_grouped_mlp(
             return status;
         }
     }
-    status = check(cudaGetLastError());
-    if (status != 0) {
-        return status;
-    }
-    return check(cudaStreamSynchronize(g_stream));
+    return check(cudaGetLastError());
 }
 
 API int engine_gemm_pair(

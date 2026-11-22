@@ -72,6 +72,10 @@ def _bind(lib: ctypes.CDLL) -> None:
     lib.engine_pin.argtypes = [size]
     lib.engine_unpin.restype = None
     lib.engine_unpin.argtypes = [void]
+    lib.engine_host_alloc.restype = void
+    lib.engine_host_alloc.argtypes = [size]
+    lib.engine_host_free.restype = None
+    lib.engine_host_free.argtypes = [void]
     lib.engine_register.restype = integer
     lib.engine_register.argtypes = [void, size]
     lib.engine_register_ro.restype = integer
@@ -82,6 +86,10 @@ def _bind(lib: ctypes.CDLL) -> None:
         fn = getattr(lib, name)
         fn.restype = integer
         fn.argtypes = [void, void, size]
+    lib.engine_copy_async.restype = integer
+    lib.engine_copy_async.argtypes = [void, void, size, ctypes.POINTER(integer)]
+    lib.engine_wait_copy.restype = integer
+    lib.engine_wait_copy.argtypes = [integer]
     lib.engine_zero.restype = integer
     lib.engine_zero.argtypes = [void, size]
     lib.engine_sync.restype = integer
@@ -221,6 +229,15 @@ class Engine:
         if pointer:
             self.lib.engine_unpin(pointer)
 
+    def host_alloc(self, nbytes: int) -> int:
+        """Write-combined pinned bytes. Zero when the driver refuses."""
+        pointer = self.lib.engine_host_alloc(max(int(nbytes), 16))
+        return int(pointer or 0)
+
+    def host_free(self, pointer: int) -> None:
+        if pointer:
+            self.lib.engine_host_free(pointer)
+
     def register(self, pointer: int, nbytes: int) -> bool:
         """Pin existing host bytes. False when the driver refuses."""
         if not pointer or nbytes < 1:
@@ -257,6 +274,15 @@ class Engine:
 
     def h2d_ptr(self, destination: int, source: int, nbytes: int) -> None:
         self._check(self.lib.engine_h2d(destination, source, int(nbytes)))
+
+    def copy_async(self, destination: int, source: int, nbytes: int) -> int:
+        """Copy on the side stream. The returned event is waited on the compute stream."""
+        event = ctypes.c_int()
+        self._check(self.lib.engine_copy_async(destination, source, int(nbytes), ctypes.byref(event)))
+        return int(event.value)
+
+    def wait_copy(self, event: int) -> None:
+        self._check(self.lib.engine_wait_copy(int(event)))
 
     def d2h(self, host: np.ndarray | ctypes.Array[Any], pointer: int) -> None:
         if isinstance(host, np.ndarray):

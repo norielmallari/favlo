@@ -63,3 +63,11 @@ The banner prints the loaded plane, MTP, thinking, and the decode cap.
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+19 November 2026. The same instruct banner passed again after an empty expert slot is taken from a list, a full pool takes the smallest stamp, and the expert launch returns while its copy is still queued. A 512-token prompt prefilled at 409.86 tok/s and decoded 128 tokens at 21.50 tok/s. A 1024-token prompt prefilled at 422.93 tok/s and decoded at 19.25 tok/s. A 4096-token prompt prefilled at 386.11 tok/s and decoded at 10.81 tok/s. A 10000-token prompt prefilled at 327.16 tok/s and decoded at 5.51 tok/s. The end-to-end rates were 88.89, 127.01, 188.15, and 188.29 tok/s.
+
+Queries: "409.86 OR 422.93 OR 386.11 OR 327.16 Qwen3.6-35B-A3B tok/s".
+
+- [llm-bench.io](https://llm-bench.io/models/qwen3-6-35b-a3b) lists a peak of 437.3 tok/s on an RTX 5090 with vLLM. That is not 409.86 with 21.50, and it is not this int8-e10 table.
+- [Token Atlas](https://tokatlas.github.io/models/qwen3-6-35b-a3b/) lists other Qwen3.6-35B-A3B rates. It does not list 409.86, 422.93, 386.11, or 327.16.
+- The search did not find 409.86 and 21.50, 422.93 and 19.25, 386.11 and 10.81, or 327.16 and 5.51 in those sources.

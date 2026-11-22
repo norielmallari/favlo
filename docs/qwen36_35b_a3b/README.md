@@ -12,7 +12,7 @@ Summary for the `qwen36_35b_a3b` language pipeline. Kernels, the packed record, 
 - The served context window is 131072 tokens.
 - The key/value plane is half. `fp8_e4m3`, `e2m1`, and `f32` are the other widths.
 - The default packed record on Apple Silicon is `Qwen3.6-35B-A3B-fp8-e20`.
-- On Windows the packed record is `Qwen3.6-35B-A3B-int8-e10`.
+- On Windows the packed record is `Qwen3.6-35B-A3B-int4`. `uv run favlo --qwen36_35b_a3b quantize` packs it from the BF16 checkout. `--expert-int8 10` packs `Qwen3.6-35B-A3B-int8-e10`.
 
 After changing an open-time registry field, unload the resident model:
 
@@ -198,4 +198,5 @@ uv run favlo --qwen36_35b_a3b delete qwen36_35b_a3b
 - [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md) — cold 512-, 1024-, 4096-, and 10000-token prompts on `half`
 - [research/synthetic-prompt-thinking-cuda.md](research/synthetic-prompt-thinking-cuda.md) — cold 512-, 1024-, 4096-, and 10000-token prompts on CUDA, thinking on
 - [research/synthetic-prompt-cuda.md](research/synthetic-prompt-cuda.md) — cold 512-, 1024-, 4096-, and 10000-token prompts on CUDA int8-e10
+- [research/synthetic-prompt-int4-cuda.md](research/synthetic-prompt-int4-cuda.md) — cold 512-, 1024-, 4096-, and 10000-token prompts on CUDA int4
 - [research/fp16-peak-restore.md](research/fp16-peak-restore.md) — float16 peak-restore bound

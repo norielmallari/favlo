@@ -1,4 +1,4 @@
-"""``favlo --qwen36_35b_a3b`` on Windows. Download, then pack the int8-e10 record."""
+"""``favlo --qwen36_35b_a3b`` on Windows. Download, then pack the int4 record."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     quant.add_argument("--expert-int8", type=float, default=EXPERT_PERCENT)
     quant.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     setup = sub.add_parser("setup",
-        help="download the official checkpoint and pack the int8 expert budget")
+        help="download the official checkpoint and pack the int4 record")
     setup.add_argument("--src", type=Path, default=None)
     setup.add_argument("--keep-bf16", action="store_true")
     setup.add_argument("--expert-int8", type=float, default=EXPERT_PERCENT)

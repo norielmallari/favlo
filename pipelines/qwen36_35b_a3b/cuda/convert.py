@@ -1,8 +1,7 @@
 """Pack a BF16 checkout into the CUDA record.
 
-Dense language matrices are int8. Twenty percent of the routed experts, ranked
-by int4 restoration error, are int8. The rest are int4. Norms, the router, and
-the convolution stay fp16. The expert images are the host atlas.
+Dense language matrices are int8. Routed experts are int4. Norms, the router,
+and the convolution stay fp16. The expert images are the host atlas.
 """
 
 from __future__ import annotations
@@ -148,6 +147,8 @@ def _rank(
         body = json.loads(path.read_text(encoding="utf-8"))
         if int(body.get("count", -1)) == count and int(body.get("pool", 0)) == LANGUAGE_EXPERTS:
             return {(int(layer), int(expert)) for layer, expert in body["promoted"]}
+    if count <= 0:
+        return set()
     scores: dict[tuple[int, int], list[float]] = {}
     shards = _shards(weight_map, expert=True)
     seen = 0

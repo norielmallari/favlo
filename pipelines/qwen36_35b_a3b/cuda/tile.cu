@@ -103,6 +103,46 @@ __global__ void gemv_i8_warp(
     }
 }
 
+// One block converts the activation once. Every warp in the block reuses it.
+__global__ void gemv_i8_cached(
+    const int8_t* weight,
+    const float* scale,
+    const int8_t* codes,
+    const float* code_scale,
+    float* destination,
+    int rows,
+    int inner) {
+    extern __shared__ __align__(16) char shared_mix[];
+    auto* act = reinterpret_cast<int8_t*>(shared_mix);
+    int blocks = inner >> 5;
+    auto* scales = reinterpret_cast<float*>(act + inner);
+    for (int col = threadIdx.x; col < inner; col += blockDim.x) {
+        act[col] = codes[col];
+    }
+    for (int block = threadIdx.x; block < blocks; block += blockDim.x) {
+        scales[block] = code_scale[block];
+    }
+    __syncthreads();
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int warps = blockDim.x >> 5;
+    int row = blockIdx.x * warps + warp;
+    if (row >= rows) {
+        return;
+    }
+    const int4* line = reinterpret_cast<const int4*>(weight + static_cast<long long>(row) * inner);
+    const int4* avec = reinterpret_cast<const int4*>(act);
+    int vecs = inner >> 4;
+    float acc = 0.0f;
+    for (int vec = lane; vec < vecs; vec += 32) {
+        acc += static_cast<float>(dot16(line[vec], avec[vec])) * scales[vec >> 1];
+    }
+    acc = warp_sum(acc);
+    if (lane == 0) {
+        destination[row] = acc * scale[row];
+    }
+}
+
 __device__ void stage_tile(
     signed char* a_dst,
     signed char* b_dst,
