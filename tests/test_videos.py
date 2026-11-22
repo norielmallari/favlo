@@ -14,6 +14,15 @@ from favlo.videos import (
 )
 
 
+def test_a_lone_avi_is_the_media_file(tmp_path) -> None:
+    from favlo.media_result import pack_media
+
+    store_source("video_raw", b"RIFF-raw", home=tmp_path)
+    packed = pack_media({"id": "video_raw"}, {"video_home": tmp_path})
+    assert packed["mediaUri"].endswith("/video_raw.avi")
+    assert not video_path(tmp_path, "video_raw").is_file()
+
+
 def test_a_fresh_clip_stays_and_an_old_one_is_removed(tmp_path) -> None:
     settings_path(tmp_path).write_text(
         json.dumps({"video_ttl_seconds": 60}),

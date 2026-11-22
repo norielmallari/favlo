@@ -193,11 +193,13 @@ A video client can also call `wan22_i2v__generate_video`.
 - `overlap` is the shared latent frames. It defaults to 1 when `split` is set. `0` places the slices end to end. The last frame of one slice is the opening of the next, so that frame is decoded twice, and those two copies are averaged into one frame.
 - A later chunk is its own full run. Overlap 0 opens it on the previous slice's last frame. A larger overlap opens it on the first shared frame, encoded the same way as a fresh still. Each run is decoded on its own. A larger overlap crossfades the shared frames, and a longer overlap makes that fade longer.
 - `social=true` pads to 1080p, motion-interpolates to 30 fps, and encodes H.264 High for short-form upload. Omit it, or pass false, for the default CRF encode at the AVI size and rate.
+- `mp4=false` stores the uncompressed AVI and skips that encode. The result URI is the AVI. Omit `mp4`, or pass true, to encode the MP4. `social=true` still encodes an MP4.
 
 ```text
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png last_image=file:///absolute/end.png size=576x320 frames=81 split=2 overlap=1
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=720x1280 frames=81 split=2 overlap=0 social=true
+uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5 mp4=false
 ```
 
 - `favlo media` does not start the listener.

@@ -51,6 +51,7 @@ class VideoFields(NamedTuple):
     split: int | None = None
     overlap: int | None = None
     social: bool = False
+    mp4: bool = True
 
 
 def handle_chat(
@@ -94,6 +95,8 @@ class Pipeline(BulkMediaPipeline):
             fields["overlap"] = request.overlap
         if request.social:
             fields["social"] = True
+        if not request.mp4:
+            fields["mp4"] = False
         return fields
 
     def identity(self, request: VideoFields) -> tuple[Any, ...]:
@@ -110,6 +113,7 @@ class Pipeline(BulkMediaPipeline):
             request.split,
             request.overlap,
             request.social,
+            request.mp4,
         )
 
     def matches(self, request: VideoFields, identity: Any) -> bool:
@@ -165,13 +169,11 @@ class Pipeline(BulkMediaPipeline):
     ) -> None:
         del runtime
         progress = call.progress
-        if progress is not None:
-            progress.stage("mp4")
-        write_mp4(
-            store_source(job["id"], result, home=home),
-            request.quality,
-            social=request.social,
-        )
+        source = store_source(job["id"], result, home=home)
+        if request.mp4:
+            if progress is not None:
+                progress.stage("mp4")
+            write_mp4(source, request.quality, social=request.social)
         sweep_videos(table, home=home)
         return None
 
@@ -237,6 +239,10 @@ class Pipeline(BulkMediaPipeline):
                             "type": "boolean",
                             "description": "Pad to 1080p, 30 fps minterpolate, H.264 High for short-form upload.",
                         },
+                        "mp4": {
+                            "type": "boolean",
+                            "description": "False stores the AVI and skips the MP4.",
+                        },
                     },
                     "required": ["prompt", "size", "image"],
                 },
@@ -294,7 +300,30 @@ def video_fields(body: dict[str, Any]) -> VideoFields:
         split,
         overlap,
         _social(body),
+        _mp4(body),
     )
+
+
+def _mp4(body: dict[str, Any]) -> bool:
+    """True encodes the served MP4. False leaves the uncompressed AVI."""
+    value = body.get("mp4")
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        kept = value
+    elif isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            kept = True
+        elif lowered in ("0", "false", "no", "off", ""):
+            kept = False
+        else:
+            raise VideoRequestError("mp4 must be a boolean", "mp4")
+    else:
+        raise VideoRequestError("mp4 must be a boolean", "mp4")
+    if not kept and _social(body):
+        raise VideoRequestError("social encodes an MP4", "mp4")
+    return kept
 
 
 def _social(body: dict[str, Any]) -> bool:

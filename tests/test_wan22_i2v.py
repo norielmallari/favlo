@@ -610,6 +610,7 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
     assert short.last_image is None
     assert short.split is None
     assert short.social is False
+    assert short.mp4 is True
     guided = video_fields(
         {
             "prompt": "move",
@@ -648,6 +649,20 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
         raise AssertionError("quality was accepted")
     assert video_fields({**level, "social": True}).social is True
     assert video_fields({**level, "social": "true"}).social is True
+    assert video_fields({**level, "mp4": False}).mp4 is False
+    assert video_fields({**level, "mp4": "false"}).mp4 is False
+    try:
+        video_fields({**level, "mp4": "maybe"})
+    except VideoRequestError as exc:
+        assert exc.param == "mp4"
+    else:
+        raise AssertionError("mp4 was accepted")
+    try:
+        video_fields({**level, "mp4": False, "social": True})
+    except VideoRequestError as exc:
+        assert exc.param == "mp4"
+    else:
+        raise AssertionError("social with no mp4 was accepted")
     try:
         video_fields({**level, "social": "maybe"})
     except VideoRequestError as exc:
@@ -656,6 +671,34 @@ def test_video_request_defaults_to_320p_and_81_frames() -> None:
         raise AssertionError("social was accepted")
     assert _seconds_label(FIVE_SEC_FRAMES) == "5.0625"
     assert _seconds_label(9) == "0.5625"
+
+
+def test_mp4_false_stores_the_avi(tmp_path, monkeypatch) -> None:
+    from favlo.media_pipeline import MediaCall
+    from wan22_i2v.metal41.chat import Pipeline
+
+    encoded = _png()
+    fields = video_fields(
+        {"prompt": "move", "image": encoded, "frames": 5, "size": "16x16", "mp4": False}
+    )
+    encoded_mp4 = {"ran": False}
+
+    def store(video_id, payload, *, home=None):
+        del home
+        path = tmp_path / f"{video_id}.avi"
+        path.write_bytes(payload)
+        return path
+
+    def encode(*_args, **_kwargs):
+        encoded_mp4["ran"] = True
+        raise AssertionError("mp4 encode ran")
+
+    monkeypatch.setattr("wan22_i2v.metal41.chat.store_source", store)
+    monkeypatch.setattr("wan22_i2v.metal41.chat.write_mp4", encode)
+    monkeypatch.setattr("wan22_i2v.metal41.chat.sweep_videos", lambda *_args, **_kwargs: None)
+    Pipeline().pack(None, fields, b"RIFF", {"id": "video_raw"}, tmp_path, {}, MediaCall())
+    assert (tmp_path / "video_raw.avi").read_bytes() == b"RIFF"
+    assert encoded_mp4["ran"] is False
 
 
 def test_video_request_accepts_a_last_still_and_a_split() -> None:

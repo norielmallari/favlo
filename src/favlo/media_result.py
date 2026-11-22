@@ -64,7 +64,7 @@ def _stored(state: dict[str, Any], kind: str, item_id: str) -> Path | None:
     from favlo.images import image_path
     from favlo.logs import favlo_home
     from favlo.music import music_dir
-    from favlo.videos import video_path
+    from favlo.videos import source_path, video_path
     from favlo.voice import voice_dir
 
     home = _home(state, kind)
@@ -74,6 +74,10 @@ def _stored(state: dict[str, Any], kind: str, item_id: str) -> Path | None:
         path = image_path(home, item_id)
     elif kind == "video":
         path = video_path(home, item_id)
+        if not path.is_file():
+            avi = source_path(home, item_id)
+            if avi.is_file():
+                return avi
     else:
         folder = music_dir(home) if kind == "music" else voice_dir(home)
         for suffix in ("wav", "mp3", "flac"):

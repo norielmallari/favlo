@@ -287,6 +287,7 @@ save_registry(data)
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5
 uv run favlo media --pipeline wan22_i2v --model Wan2.2-I2V-A14B-int8 --out pack.json prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5
 uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=720x1280 frames=81 split=2 overlap=0 social=true
+uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fixed camera." image=file:///absolute/still.png size=576x320 frames=5 mp4=false
 ```
 
 - `prompt`, `image` (or `input_reference`), and `size` are required.
@@ -296,6 +297,7 @@ uv run favlo media --pipeline wan22_i2v prompt="The cube slides to the right. Fi
 - `frames` defaults to 81.
 - `split` and `overlap` are optional. `overlap` requires `split`. A field named `context` is rejected.
 - `social` is optional. `true` pads to 1080p, interpolates to 30 fps, and encodes H.264 High for short-form upload.
+- `mp4` is optional and defaults to true. `false` stores the AVI and skips the MP4. The result URI is that AVI.
 - This is the command that writes the clip.
 - The pipeline command does not.
 
@@ -380,6 +382,8 @@ The MP4 stored for the job uses that reported level.
 There is no later call that re-encodes another level.
 
 `social` defaults to false. When true, the pack pads the AVI into the matching 1080p canvas (1080×1920, 1920×1080, or 1080×1080), motion-interpolates to 30 fps (`minterpolate` mci/aobmc), and encodes H.264 High `yuv420p` at about 8 Mbps for `high` (4/6/8/10/12 Mbps across the five reported levels), closed GOP, `+faststart`. That path is for TikTok, Instagram Reels, Facebook Reels, and YouTube Shorts. The AVI size and rate stay the CRF path when `social` is omitted or false.
+
+`mp4` defaults to true. `false` stores the AVI and does not encode. The result URI is that AVI. `social` with `mp4` false is rejected.
 
 - `seed` defaults to 0.
 - `negative_prompt` defaults to empty.
