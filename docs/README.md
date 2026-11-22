@@ -36,6 +36,8 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [inkling_2_mini/ceilings.md](inkling_2_mini/ceilings.md) | Inkling 2 Mini bandwidth ceiling and kernel costs |
 | [inkling_2_mini/research/synthetic-prompt-half.md](inkling_2_mini/research/synthetic-prompt-half.md) | Inkling 2 Mini cold 512, 1024, 4096, and 10000-token prompts on the GPTQ dense fp4 pack with half keys and values |
 | [inkling_2_mini/research/coding-text-half.md](inkling_2_mini/research/coding-text-half.md) | Inkling 2 Mini text coding agent on the GPTQ dense fp4 pack with half keys and values |
+| [inkling_2_mini/research/intelligence-smoke.md](inkling_2_mini/research/intelligence-smoke.md) | Inkling 2 Mini first 30 rows of IFEval, GSM8K, and HumanEval |
+| [inkling_2_mini/benchmarks.md](inkling_2_mini/benchmarks.md) | Inkling 2 Mini harness scores against `serve` |
 | [qwen36_35b_a3b/research/fp16-peak-restore.md](qwen36_35b_a3b/research/fp16-peak-restore.md) | Qwen3.6-35B-A3B float16 peak-restore bound |
 | [qwen36_35b_a3b/research/kernel-ceilings.md](qwen36_35b_a3b/research/kernel-ceilings.md) | Qwen3.6-35B-A3B isolated dispatch sum |
 | [qwen36_35b_a3b/research/recorded-forward.md](qwen36_35b_a3b/research/recorded-forward.md) | Qwen3.6-35B-A3B recorded prefill and decode sums |

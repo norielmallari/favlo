@@ -1,11 +1,11 @@
 """Resident expert images.
 
-Expert bytes stay in the safetensors file. NVFP4 tensors are requantized to
-Metal fp4 (E8M0 per 32) on the device, one tensor per dispatch. MXFP8
-tensors are copied as stored. When every image does not fit beside the
-dense weights, the half key/value cache, and the activation buffers, the
-atlas keeps eight slots per projection and stages the experts a token
-routes before they run.
+A baked ``experts-fp4.safetensors`` is read straight into device buffers, in
+8 MiB pieces. Without that file, NVFP4 tensors are requantized to Metal fp4
+on the device and MXFP8 tensors are copied as stored. When every image does
+not fit beside the dense weights, the half key/value cache, and the
+activation buffers, the atlas keeps eight slots per projection and stages
+the experts a token routes before they run.
 """
 
 from __future__ import annotations
@@ -99,12 +99,14 @@ class ExpertAtlas:
         self.complete = bool(complete)
         self._spans: list[Any] = []
         self._staged: dict[int, tuple[int, ...]] = {}
+        self._baked = weights.experts is not None
         if complete:
             self._load_all()
             return
-        self._raw_data = [self._span(TOP_K * _MAX_DATA) for _ in range(2)]
-        self._raw_scale = [self._span(TOP_K * _MAX_SCALE) for _ in range(2)]
-        self._global = [self._span(TOP_K * 4) for _ in range(2)]
+        if not self._baked:
+            self._raw_data = [self._span(TOP_K * _MAX_DATA) for _ in range(2)]
+            self._raw_scale = [self._span(TOP_K * _MAX_SCALE) for _ in range(2)]
+            self._global = [self._span(TOP_K * 4) for _ in range(2)]
         stage_data = [self._span(TOP_K * _MAX_DATA) for _ in range(2)]
         stage_scale = [self._span(TOP_K * _MAX_SCALE) for _ in range(2)]
         for layer in weights.layers:
@@ -113,6 +115,10 @@ class ExpertAtlas:
                 experts.scale = stage_scale[which]
                 if experts.nvfp4:
                     _converted(experts)
+
+    def _device(self, nbytes: int) -> Any:
+        handle = device_buffer(self.owner, nbytes)
+        return self.session._keep(handle)
 
     def _span(self, nbytes: int) -> Any:
         handle = device_buffer(self.owner, nbytes)
@@ -132,6 +138,19 @@ class ExpertAtlas:
 
     def _load_all(self) -> None:
         weights = self.weights
+        if self._baked:
+            record = weights.experts
+            for layer in weights.layers:
+                for experts in (layer.w13, layer.w2):
+                    data_off, data_n = experts.file_data
+                    scale_off, scale_n = experts.file_scale
+                    experts.data = self._device(data_n)
+                    experts.scale = self._device(scale_n)
+                    record.pread(experts.data, data_off, data_n, note=weights._read)
+                    record.pread(experts.scale, scale_off, scale_n, note=weights._read)
+                    if experts.nvfp4:
+                        _converted(experts)
+            return
         largest_data = 0
         largest_scale = 0
         for layer in weights.layers:
@@ -193,8 +212,8 @@ class ExpertAtlas:
     def stage(self, layer: Any, chosen: list[int]) -> None:
         """Copy up to eight routed experts into slots 0..n-1 of both projections.
 
-        The device must be idle. NVFP4 slots are requantized by a dispatch in
-        the open command buffer, ahead of the kernels that read them.
+        The device must be idle. A baked pack copies the stored expert. Otherwise
+        NVFP4 slots are requantized ahead of the kernels that read them.
         """
         if len(chosen) > TOP_K:
             message = f"{len(chosen)} experts do not fit {TOP_K} slots"
@@ -203,6 +222,26 @@ class ExpertAtlas:
         if self._staged.get(layer.index) == key and self._staged.get(-1) == (layer.index,):
             return
         weights = self.weights
+        if self._baked:
+            record = weights.experts
+            for experts in (layer.w13, layer.w2):
+                data_off, _data_n = experts.file_data
+                scale_off, _scale_n = experts.file_scale
+                for slot, expert in enumerate(chosen):
+                    record.pread(
+                        experts.data,
+                        data_off + expert * experts.data_stride,
+                        experts.data_stride,
+                        dest_off=slot * experts.data_stride,
+                    )
+                    record.pread(
+                        experts.scale,
+                        scale_off + expert * experts.scale_stride,
+                        experts.scale_stride,
+                        dest_off=slot * experts.scale_stride,
+                    )
+            self._staged = {layer.index: key, -1: (layer.index,)}
+            return
         for which, experts in enumerate((layer.w13, layer.w2)):
             data_off, data_n = experts.file_data
             scale_off, scale_n = experts.file_scale

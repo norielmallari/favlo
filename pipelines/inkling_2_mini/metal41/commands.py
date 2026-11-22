@@ -1,11 +1,12 @@
-"""CLI for the Inkling 2 Mini pipeline. NVFP4 experts are requantized at open."""
+"""CLI for the Inkling 2 Mini pipeline. NVFP4 experts are baked once for the open."""
 
 from __future__ import annotations
 
 import argparse
-import sys
+import re
 from collections.abc import Sequence
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -15,6 +16,8 @@ from inkling_2_mini.metal41.session import Session, f32, u32
 
 PIPELINE = "inkling_2_mini"
 FOLDER = "Inkling-2-Mini"
+_REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+_FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 CARROT_PROMPT = (
     "Amanda and Celestia have 15 carrots. They collect more carrots for Favlo the Horse. "
     "After collecting, they have 21 carrots. How many carrots did they collect?"
@@ -31,8 +34,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --inkling_2_mini")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
-    setup = sub.add_parser("setup", help="register the checkpoint folder under models/")
-    setup.add_argument("--name", default=FOLDER)
+    setup = sub.add_parser(
+        "setup",
+        help="download the checkpoint, pack the fp4 planes, and register it",
+    )
+    setup.add_argument(
+        "--repo",
+        type=_repo_id,
+        default=None,
+        help="Hugging Face repository org/name, or a huggingface.co link",
+    )
+    setup.add_argument(
+        "--name",
+        type=_folder_name,
+        default=None,
+        help="folder under models/ and the registry id",
+    )
+    setup.add_argument(
+        "--no-calibrate",
+        action="store_true",
+        help="register without rounding the dense fp4 planes",
+    )
+    setup.add_argument("--console", choices=("auto", "pretty", "plain", "json"), default="auto")
     complete = sub.add_parser("complete", help="greedy carrot completion from the checkpoint")
     complete.add_argument("--max-memory", default=None)
     complete.add_argument("--limit", type=int, default=64)
@@ -44,6 +67,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     calibrate.add_argument(
         "--reuse", action="store_true", help="round again from the saved calibration input sums"
     )
+    sub.add_parser("bake", help="requant the NVFP4 experts into the expert fp4 pack")
     try:
         args = parser.parse_args(list(argv) if argv is not None else None)
     except SystemExit as exc:
@@ -51,18 +75,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "kernels":
         return _kernels()
     if args.command == "setup":
-        return _setup(args.name)
+        return _setup(args)
     if args.command == "complete":
         return _complete(args.max_memory, args.limit)
     if args.command == "calibrate":
         return _calibrate(args.limit, args.reuse)
+    if args.command == "bake":
+        return _bake()
     return _models()
 
 
-def _calibrate(limit: int, reuse: bool) -> int:
+def _bake(folder: Path | None = None) -> int:
+    from inkling_2_mini.metal41.resident import bake
+
+    bake(folder or _folder(), log=lambda line: print(line, flush=True))
+    return 0
+
+
+def _calibrate(limit: int, reuse: bool, folder: Path | None = None) -> int:
     from inkling_2_mini.metal41.calibration import calibrate
 
-    calibrate(_folder(), limit=limit, reuse=reuse, log=lambda line: print(line, flush=True))
+    calibrate(
+        folder or _folder(),
+        limit=limit,
+        reuse=reuse,
+        log=lambda line: print(line, flush=True),
+    )
     return 0
 
 
@@ -360,26 +398,145 @@ def _check_attention(session: Session, rng: np.random.Generator) -> None:
         _close(found, expect, 1e-4, f"decode attention window {window}")
 
 
-def _setup(name: str) -> int:
-    folder = _folder() if name == FOLDER else _folder().parent / name
-    if not (folder / "model-00001-of-00001.safetensors").is_file():
-        sys.stderr.write(f"checkpoint is not at {folder}\n")
-        return 1
-    from favlo.registry import register_quantized
-    from inkling_2_mini.metal41.sampling import CONTEXT_LENGTH
+def _repo_id(text: str) -> str:
+    """``org/name``, or the same id taken from a huggingface.co model link."""
+    raw = text.strip().rstrip("/")
+    if "://" in raw or raw.startswith(("huggingface.co/", "www.huggingface.co/", "hf.co/")):
+        if "://" not in raw:
+            raw = "https://" + raw
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").lower()
+        if host not in {"huggingface.co", "www.huggingface.co", "hf.co"}:
+            message = "repository link is a huggingface.co model"
+            raise argparse.ArgumentTypeError(message)
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) < 2:
+            message = "repository is org/name or a huggingface.co link"
+            raise argparse.ArgumentTypeError(message)
+        raw = f"{parts[0]}/{parts[1]}"
+    if _REPO_ID.fullmatch(raw) is None:
+        message = "repository is org/name or a huggingface.co link"
+        raise argparse.ArgumentTypeError(message)
+    return raw
+
+
+def _folder_name(text: str) -> str:
+    """One directory name under ``models/``. That name is the registry id."""
+    if _FOLDER.fullmatch(text) is None:
+        message = "folder name is not a single name"
+        raise argparse.ArgumentTypeError(message)
+    return text
+
+
+def register_folder(folder: Path, *, alias: str | None, root: Path | None = None) -> None:
+    """Write the registry row with this pipeline's sampling card."""
+    from favlo.registry import load_registry, register_quantized, save_registry
+    from inkling_2_mini.metal41.sampling import CONTEXT_LENGTH, PRESERVE_THINKING
 
     register_quantized(
         folder.name,
         source=folder,
-        alias="inkling_2_mini",
+        alias=alias,
         directory=folder,
+        root=root,
         pipeline=PIPELINE,
         runtime="metal41",
         max_prompt_tokens=CONTEXT_LENGTH,
         kv_cache="half",
     )
-    print(f"registered {folder.name}")
-    return 0
+    data = load_registry(root)
+    row = data["models"][folder.name]
+    row["preserve_thinking"] = PRESERVE_THINKING
+    save_registry(data, root)
+
+
+def _setup(args: argparse.Namespace) -> int:
+    """Download the official checkpoint, calibrate the dense planes, and register it."""
+    import os
+
+    from favlo.console import Console, publish_count
+    from inkling_2_mini.metal41.fetch import (
+        REPO,
+        download,
+        list_files,
+        remaining_calibration,
+        remaining_download,
+        remaining_expert,
+        shortfall,
+    )
+    from inkling_2_mini.metal41.weights import open_pack
+
+    repo = args.repo or REPO
+    name = args.name or (FOLDER if repo == REPO else repo.split("/", 1)[1])
+    folder = _folder() if name == FOLDER else _folder().parent / name
+    ui = Console.from_env(getattr(args, "console", None), pipeline=PIPELINE)
+    if os.environ.get("FAVLO_SKIP_PLATE") != "1":
+        ui.plate()
+    bar = None
+    try:
+        try:
+            files = list_files(repo=repo)
+        except (OSError, RuntimeError, ValueError) as exc:
+            present = (folder / "config.json").is_file() and (
+                folder / "model-00001-of-00001.safetensors"
+            ).is_file()
+            if not present:
+                raise
+            files = []
+            ui.log(str(exc))
+            ui.log(f"using the checkpoint already in {folder.name}")
+        need_download = remaining_download(folder, files)
+        pack = open_pack(folder)
+        ready = pack is not None
+        if pack is not None:
+            pack.close()
+        need_experts = remaining_expert(folder)
+        experts_ready = need_experts == 0
+        need_record = need_experts
+        if not args.no_calibrate and not ready:
+            need_record += remaining_calibration(folder)
+        message = shortfall(need_download, need_record, folder, folder)
+        if message is not None:
+            ui.log(message)
+            return 1
+        total = sum(item.size for item in files)
+        bar = ui.begin("download", total=total, unit="bytes", detail=repo)
+
+        def _move(done: int, whole: int, label: str) -> None:
+            assert bar is not None
+            bar.total = whole
+            bar.detail = label
+            publish_count(ui, bar, done)
+
+        fetched = download(folder, files, _move, repo=repo)
+        ui.end(bar, f"downloaded {repo}")
+        bar = None
+        if any(name.startswith("model-") and name.endswith(".safetensors") for name in fetched):
+            from inkling_2_mini.metal41.calibration import HESSIANS_NAME
+            from inkling_2_mini.metal41.gptq import PACK_NAME
+            from inkling_2_mini.metal41.resident import EXPERT_PACK
+
+            for stale in (PACK_NAME, HESSIANS_NAME, EXPERT_PACK):
+                (folder / stale).unlink(missing_ok=True)
+            ready = False
+            experts_ready = False
+        register_folder(folder, alias="inkling_2_mini" if name == FOLDER else None)
+        if not args.no_calibrate and not ready:
+            ui.log("calibrating the dense fp4 planes")
+            _calibrate(384, False, folder)
+        if not experts_ready:
+            ui.log("baking the expert fp4 planes")
+            _bake(folder)
+        ui.log(f"registered {folder.name}")
+        return 0
+    except (OSError, RuntimeError, ValueError) as exc:
+        ui.report(f"{exc}\n")
+        ui.log("the next setup continues from the files already written")
+        return 1
+    finally:
+        if bar is not None and not bar.closed:
+            ui.end(bar, "")
+        ui.close()
 
 
 def _complete(max_memory: str | None, limit: int) -> int:

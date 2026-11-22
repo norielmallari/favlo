@@ -35,6 +35,7 @@ from inkling_2_mini.metal41.sampling import (
     DEFAULT_VARIANT,
     VARIANTS,
     resolve_effort,
+    template_effort,
 )
 
 PIPELINE = "inkling_2_mini"
@@ -112,20 +113,21 @@ def encode_chat(
     tools: list[dict[str, Any]] | None,
     thinking: bool,
     *,
-    effort: str | None = None,
+    effort: str | float | int | None = None,
     opening: str | None = None,
 ) -> list[int]:
     """Render the checkpoint template, append the opening, and encode it.
 
     The template has no generation prompt. ``opening`` is the markup the
     prompt ends with. When it is omitted, a request with no tools takes the
-    opening of its card.
+    opening of its card. ``reasoning_effort`` is the template's number, in
+    ``[0.0, 0.99]``.
     """
-    name = effort if effort else ("high" if thinking else "none")
+    chosen = effort if effort is not None else ("high" if thinking else "none")
     text = _chat_template(root).render(
         messages=_objects(messages),
         tools=tools or None,
-        reasoning_effort=name,
+        reasoning_effort=template_effort(chosen),
     )
     if opening is None:
         opening = forced_text(thinking, None, plain=not tools)
@@ -142,17 +144,14 @@ def decode_text(root: Path, ids: list[int]) -> str:
     return load_tokenizer(root).decode(ids, skip_special_tokens=False)
 
 
-def _effort(body: dict[str, Any], selection: Any) -> str:
-    reasoning = body.get("reasoning")
-    if isinstance(reasoning, dict):
-        name = reasoning.get("effort")
-        if isinstance(name, str) and name.strip():
-            mapped = resolve_effort(name)
-            if mapped:
-                return mapped
-    kwargs = body.get("chat_template_kwargs")
-    if isinstance(kwargs, dict) and kwargs.get("enable_thinking") is False:
-        return "none"
+def _effort(body: dict[str, Any], selection: Any) -> str | float:
+    raw = _requested_effort(body)
+    if isinstance(raw, str) and raw.strip():
+        mapped = resolve_effort(raw)
+        if mapped:
+            return mapped
+    if isinstance(raw, int | float) and not isinstance(raw, bool):
+        return template_effort(raw)
     if selection is not None:
         stored = getattr(selection, "reasoning_effort", None)
         if isinstance(stored, str) and stored:
@@ -160,6 +159,22 @@ def _effort(body: dict[str, Any], selection: Any) -> str:
             if mapped:
                 return mapped
     return "high"
+
+
+def _requested_effort(body: dict[str, Any]) -> str | float | int | None:
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("effort") is not None:
+        effort = reasoning.get("effort")
+        if isinstance(effort, str | int | float) and not isinstance(effort, bool):
+            return effort
+    kwargs = body.get("chat_template_kwargs")
+    if isinstance(kwargs, dict) and kwargs.get("reasoning_effort") is not None:
+        effort = kwargs.get("reasoning_effort")
+        if isinstance(effort, str | int | float) and not isinstance(effort, bool):
+            return effort
+    if isinstance(kwargs, dict) and kwargs.get("enable_thinking") is False:
+        return "none"
+    return None
 
 
 def _card(selection: Any) -> dict[str, Any]:
@@ -356,7 +371,7 @@ def _respond(
         reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
         return
     effort = _effort(prepared, selection)
-    thinking = effort != "none"
+    thinking = template_effort(effort) != 0.0
     card = _card(selection)
     temperature = _number(prepared, card, "temperature", 1.0)
     top_p = _number(prepared, card, "top_p", 1.0)

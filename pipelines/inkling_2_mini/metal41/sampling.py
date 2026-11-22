@@ -3,11 +3,15 @@
 ``generation_config.json`` publishes temperature 1.0 and ``do_sample``. It does
 not publish top-p, top-k, or a presence penalty, so those stay unrestricted.
 The chat template publishes the effort map. Every listed OpenAI effort is a
-template key. ``high`` is the template default, 0.9.
+template key and a variant. ``high`` is the template default, 0.9. The
+template keeps an assistant ``reasoning_content`` when the message carries one,
+so the registry row preserves thinking.
 """
 
 DEFAULT_VARIANT = "thinking"
 DEFAULT_THINKING = True
+DEFAULT_REASONING_EFFORT = "high"
+PRESERVE_THINKING = True
 CONTEXT_LENGTH = 16384
 
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
@@ -31,10 +35,56 @@ _CARD = {
     "presence_penalty": 0.0,
 }
 
+
+def _effort_card(effort: str) -> dict[str, float | int | str]:
+    return {**_CARD, "reasoning_effort": effort}
+
+
 VARIANTS = {
-    "thinking": {**_CARD, "reasoning_effort": "high"},
-    "instruct": {**_CARD, "reasoning_effort": "none"},
+    "thinking": _effort_card("high"),
+    "instruct": _effort_card("none"),
 }
+for _effort in EFFORT_ORDER:
+    VARIANTS[_effort] = _effort_card(_effort)
+
+
+def template_effort(value: str | float | int | None) -> float:
+    """The number the checkpoint template accepts, in ``[0.0, 0.99]``.
+
+    A listed name uses the template map. A number, or a numeric string, is
+    clamped into that range. The template writes this number into the prompt.
+    """
+    if value is None:
+        return EFFORT_LEVEL["high"]
+    if isinstance(value, bool):
+        return _bad_effort(value)
+    if isinstance(value, int | float):
+        return _clamp_effort(float(value))
+    name = value.strip().lower()
+    if not name:
+        return EFFORT_LEVEL["high"]
+    if name in EFFORT_LEVEL:
+        return EFFORT_LEVEL[name]
+    try:
+        return _clamp_effort(float(name))
+    except ValueError:
+        mapped = resolve_effort(name)
+    if isinstance(mapped, str) and mapped in EFFORT_LEVEL:
+        return EFFORT_LEVEL[mapped]
+    return _bad_effort(value)
+
+
+def _clamp_effort(number: float) -> float:
+    if number < 0.0:
+        return 0.0
+    if number > 0.99:
+        return 0.99
+    return number
+
+
+def _bad_effort(value: object) -> float:
+    message = f"reasoning_effort {value} is not a template level"
+    raise ValueError(message)
 
 
 def resolve_effort(requested: str | None) -> str | None:

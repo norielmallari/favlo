@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,8 @@ from inkling_2_mini.metal41.atlas import partial_bytes, plan_opening
 from inkling_2_mini.metal41.calibration import weighted_error
 from inkling_2_mini.metal41.chat import forced_text
 from inkling_2_mini.metal41.codec import e4m3_to_float, nvfp4_row
+from inkling_2_mini.metal41.commands import _repo_id, register_folder
+from inkling_2_mini.metal41.fetch import File, keep, remaining_download, shortfall
 from inkling_2_mini.metal41.gptq import (
     PACK_FORMAT,
     PACK_NAME,
@@ -21,7 +25,7 @@ from inkling_2_mini.metal41.gptq import (
     gptq_fp4,
     write_pack,
 )
-from inkling_2_mini.metal41.layout import WINDOW
+from inkling_2_mini.metal41.layout import EXPERTS, HIDDEN, INTERMEDIATE, LAYERS, WINDOW, stored_k
 from inkling_2_mini.metal41.prefix import (
     ROW_BYTES,
     VISIT_LAYERS,
@@ -29,7 +33,25 @@ from inkling_2_mini.metal41.prefix import (
     InklingPrefix,
     visit_rows,
 )
-from inkling_2_mini.metal41.sampling import EFFORT_LEVEL, resolve_effort
+from inkling_2_mini.metal41.resident import (
+    EXPERT_FORMAT,
+    EXPERT_PACK,
+    ExpertFile,
+    Sink,
+    catalog,
+    open_expert_pack,
+    pread_view,
+)
+from inkling_2_mini.metal41.sampling import (
+    DEFAULT_REASONING_EFFORT,
+    DEFAULT_VARIANT,
+    EFFORT_LEVEL,
+    EFFORT_ORDER,
+    PRESERVE_THINKING,
+    VARIANTS,
+    resolve_effort,
+    template_effort,
+)
 from inkling_2_mini.metal41.weights import _quantize_fp4, open_pack
 
 
@@ -64,6 +86,23 @@ def test_resolve_effort_keeps_the_template_names() -> None:
     assert resolve_effort("high") == "high"
     assert resolve_effort("  Low ") == "low"
     assert set(EFFORT_LEVEL) == {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+
+def test_template_effort_is_the_number_the_checkpoint_writes() -> None:
+    assert template_effort("high") == 0.9
+    assert template_effort("none") == 0.0
+    assert template_effort("max") == 0.99
+    assert template_effort("  Medium ") == 0.7
+    assert template_effort(0.35) == 0.35
+    assert template_effort("0.35") == 0.35
+    assert template_effort(2) == 0.99
+    assert template_effort(-0.2) == 0.0
+    try:
+        template_effort("sideways")
+    except ValueError as exc:
+        assert "template level" in str(exc)
+    else:
+        raise AssertionError("an unknown effort must be rejected")
 
 
 class _Memory:
@@ -216,6 +255,68 @@ def test_capture_streams_and_round_trip(tmp_path: Path) -> None:
     assert np.allclose(again.hessian(0, "k"), 20.0)
 
 
+def test_expert_catalog_pads_the_down_projection() -> None:
+    specs = {(spec.layer, spec.proj, spec.kind): spec for spec in catalog()}
+    assert len(specs) == LAYERS * 4
+    assert specs[(0, "w2", "data")].shape[-1] == stored_k(INTERMEDIATE) // 2
+    assert specs[(0, "w13", "data")].nbytes == EXPERTS * (INTERMEDIATE * 2) * (HIDDEN // 2)
+    assert specs[(20, "w13", "data")].shape[-1] == HIDDEN
+    assert specs[(20, "w13", "data")].nvfp4 is False
+
+
+def test_pread_fills_eight_mebibyte_pieces(tmp_path: Path) -> None:
+    blob = os.urandom((8 << 20) + 100)
+    path = tmp_path / "blob"
+    path.write_bytes(blob)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        found = bytearray(len(blob))
+        notes: list[int] = []
+        pread_view(fd, memoryview(found), 0, notes.append)
+    finally:
+        os.close(fd)
+    assert bytes(found) == blob
+    assert notes == [8 << 20, 100]
+
+
+def test_expert_pack_follows_the_config(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{}")
+    header: dict[str, object] = {
+        "__metadata__": {"format": EXPERT_FORMAT, "config": config_digest(tmp_path)}
+    }
+    offset = 0
+    for spec in catalog():
+        header[spec.name] = {
+            "dtype": "U8",
+            "shape": list(spec.shape),
+            "data_offsets": [offset, offset + spec.nbytes],
+        }
+        offset += spec.nbytes
+    raw = json.dumps(header, separators=(",", ":")).encode()
+    raw += b" " * (-len(raw) % 8)
+    (tmp_path / EXPERT_PACK).write_bytes(len(raw).to_bytes(8, "little") + raw)
+    record = open_expert_pack(tmp_path)
+    assert record is not None
+    record.close()
+    (tmp_path / "config.json").write_text('{"changed": true}')
+    assert open_expert_pack(tmp_path) is None
+
+
+def test_a_small_pack_round_trips(tmp_path: Path) -> None:
+    blob = bytes(range(32))
+    sink = Sink(tmp_path / "plane.safetensors", [("row", (32,))], {"format": "test"})
+    sink.write_view("row", memoryview(blob))
+    sink.close()
+    record = ExpertFile(tmp_path / "plane.safetensors")
+    try:
+        file_off, nbytes = record.span("row", (32,))
+        found = bytearray(nbytes)
+        pread_view(record.fileno(), memoryview(found), file_off)
+    finally:
+        record.close()
+    assert bytes(found) == blob
+
+
 def test_pack_round_trip(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("{}")
     data = np.arange(32, dtype=np.uint8).reshape(4, 8)
@@ -232,3 +333,57 @@ def test_pack_round_trip(tmp_path: Path) -> None:
         pack.close()
     (tmp_path / "config.json").write_text('{"changed": true}')
     assert open_pack(tmp_path) is None
+
+
+def test_sampling_card_follows_the_published_defaults() -> None:
+    assert DEFAULT_VARIANT == "thinking"
+    assert DEFAULT_REASONING_EFFORT == "high"
+    assert PRESERVE_THINKING is True
+    thinking = VARIANTS["thinking"]
+    assert thinking["temperature"] == 1.0
+    assert thinking["top_p"] == 1.0
+    assert thinking["top_k"] == 0
+    assert thinking["presence_penalty"] == 0.0
+    assert thinking["reasoning_effort"] == "high"
+    assert VARIANTS["instruct"]["reasoning_effort"] == "none"
+    for name in EFFORT_ORDER:
+        assert VARIANTS[name]["reasoning_effort"] == name
+        assert VARIANTS[name]["temperature"] == 1.0
+
+
+def test_repo_id_accepts_the_public_link() -> None:
+    assert _repo_id("https://huggingface.co/thinkingmachines/Inkling-2-Mini") == (
+        "thinkingmachines/Inkling-2-Mini"
+    )
+    assert _repo_id("thinkingmachines/Inkling-2-Mini") == "thinkingmachines/Inkling-2-Mini"
+
+
+def test_download_skips_the_drafter_and_counts_a_short_file(tmp_path: Path) -> None:
+    assert keep("model-00001-of-00001.safetensors")
+    assert keep("tiktoken/vocab.json")
+    assert not keep("mtp.safetensors")
+    assert not keep("README.md")
+    assert not keep(".gitattributes")
+    (tmp_path / "config.json").write_text("{}")
+    files = [File("config.json", 2, None), File("weights.safetensors", 8, "abc")]
+    assert remaining_download(tmp_path, files) == 8
+    message = shortfall(1 << 40, 0, tmp_path, tmp_path)
+    assert message is not None
+    assert "GiB" in message
+
+
+def test_register_writes_the_recommended_card(tmp_path: Path) -> None:
+    folder = tmp_path / "models" / "Inkling-2-Mini"
+    folder.mkdir(parents=True)
+    register_folder(folder, alias="inkling_2_mini", root=tmp_path)
+    from favlo.registry import load_registry
+
+    row = load_registry(tmp_path)["models"]["Inkling-2-Mini"]
+    assert row["alias"] == "inkling_2_mini"
+    assert row["kv_cache"] == "half"
+    assert row["default_variant"] == "thinking"
+    assert row["enable_thinking"] is True
+    assert row["reasoning_effort"] == "high"
+    assert row["preserve_thinking"] is True
+    assert row["variants"]["medium"]["reasoning_effort"] == "medium"
+    assert row["variants"]["thinking"]["temperature"] == 1.0

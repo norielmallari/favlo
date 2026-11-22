@@ -99,6 +99,7 @@ class Experts:
         self.file_scale = file_scale
         self.nvfp4 = bool(nvfp4)
         self.fp4 = False
+        self.baked = False
         self.inner = int(cols)
 
 
@@ -174,6 +175,25 @@ class Tensors:
     def close(self) -> None:
         self._map.close()
         self._file.close()
+
+    def fileno(self) -> int:
+        return self._file.fileno()
+
+    def into(
+        self,
+        handle: Any,
+        file_off: int,
+        nbytes: int,
+        *,
+        dest_off: int = 0,
+        note: Any = None,
+    ) -> None:
+        """Read a span straight into a shared device buffer, in 8 MiB pieces."""
+        from inkling_2_mini.metal41.resident import pread_handle
+
+        pread_handle(
+            self.fileno(), handle, file_off, nbytes, dest_off=dest_off, note=note or self._on_read
+        )
 
     def raw(self, name: str) -> tuple[bytes, dict[str, Any]]:
         info = self.header.get(name)
@@ -289,8 +309,14 @@ class Checkpoint:
         self._tensors = Tensors(path, on_read=self._read)
         self._pack = open_pack(root) if calibrated else None
         self.dense_tag = self._pack.header_digest[:16] if self._pack is not None else "rtn"
+        from inkling_2_mini.metal41.resident import open_expert_pack
+
+        self.experts = open_expert_pack(root)
         try:
             self._load()
+        except Exception:
+            self.close()
+            raise
         finally:
             if self._pack is not None:
                 self._pack.close()
@@ -324,7 +350,14 @@ class Checkpoint:
                 self.expert_bytes += experts.file_data[1] + experts.file_scale[1]
 
     def close(self) -> None:
-        self._tensors.close()
+        experts = getattr(self, "experts", None)
+        if experts is not None:
+            experts.close()
+            self.experts = None
+        tensors = getattr(self, "_tensors", None)
+        if tensors is not None:
+            tensors.close()
+            self._tensors = None
 
     def _read(self, nbytes: int) -> None:
         self._done += nbytes
@@ -352,13 +385,23 @@ class Checkpoint:
         """A Metal fp4 plane: the calibrated pack when present, else round to nearest."""
         pack = self._pack
         if pack is not None:
-            packed = pack.bytes_of(f"{name}.data", (rows, inner // 2))
-            scales = pack.bytes_of(f"{name}.scale", (rows, inner // 32))
-        else:
-            packed, scales = _quantize_fp4(build())
+            data_off, data_n = pack.span(f"{name}.data", (rows, inner // 2))
+            scale_off, scale_n = pack.span(f"{name}.scale", (rows, inner // 32))
+            data = self._device(data_n)
+            scale = self._device(scale_n)
+            pack.into(data, data_off, data_n, note=self._read)
+            pack.into(scale, scale_off, scale_n, note=self._read)
+            return Plane(data, cols, rows, inner, scale=scale)
+        packed, scales = _quantize_fp4(build())
         return Plane(
             self.session.upload(packed), cols, rows, inner, scale=self.session.upload(scales)
         )
+
+    def _device(self, nbytes: int) -> Any:
+        from favlo.memory import memory
+
+        handle = memory.allocate(int(nbytes), owner=self.session._owner, heap="resident")
+        return self.session._keep(handle)
 
     def _f16(self, name: str, shape: tuple[int, int], padded: int) -> Plane:
         matrix = _pad_rows(self._matrix(name, shape), padded).astype(np.float16)
@@ -372,6 +415,24 @@ class Checkpoint:
         return self.session.upload(np.ascontiguousarray(array))
 
     def _experts(self, layer: int, kind: str, rows: int, cols: int, nvfp4: bool) -> Experts:
+        record = getattr(self, "experts", None)
+        if record is not None:
+            from inkling_2_mini.metal41.resident import baked_shapes
+
+            data_shape, scale_shape = baked_shapes(layer, kind)
+            experts = Experts(
+                rows,
+                cols,
+                int(scale_shape[-1]),
+                int(np.prod(data_shape[1:])),
+                int(np.prod(scale_shape[1:])),
+                None,
+                record.span(f"layers.{layer}.{kind}.data", data_shape),
+                record.span(f"layers.{layer}.{kind}.scale", scale_shape),
+                nvfp4,
+            )
+            experts.baked = True
+            return experts
         stem = f"model.llm.layers.{layer}.mlp.experts.{kind}"
         scale_cols = cols // 16 if nvfp4 else cols // 32
         data_shape = (EXPERTS, rows, cols // 2 if nvfp4 else cols)
