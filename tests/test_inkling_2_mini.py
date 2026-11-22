@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 
 from favlo.prefix import PrefixHeader, RegionRef
-from inkling_2_mini.metal41 import markup
 from inkling_2_mini.metal41 import prefix as prefix_mod
 from inkling_2_mini.metal41.atlas import partial_bytes, plan_opening
 from inkling_2_mini.metal41.calibration import (
@@ -18,7 +17,6 @@ from inkling_2_mini.metal41.calibration import (
     _store_round,
     weighted_error,
 )
-from inkling_2_mini.metal41.chat import _required_name, forced_text
 from inkling_2_mini.metal41.codec import e4m3_to_float, nvfp4_row
 from inkling_2_mini.metal41.commands import _repo_id, register_folder
 from inkling_2_mini.metal41.fetch import File, keep, remaining_download, shortfall
@@ -56,7 +54,10 @@ from inkling_2_mini.metal41.resident import (
     open_expert_pack,
     pread_view,
 )
-from inkling_2_mini.metal41.sampling import (
+from inkling_2_mini.metal41.weights import _quantize_fp4, open_pack
+from inkling_2_mini.portable import markup
+from inkling_2_mini.portable.chat import _required_name, forced_text
+from inkling_2_mini.portable.sampling import (
     DEFAULT_REASONING_EFFORT,
     DEFAULT_VARIANT,
     EFFORT_LEVEL,
@@ -65,7 +66,6 @@ from inkling_2_mini.metal41.sampling import (
     resolve_effort,
     template_effort,
 )
-from inkling_2_mini.metal41.weights import _quantize_fp4, open_pack
 
 
 def test_e4m3_one_and_max() -> None:
@@ -514,7 +514,12 @@ def test_progress_reports_through_the_console(tmp_path: Path) -> None:
 
 
 def test_calibration_rows_skip_a_short_dialog_and_an_email() -> None:
-    from inkling_2_mini.metal41.calibration import _TOOL_TURNS, _accept
+    from inkling_2_mini.metal41.calibration import (
+        _QUOTAS,
+        _accept,
+        _agent_dialog,
+        _hermes_dialog,
+    )
 
     short = [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}]
     assert _accept(short) is None
@@ -531,8 +536,42 @@ def test_calibration_rows_skip_a_short_dialog_and_an_email() -> None:
         {"role": "assistant", "content": "A sort orders items. " * 40},
     ]
     assert _accept(long) is not None
-    assert len(_TOOL_TURNS) == 16
-    from inkling_2_mini.metal41.chat import Pipeline
+    assert [name for name, _count in _QUOTAS] == ["agent", "code", "tool", "chat"]
+    assert sum(count for _name, count in _QUOTAS) == 128
+    missed = _agent_dialog(
+        {
+            "resolved": 0,
+            "license": "MIT",
+            "tools": ["{}"],
+            "messages": [{"role": "user", "content": "Fix the bug."}],
+        }
+    )
+    assert missed is None
+    kept = _hermes_dialog(
+        [
+            {"from": "human", "value": "What is the weather in Lisbon?"},
+            {
+                "from": "gpt",
+                "value": (
+                    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Lisbon"}}\n'
+                    "</tool_call>"
+                ),
+            },
+            {
+                "from": "tool",
+                "value": (
+                    '<tool_response>\n{"name": "get_weather", "content": "18 C and clear."}\n'
+                    "</tool_response>"
+                ),
+            },
+            {"from": "gpt", "value": "Lisbon is 18 C and clear."},
+        ],
+        '[{"type": "function", "function": {"name": "get_weather"}}]',
+    )
+    assert kept is not None
+    assert kept["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"city": "Lisbon"}
+    assert kept["messages"][2]["role"] == "tool"
+    from inkling_2_mini.portable.chat import Pipeline
 
     assert Pipeline().has_vision() is True
 
@@ -628,3 +667,22 @@ def test_register_writes_the_recommended_card(tmp_path: Path) -> None:
     assert "reasoning_effort" not in row["variants"]["thinking"]
     assert row["variants"]["thinking"]["temperature"] == 1.0
     assert row["variants"]["instruct"]["top_k"] == 0
+
+
+def test_portable_import_leaves_the_device_unloaded() -> None:
+    import sys
+
+    for name in list(sys.modules):
+        if name == "inkling_2_mini.metal41" or name.startswith("inkling_2_mini.metal41."):
+            del sys.modules[name]
+        elif name == "inkling_2_mini.portable" or name.startswith("inkling_2_mini.portable."):
+            del sys.modules[name]
+    import inkling_2_mini.portable
+
+    loaded = [
+        name
+        for name in sys.modules
+        if name == "inkling_2_mini.metal41" or name.startswith("inkling_2_mini.metal41.")
+    ]
+    assert loaded == []
+    assert inkling_2_mini.portable.PIPELINE == "inkling_2_mini"

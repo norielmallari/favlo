@@ -1,0 +1,12 @@
+"""Disconnect signal for one chat completion."""
+
+from __future__ import annotations
+
+from favlo.pipeline import ClientClosed
+
+
+class RequestClosed(ClientClosed):
+    """The client went away or the process was signaled."""
+
+    def __init__(self) -> None:
+        super().__init__("client closed")

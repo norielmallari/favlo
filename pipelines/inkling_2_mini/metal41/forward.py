@@ -22,7 +22,6 @@ import numpy as np
 
 from favlo.console import format_note, format_rate, publish_count
 from favlo.memory import memory
-from favlo.pipeline import ClientClosed
 from favlo.prefix import aim_session
 from inkling_2_mini.metal41.atlas import CONTEXTS, ExpertAtlas, plan_opening
 from inkling_2_mini.metal41.layout import (
@@ -54,17 +53,13 @@ from inkling_2_mini.metal41.weights import (
     Checkpoint,
     Plane,
 )
+from inkling_2_mini.portable.closed import RequestClosed
 
 CHUNK = 2048
 GROUP_SPAN = 256
 GROUP_SPLITS = 4
 _PAIR = HIDDEN * 2
 _FUSED = INTERMEDIATE * 2
-
-
-class RequestClosed(ClientClosed):
-    def __init__(self) -> None:
-        super().__init__("client closed")
 
 
 def _pad64(count: int) -> int:
@@ -1235,19 +1230,28 @@ class InklingRuntime:
         self,
         prompt: list[int],
         limit: int,
-        temperature: float,
-        top_p: float,
-        top_k: int,
-        presence: float,
         stop: set[int],
-        **extra: Any,
+        *,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
+        presence: float = 0.0,
+        frequency: float = 0.0,
+        mtp: bool = False,
+        mtp_depth: int | None = None,
+        forced: list[int] | None = None,
+        stop_after_forced: bool = False,
+        tool_close: list[int] | None = None,
+        fill: bool = False,
+        on_token: Any = None,
+        forbid: set[int] | None = None,
     ) -> list[int]:
+        del mtp_depth, forced, stop_after_forced, tool_close
+        if mtp:
+            message = "this runtime does not draft"
+            raise RuntimeError(message)
         if self._stopped():
             raise RequestClosed()
-        frequency = float(extra.get("frequency") or 0.0)
-        forbid = extra.get("forbid")
-        fill = bool(extra.get("fill"))
-        on_token = extra.get("on_token")
         if not callable(on_token):
             on_token = None
         tokens = [int(item) for item in prompt]

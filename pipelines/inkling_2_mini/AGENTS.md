@@ -1,5 +1,7 @@
 # This package
 
+The pipeline entry is `inkling_2_mini.portable`. `metal41` is the Metal device that entry opens. Serve, the CLI, and the carrot smoke import `portable`. They do not construct the device runtime.
+
 This package is a language pipeline. It inherits `LanguagePipeline`. The class is the disconnect shell around one response. It does not encode a prompt, sample a token, or parse a tool call. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder. Read that file before editing kernels.
 
 A shell change loads the seam-checks skill. A GPU smoke loads the smoke-testing skill. Do not paste those commands here.
@@ -34,4 +36,4 @@ Load, prefill, and decode report through `favlo.console`. The load row stays ope
 
 ## Calibration
 
-`calibrate` changes weights, so rerun the pipeline smoke and the coding agent after it. Chat rows are downloaded from `HuggingFaceH4/ultrachat_200k` into `artifacts/` when that file is missing. Tool transcripts stay in `calibration.py`. The model does not write the sequences. A finished sequence and a finished plane are written before the next one starts. An out-of-memory capture reopens with fewer rows and continues from the last finished sequence. A change to the dense plane layout bumps `PACK_FORMAT` in `gptq.py`.
+`calibrate` changes weights, so rerun the pipeline smoke and the coding agent after it. Resolved agent traces, coding instructions, and function-calling dialogs are downloaded into `artifacts/` when those files are missing. General chat fills only the remaining sequences. The model does not write the sequences. A finished sequence and a finished plane are written before the next one starts. An out-of-memory capture reopens with fewer rows and continues from the last finished sequence. A change to the dense plane layout bumps `PACK_FORMAT` in `gptq.py`.

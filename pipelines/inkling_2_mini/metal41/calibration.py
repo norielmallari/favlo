@@ -1,8 +1,9 @@
 """Calibrate the dense fp4 planes: capture plane inputs, then round with GPTQ.
 
-Chat rows come from ``HuggingFaceH4/ultrachat_200k`` ``train_sft`` and are
-stored under ``artifacts/``. Tool transcripts live in this file. Each row is
-rendered with the checkpoint template and cut at 2048 tokens. Nothing is
+Sequences are packed to 2048 tokens and rendered with the checkpoint template.
+Resolved software-agent traces come first, then coding instructions, then
+function-calling dialogs. General chat fills only the remaining sequences.
+Downloads are stored under ``artifacts/`` and are not committed. Nothing is
 generated. The capture prefill sums ``X^T X``. Each finished sequence is
 written before the next one starts. An out-of-memory capture closes, reopens
 with fewer rows, and continues. Each rounded plane is written before the next
@@ -53,193 +54,240 @@ ROUND_PARTIAL = "dense-fp4-partial.npz"
 SEQUENCE_LENGTH = 2048
 _CAPTURE_CONTEXT = 4096
 _ROW_STEPS = (2048, 1024, 512, 256)
-_CHAT_SEQUENCES = 112
-_POOL = 400
+_QUOTAS = (("agent", 56), ("code", 40), ("tool", 24), ("chat", 8))
+_PIECES = {"agent": 4, "code": 2, "tool": 2, "chat": 2}
+_POOLS = {"agent": 32, "code": 400, "tool": 120, "chat": 40}
+_SOURCES = {
+    "agent": ("nvidia/Open-SWE-Traces", "v1.0", "sweagent", 10),
+    "code": ("ise-uiuc/Magicoder-Evol-Instruct-110K", "default", "train", 100),
+    "tool": ("NousResearch/hermes-function-calling-v1", "func_calling", "train", 20),
+    "chat": ("HuggingFaceH4/ultrachat_200k", "default", "train_sft", 100),
+}
+_LICENSES = {"MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause"}
+_FILES = {
+    "agent": "open-swe-traces.json",
+    "code": "magicoder-evol-instruct.json",
+    "tool": "hermes-function-calling.json",
+    "chat": "ultrachat-train-sft.json",
+}
 _ROWS = (
     "https://datasets-server.huggingface.co/rows"
-    "?dataset=HuggingFaceH4/ultrachat_200k&config=default&split=train_sft"
-    "&offset={offset}&length=100"
+    "?dataset={dataset}&config={config}&split={split}&offset={offset}&length={length}"
 )
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 
-_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Current weather for a city.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string", "description": "City name."},
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
-                },
-                "required": ["city"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read a text file from the workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string", "description": "Relative path."}},
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_tests",
-            "description": "Run the test suite and return the summary line.",
-            "parameters": {
-                "type": "object",
-                "properties": {"pattern": {"type": "string", "description": "Test name filter."}},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "add_event",
-            "description": "Add an event to the calendar.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "date": {"type": "string", "description": "ISO date."},
-                    "minutes": {"type": "integer"},
-                },
-                "required": ["title", "date"],
-            },
-        },
-    },
-]
 
-_TOOL_TURNS: list[tuple[str, str, dict[str, Any], str, str]] = [
-    (
-        "What's the weather in Lisbon right now?",
-        "get_weather",
-        {"city": "Lisbon", "unit": "celsius"},
-        "18 C and clear.",
-        "Lisbon is 18 C and clear.",
-    ),
-    (
-        "Open README.md and tell me what the project does.",
-        "read_file",
-        {"path": "README.md"},
-        "A local inference server.",
-        "The project is a local inference server.",
-    ),
-    (
-        "Run the tests named parser and report the result.",
-        "run_tests",
-        {"pattern": "parser"},
-        "12 passed.",
-        "The parser tests passed, 12 of them.",
-    ),
-    (
-        "Put a 30 minute dentist visit on 2026-03-14.",
-        "add_event",
-        {"title": "dentist", "date": "2026-03-14", "minutes": 30},
-        "saved.",
-        "The dentist visit is on 2026-03-14 for 30 minutes.",
-    ),
-    (
-        "Read the file src/main.py.",
-        "read_file",
-        {"path": "src/main.py"},
-        "def main():\n    return 0",
-        "src/main.py defines main and returns 0.",
-    ),
-    (
-        "Is it colder in Oslo or in Helsinki today? Use fahrenheit.",
-        "get_weather",
-        {"city": "Oslo", "unit": "fahrenheit"},
-        "30 F.",
-        "Oslo is 30 F. Helsinki needs a second lookup.",
-    ),
-    (
-        "What is the weather in Kyoto tomorrow morning?",
-        "get_weather",
-        {"city": "Kyoto", "unit": "celsius"},
-        "9 C and cloudy.",
-        "Kyoto tomorrow morning is 9 C and cloudy.",
-    ),
-    (
-        "Schedule team sync for 2026-05-02, 45 minutes.",
-        "add_event",
-        {"title": "team sync", "date": "2026-05-02", "minutes": 45},
-        "saved.",
-        "Team sync is on 2026-05-02 for 45 minutes.",
-    ),
-    (
-        "Read notes/plan.md.",
-        "read_file",
-        {"path": "notes/plan.md"},
-        "Ship the pack.",
-        "notes/plan.md says to ship the pack.",
-    ),
-    (
-        "Run the full test suite.",
-        "run_tests",
-        {"pattern": ""},
-        "400 passed.",
-        "The full suite passed, 400 tests.",
-    ),
-    (
-        "Add a one hour review on 2026-06-01.",
-        "add_event",
-        {"title": "review", "date": "2026-06-01", "minutes": 60},
-        "saved.",
-        "The review is on 2026-06-01 for one hour.",
-    ),
-    (
-        "How warm is Cairo this afternoon?",
-        "get_weather",
-        {"city": "Cairo", "unit": "celsius"},
-        "31 C.",
-        "Cairo this afternoon is 31 C.",
-    ),
-    (
-        "Show me the text of Makefile.",
-        "read_file",
-        {"path": "Makefile"},
-        "test:\n\tpytest",
-        "The Makefile runs pytest for test.",
-    ),
-    (
-        "Run tests matching chat.",
-        "run_tests",
-        {"pattern": "chat"},
-        "8 passed, 1 failed.",
-        "Eight chat tests passed and one failed.",
-    ),
-    (
-        "Put lunch on 2026-04-02 for 45 minutes.",
-        "add_event",
-        {"title": "lunch", "date": "2026-04-02", "minutes": 45},
-        "saved.",
-        "Lunch is on 2026-04-02 for 45 minutes.",
-    ),
-    (
-        "Read the weather in Reykjavik in fahrenheit.",
-        "get_weather",
-        {"city": "Reykjavik", "unit": "fahrenheit"},
-        "41 F and windy.",
-        "Reykjavik is 41 F and windy.",
-    ),
-]
-
-
-def _artifact() -> Path:
-    """Downloaded chat rows. The directory is gitignored."""
+def _artifact(name: str) -> Path:
+    """Downloaded rows. The directory is gitignored."""
     root = Path(__file__).resolve().parents[3]
-    return root / "artifacts" / "inkling_2_mini" / "ultrachat-train-sft.json"
+    return root / "artifacts" / "inkling_2_mini" / name
+
+
+def _tagged(text: str, tag: str) -> list[Any] | None:
+    needle = f"<{tag}>"
+    close = f"</{tag}>"
+    found: list[Any] = []
+    cursor = 0
+    while True:
+        begin = text.find(needle, cursor)
+        if begin < 0:
+            return found
+        stop = text.find(close, begin + len(needle))
+        if stop < 0:
+            return None
+        raw = text[begin + len(needle) : stop].strip()
+        try:
+            found.append(json.loads(raw))
+        except json.JSONDecodeError:
+            return None
+        cursor = stop + len(close)
+
+
+def _text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return None
+
+
+def _agent_dialog(row: Any) -> dict[str, Any] | None:
+    """One resolved permissive trajectory, or None."""
+    if not isinstance(row, dict) or row.get("resolved") != 1:
+        return None
+    if row.get("license") not in _LICENSES:
+        return None
+    tools: list[dict[str, Any]] = []
+    for raw in row.get("tools") or []:
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        if isinstance(raw, dict):
+            tools.append(raw)
+    messages = _openai_messages(row.get("messages"))
+    if messages is None or not tools:
+        return None
+    return {"messages": messages, "tools": tools}
+
+
+def _openai_messages(messages: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(messages, list):
+        return None
+    pending: list[str] = []
+    kept: list[dict[str, Any]] = []
+    number = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            return None
+        role = message.get("role")
+        calls = message.get("tool_calls")
+        if role == "assistant" and isinstance(calls, list) and calls:
+            shaped = []
+            for call in calls:
+                if not isinstance(call, dict):
+                    return None
+                function = call.get("function")
+                if not isinstance(function, dict) or not function.get("name"):
+                    return None
+                number += 1
+                ident = str(call.get("id") or f"call-{number}")
+                shaped.append(
+                    {
+                        "id": ident,
+                        "type": "function",
+                        "function": {
+                            "name": function["name"],
+                            "arguments": function.get("arguments")
+                            if function.get("arguments") is not None
+                            else {},
+                        },
+                    }
+                )
+                pending.append(ident)
+            item: dict[str, Any] = {"role": "assistant", "tool_calls": shaped}
+            content = _text(message.get("content"))
+            if content is None:
+                return None
+            if content.strip():
+                item["content"] = content
+            kept.append(item)
+            continue
+        if role == "tool":
+            if not pending:
+                return None
+            content = _text(message.get("content"))
+            if content is None:
+                return None
+            kept.append({"role": "tool", "tool_call_id": pending.pop(0), "content": content})
+            continue
+        if role not in {"system", "user", "assistant"}:
+            continue
+        content = _text(message.get("content"))
+        if content is None:
+            return None
+        if role in {"system", "user"} and _EMAIL.search(content):
+            return None
+        if content.strip():
+            kept.append({"role": role, "content": content})
+    while pending and kept and kept[-1].get("role") == "assistant":
+        calls = kept[-1].get("tool_calls") or []
+        extra = len(pending)
+        if len(calls) <= extra:
+            pending = pending[: extra - len(calls)]
+            kept.pop()
+        else:
+            kept[-1]["tool_calls"] = calls[: len(calls) - extra]
+            pending = []
+    if pending or len(kept) < 2:
+        return None
+    return kept
+
+
+def _hermes_dialog(conversations: Any, tools: Any) -> dict[str, Any] | None:
+    """One Hermes function-calling dialog, or None."""
+    if isinstance(tools, str):
+        try:
+            tools = json.loads(tools)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(conversations, list) or not isinstance(tools, list) or not tools:
+        return None
+    pending: list[str] = []
+    kept: list[dict[str, Any]] = []
+    number = 0
+    for turn in conversations:
+        if not isinstance(turn, dict):
+            return None
+        who = turn.get("from")
+        value = turn.get("value")
+        if not isinstance(value, str) or _EMAIL.search(value):
+            return None
+        if who == "system":
+            continue
+        if who == "human":
+            if pending or not value.strip():
+                return None
+            kept.append({"role": "user", "content": value})
+            continue
+        if who == "gpt":
+            calls = _tagged(value, "tool_call")
+            if calls is None:
+                return None
+            if calls:
+                shaped = []
+                for call in calls:
+                    if not isinstance(call, dict) or not isinstance(call.get("name"), str):
+                        return None
+                    number += 1
+                    ident = f"call-{number}"
+                    shaped.append(
+                        {
+                            "id": ident,
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": call.get("arguments") or {},
+                            },
+                        }
+                    )
+                    pending.append(ident)
+                kept.append({"role": "assistant", "tool_calls": shaped})
+            elif value.strip():
+                kept.append({"role": "assistant", "content": value.strip()})
+            continue
+        if who == "tool":
+            responses = _tagged(value, "tool_response")
+            if not responses or len(responses) > len(pending):
+                return None
+            for response in responses:
+                if not isinstance(response, dict):
+                    return None
+                content = _text(response.get("content", ""))
+                if content is None:
+                    return None
+                kept.append({"role": "tool", "tool_call_id": pending.pop(0), "content": content})
+            continue
+        return None
+    if pending or len(kept) < 2:
+        return None
+    return {"messages": kept, "tools": tools}
+
+
+def _code_dialog(instruction: Any, response: Any) -> list[dict[str, str]] | None:
+    if not isinstance(instruction, str) or not isinstance(response, str):
+        return None
+    if _EMAIL.search(instruction) or _EMAIL.search(response):
+        return None
+    if len(instruction) + len(response) < 800:
+        return None
+    return [
+        {"role": "user", "content": instruction},
+        {"role": "assistant", "content": response},
+    ]
 
 
 def _accept(messages: Any) -> list[dict[str, str]] | None:
@@ -262,98 +310,136 @@ def _accept(messages: Any) -> list[dict[str, str]] | None:
     return kept
 
 
-def _download(path: Path) -> None:
-    """Fetch ``_POOL`` train_sft rows into ``path``."""
+def _save(path: Path, rows: list[Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    found: list[list[dict[str, str]]] = []
-    offset = 0
-    while len(found) < _POOL and offset < 5000:
-        request = urllib.request.Request(
-            _ROWS.format(offset=offset), headers={"User-Agent": "favlo"}
-        )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = json.loads(response.read().decode())
-        rows = body.get("rows") or []
-        if not rows:
-            break
-        for item in rows:
-            row = item.get("row") if isinstance(item, dict) else None
-            messages = _accept(row.get("messages") if isinstance(row, dict) else None)
-            if messages is not None:
-                found.append(messages)
-            if len(found) == _POOL:
-                break
-        offset += len(rows)
-    if len(found) < _POOL:
-        message = f"ultrachat returned {len(found)} rows, need {_POOL}"
-        raise RuntimeError(message)
-    fd, name = tempfile.mkstemp(dir=path.parent, suffix=".json")
+    handle, name = tempfile.mkstemp(dir=path.parent, suffix=".json")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(found, handle)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(rows, stream)
         os.replace(name, path)
     except Exception:
         Path(name).unlink(missing_ok=True)
         raise
 
 
-def chat_rows() -> list[list[dict[str, str]]]:
-    """The downloaded dialogs, fetched once into ``artifacts/``."""
-    path = _artifact()
-    if not path.is_file():
-        _download(path)
-    found = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(found, list) or len(found) < _POOL:
-        _download(path)
-        found = json.loads(path.read_text(encoding="utf-8"))
-    rows = found[:_POOL]
-    if len(rows) < _POOL:
-        message = f"ultrachat file has {len(rows)} rows"
+def _page(dataset: str, config: str, split: str, offset: int, length: int) -> list[Any]:
+    url = _ROWS.format(dataset=dataset, config=config, split=split, offset=offset, length=length)
+    request = urllib.request.Request(url, headers={"User-Agent": "favlo"})
+    with urllib.request.urlopen(request, timeout=90) as response:
+        body = json.loads(response.read().decode())
+    return body.get("rows") or []
+
+
+def _collect(kind: str) -> list[Any]:
+    dataset, config, split, length = _SOURCES[kind]
+    need = _POOLS[kind]
+    found: list[Any] = []
+    offset = 0
+    while len(found) < need and offset < 8000:
+        rows = _page(dataset, config, split, offset, length)
+        if not rows:
+            break
+        for item in rows:
+            row = item.get("row") if isinstance(item, dict) else None
+            kept = _keep(kind, row)
+            if kept is not None:
+                found.append(kept)
+            if len(found) == need:
+                break
+        offset += len(rows)
+    if len(found) < need:
+        message = f"{kind} returned {len(found)} rows, need {need}"
         raise RuntimeError(message)
-    return rows
+    return found
 
 
-def _tool_dialogs() -> list[tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
-    dialogs = []
-    for user, name, args, result, reply in _TOOL_TURNS:
-        call = "call-1"
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": "You are an agent. Use the tools when they help."},
-            {"role": "user", "content": user},
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {"id": call, "type": "function", "function": {"name": name, "arguments": args}}
-                ],
-            },
-            {"role": "tool", "tool_call_id": call, "content": result},
-            {"role": "assistant", "content": reply},
-        ]
-        dialogs.append((messages, _TOOLS))
-    return dialogs
+def _keep(kind: str, row: Any) -> Any:
+    if not isinstance(row, dict):
+        return None
+    if kind == "agent":
+        return _agent_dialog(row)
+    if kind == "code":
+        return _code_dialog(row.get("instruction"), row.get("response"))
+    if kind == "tool":
+        return _hermes_dialog(row.get("conversations"), row.get("tools"))
+    return _accept(row.get("messages"))
+
+
+def _rows(kind: str) -> list[Any]:
+    path = _artifact(_FILES[kind])
+    need = _POOLS[kind]
+    if path.is_file():
+        found = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(found, list) and len(found) >= need:
+            return found[:need]
+    found = _collect(kind)
+    _save(path, found)
+    return found
+
+
+def chat_rows() -> list[list[dict[str, str]]]:
+    """The general-chat remainder, fetched once into ``artifacts/``."""
+    return _rows("chat")
+
+
+def _call_start(root: Path, ids: list[int]) -> int | None:
+    """Token index a little before the first tool call, or None."""
+    from inkling_2_mini.portable.chat import decode_text
+    from inkling_2_mini.portable.markup import TOOL
+
+    if TOOL not in decode_text(root, ids):
+        return None
+    lo = 0
+    hi = len(ids)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if TOOL in decode_text(root, ids[:mid]):
+            hi = mid
+        else:
+            lo = mid + 1
+    return max(0, lo - 128)
+
+
+def _window(root: Path, kind: str, row: Any, cap: int) -> list[int]:
+    from inkling_2_mini.portable.chat import encode_chat
+
+    messages = row["messages"] if isinstance(row, dict) else row
+    tools = row.get("tools") if isinstance(row, dict) else None
+    ids = encode_chat(root, messages, tools, False, effort="none", opening="")
+    start = _call_start(root, ids) if kind == "agent" else 0
+    if start is None:
+        return []
+    return ids[start : start + _PIECES[kind] * cap]
+
+
+def _pack(root: Path, kind: str, quota: int, cap: int) -> list[list[int]]:
+    pending: list[int] = []
+    sequences: list[list[int]] = []
+    for row in _rows(kind):
+        if len(sequences) >= quota:
+            break
+        try:
+            ids = _window(root, kind, row, cap)
+        except (RuntimeError, json.JSONDecodeError, ValueError, KeyError):
+            continue
+        pending.extend(ids)
+        while len(pending) >= cap and len(sequences) < quota:
+            sequences.append(pending[:cap])
+            pending = pending[cap:]
+    return sequences
 
 
 def _sequences(root: Path, limit: int, log: Any) -> list[list[int]]:
-    from inkling_2_mini.metal41.chat import encode_chat
-
     cap = SEQUENCE_LENGTH if limit <= 0 else int(limit)
     sequences: list[list[int]] = []
-    pending: list[int] = []
-    for messages in chat_rows():
-        if len(sequences) == _CHAT_SEQUENCES:
-            break
-        pending.extend(encode_chat(root, messages, None, False, effort="none", opening=""))
-        while len(pending) >= cap and len(sequences) < _CHAT_SEQUENCES:
-            sequences.append(pending[:cap])
-            pending = pending[cap:]
-    if len(sequences) < _CHAT_SEQUENCES:
-        message = f"ultrachat packed {len(sequences)} sequences, need {_CHAT_SEQUENCES}"
-        raise RuntimeError(message)
-    for messages, tools in _tool_dialogs():
-        ids = encode_chat(root, messages, tools, False, effort="none", opening="")
-        sequences.append(ids[:cap])
-    for index, ids in enumerate(sequences):
-        log(f"sequence {index + 1} tokens {len(ids)}")
+    for kind, quota in _QUOTAS:
+        got = _pack(root, kind, quota, cap)
+        if len(got) < quota:
+            message = f"{kind} packed {len(got)} sequences, need {quota}"
+            raise RuntimeError(message)
+        for ids in got:
+            sequences.append(ids)
+            log(f"sequence {len(sequences)} {kind} tokens {len(ids)}")
     return sequences
 
 

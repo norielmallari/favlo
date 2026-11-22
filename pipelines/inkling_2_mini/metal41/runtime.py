@@ -5,11 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from inkling_2_mini.metal41.chat import handle_responses
 from inkling_2_mini.metal41.forward import InklingRuntime
 
 
-def open_runtime(
+def open_device(
     path: Path,
     *,
     kv_cache: str = "half",
@@ -26,4 +25,4 @@ def open_runtime(
     return InklingRuntime(path, kv_cache=kv_cache, console=console, owner=owner)
 
 
-__all__ = ["handle_responses", "open_runtime"]
+__all__ = ["open_device"]

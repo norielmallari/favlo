@@ -13,15 +13,12 @@ import numpy as np
 from inkling_2_mini.metal41.codec import nvfp4_row
 from inkling_2_mini.metal41.layout import EOS
 from inkling_2_mini.metal41.session import Session, f32, u32
+from inkling_2_mini.portable.record import CARROT_PROMPT
 
 PIPELINE = "inkling_2_mini"
 FOLDER = "Inkling-2-Mini"
 _REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 _FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-CARROT_PROMPT = (
-    "Amanda and Celestia have 15 carrots. They collect more carrots for Favlo the Horse. "
-    "After collecting, they have 21 carrots. How many carrots did they collect?"
-)
 
 
 def _folder() -> Path:
@@ -501,7 +498,7 @@ def _folder_name(text: str) -> str:
 def register_folder(folder: Path, *, alias: str | None, root: Path | None = None) -> None:
     """Write the registry row with this pipeline's sampling card."""
     from favlo.registry import load_registry, register_quantized, save_registry
-    from inkling_2_mini.metal41.sampling import CONTEXT_LENGTH, PRESERVE_THINKING
+    from inkling_2_mini.portable.sampling import CONTEXT_LENGTH, PRESERVE_THINKING
 
     register_quantized(
         folder.name,
@@ -615,13 +612,11 @@ def _setup(args: argparse.Namespace) -> int:
 
 
 def _complete(max_memory: str | None, limit: int) -> int:
-    from favlo.memory import memory
-    from inkling_2_mini.metal41.chat import STOP, decode_text, encode_chat
-    from inkling_2_mini.metal41.forward import InklingRuntime
+    from inkling_2_mini.portable import open_runtime
+    from inkling_2_mini.portable.chat import STOP, decode_text, encode_chat
 
     folder = _folder()
-    memory.set_max_memory(max_memory)
-    runtime = InklingRuntime(folder, owner="inkling_2_mini:complete")
+    runtime = open_runtime(folder, owner="inkling_2_mini:complete", max_memory=max_memory)
     print(f"context {runtime.context}", flush=True)
     try:
         prompt = encode_chat(
@@ -631,10 +626,10 @@ def _complete(max_memory: str | None, limit: int) -> int:
             False,
             effort="none",
         )
-        tokens = runtime.generate(prompt, limit, 0.0, 1.0, 0, 0.0, STOP)
+        tokens = runtime.generate(prompt, limit, STOP, temperature=0.0, top_p=1.0)
         print(decode_text(runtime.root, tokens))
         if limit >= 32:
-            fill = runtime.generate(prompt, limit, 0.0, 1.0, 0, 0.0, STOP, fill=True)
+            fill = runtime.generate(prompt, limit, STOP, temperature=0.0, top_p=1.0, fill=True)
             print(f"fill {len(fill)} tokens", flush=True)
     finally:
         runtime.close()

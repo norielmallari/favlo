@@ -28,9 +28,9 @@ from favlo.responses import (
     usage_object,
     web_search_context,
 )
-from inkling_2_mini.metal41 import markup
-from inkling_2_mini.metal41.forward import RequestClosed
-from inkling_2_mini.metal41.sampling import (
+from inkling_2_mini.portable import markup
+from inkling_2_mini.portable.closed import RequestClosed
+from inkling_2_mini.portable.sampling import (
     DEFAULT_THINKING,
     DEFAULT_VARIANT,
     VARIANTS,
@@ -232,6 +232,13 @@ def parse_completion(text: str) -> tuple[str, str | None, list[dict[str, Any]]]:
     return reasoning, visible, calls
 
 
+def _forbid_tools(root: Path, emit: bool) -> set[int] | None:
+    """Token ids a ``tool_choice`` of ``none`` may not sample."""
+    if emit:
+        return None
+    return set(load_tokenizer(root).encode(markup.TOOL).ids)
+
+
 def forced_text(thinking: bool, required: str | None, plain: bool) -> str:
     """Markup the prompt ends with, so the model opens the right channel.
 
@@ -326,6 +333,14 @@ def _payload(
     return payload
 
 
+def _device_packages() -> frozenset[str]:
+    """Device directories shipped beside this entry. The host picks one."""
+    root = Path(__file__).resolve().parent.parent
+    return frozenset(
+        name for name in ("metal41", "cuda") if (root / name / "__init__.py").is_file()
+    )
+
+
 class Pipeline(LanguagePipeline):
     """One Responses completion. The runtime owns the token loop."""
 
@@ -364,10 +379,16 @@ class Pipeline(LanguagePipeline):
         return main(argv)
 
     def open_runtime(self, path: Path, **kwargs: Any) -> Any:
+        from favlo.host import select_device
         from favlo.pipelines import bind_open_runtime
-        from inkling_2_mini.metal41.runtime import open_runtime
 
-        return bind_open_runtime(open_runtime, path, **kwargs)
+        chosen = select_device(_device_packages())
+        if chosen != "metal41":
+            message = "this runtime cannot run here"
+            raise RuntimeError(message)
+        from inkling_2_mini.metal41.runtime import open_device
+
+        return bind_open_runtime(open_device, path, **kwargs)
 
 
 def _respond(
@@ -435,9 +456,13 @@ def _respond(
     tokens = runtime.generate(
         prompt,
         limit,
-        *sampler,
         STOP,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        presence=presence,
         fill=bool(prepared.get("favlo:fill_decode")),
+        forbid=_forbid_tools(runtime.root, shape.emit_tools),
     )
     text = opening + decode_text(runtime.root, tokens)
     payload = _finished(reply, runtime, prepared, shape, text, len(prompt), len(tokens))
@@ -674,14 +699,19 @@ def _stream(
             raise RequestClosed()
         pending.put(token)
 
+    temperature, top_p, top_k, presence = sampler
     try:
         tokens = runtime.generate(
             prompt,
             limit,
-            *sampler,
             STOP,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            presence=presence,
             fill=bool(body.get("favlo:fill_decode")),
             on_token=enqueue,
+            forbid=_forbid_tools(runtime.root, shape.emit_tools),
         )
     finally:
         pending.put(None)

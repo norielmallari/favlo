@@ -1,21 +1,10 @@
-"""Inkling 2 Mini pipeline. It does not import another pipeline package."""
+"""Inkling 2 Mini Metal device.
 
-from __future__ import annotations
+The pipeline entry is ``inkling_2_mini.portable``. This package re-exports that
+pipeline so a listener that still imports the device name serves the same
+object. The device opens from ``portable`` ``open_runtime``.
+"""
 
-from typing import Any
+from inkling_2_mini.portable import pipeline
 
-from inkling_2_mini.metal41.chat import pipeline
-
-PIPELINE = "inkling_2_mini"
-
-
-def idle_heartbeat(runtime: Any, selection: Any) -> None:
-    """The runtime has no idle promotion pass."""
-    del runtime, selection
-
-
-handle_responses = pipeline
-main = pipeline.main
-open_runtime = pipeline.open_runtime
-
-__all__ = ["pipeline", "handle_responses", "idle_heartbeat", "main", "open_runtime"]
+__all__ = ["pipeline"]
