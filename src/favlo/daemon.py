@@ -541,25 +541,10 @@ def ensure(
 
 
 def _process_rows() -> list[tuple[int, int, str]]:
-    """Pid, parent pid, and command for every process ``ps`` lists."""
-    completed = subprocess.run(
-        ["ps", "-axww", "-o", "pid=,ppid=,command="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    rows: list[tuple[int, int, str]] = []
-    for line in completed.stdout.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) < 3:
-            continue
-        try:
-            pid = int(parts[0])
-            parent = int(parts[1])
-        except ValueError:
-            continue
-        rows.append((pid, parent, parts[2]))
-    return rows
+    """Pid, parent pid, and command for every process this host lists."""
+    from favlo.processes import process_rows
+
+    return process_rows()
 
 
 def _ancestors(rows: list[tuple[int, int, str]]) -> set[int]:

@@ -33,6 +33,13 @@ class _Proc:
         return self._code
 
 
+def test_process_rows_include_this_process() -> None:
+    from favlo.processes import process_rows
+
+    rows = process_rows()
+    assert any(pid == os.getpid() for pid, _parent, _command in rows)
+
+
 def test_plain_text_keeps_log_lines_and_summaries() -> None:
     blob = "\n".join(
         [

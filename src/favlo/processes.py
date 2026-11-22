@@ -16,6 +16,15 @@ from pathlib import Path
 _NEEDLE = "favlo.pipeline_worker"
 
 
+def process_rows() -> list[tuple[int, int, str]]:
+    """Pid, parent pid, and command line for each process this host can see."""
+    if sys.platform == "win32":
+        return _windows_rows()
+    if sys.platform == "linux":
+        return _linux_rows()
+    return _darwin_rows()
+
+
 def worker_started() -> float | None:
     """Unix start time of the newest pipeline worker, or None when none is running."""
     if sys.platform == "win32":
@@ -75,6 +84,31 @@ def _bind_kernel() -> ctypes.WinDLL:
     kernel.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     kernel.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     return kernel
+
+
+def _windows_rows() -> list[tuple[int, int, str]]:
+    import ctypes
+
+    kernel = _bind_kernel()
+    snapshot = kernel.CreateToolhelp32Snapshot(0x2, 0)
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return []
+    entry = _process_entry()
+    entry.dwSize = ctypes.sizeof(entry)
+    rows: list[tuple[int, int, str]] = []
+    try:
+        if not kernel.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return []
+        while True:
+            pid = int(entry.th32ProcessID)
+            parent = int(entry.th32ParentProcessID)
+            command = _windows_command(kernel, pid) or str(entry.szExeFile)
+            rows.append((pid, parent, command))
+            if not kernel.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        kernel.CloseHandle(snapshot)
+    return rows
 
 
 def _windows_started() -> float | None:
@@ -220,6 +254,32 @@ def _windows_created(kernel: ctypes.WinDLL, pid: int) -> float | None:
         kernel.CloseHandle(handle)
 
 
+def _linux_rows() -> list[tuple[int, int, str]]:
+    rows: list[tuple[int, int, str]] = []
+    root = Path("/proc")
+    for entry in root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes().replace(b"\0", b" ")
+            stat = (entry / "stat").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        end = stat.rfind(")")
+        fields = stat[end + 2 :].split()
+        if len(fields) < 2:
+            continue
+        try:
+            parent = int(fields[1])
+        except ValueError:
+            continue
+        command = raw.decode("utf-8", errors="replace").strip()
+        if not command:
+            command = stat[stat.find("(") + 1 : end]
+        rows.append((int(entry.name), parent, command))
+    return rows
+
+
 def _linux_started() -> float | None:
     boot = _linux_boot()
     if boot is None:
@@ -264,6 +324,34 @@ def _linux_boot() -> float | None:
             except (IndexError, ValueError):
                 return None
     return None
+
+
+def _darwin_rows() -> list[tuple[int, int, str]]:
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,ppid=,command="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return []
+    if completed.returncode != 0:
+        return []
+    rows: list[tuple[int, int, str]] = []
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            parent = int(parts[1])
+        except ValueError:
+            continue
+        rows.append((pid, parent, parts[2]))
+    return rows
 
 
 def _darwin_started() -> float | None:
