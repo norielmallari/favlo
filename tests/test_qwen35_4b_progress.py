@@ -11,7 +11,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from favlo.console import Console  # noqa: E402
-from qwen35_4b.metal41 import progress  # noqa: E402
+from qwen35_4b.portable import progress  # noqa: E402
 
 
 def test_phase_helpers_use_format_rate() -> None:

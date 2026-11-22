@@ -12,9 +12,9 @@ _ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35_
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qwen35_4b.metal41.chat import _usage  # noqa: E402
 from qwen35_4b.metal41.forward import Qwen35Runtime  # noqa: E402
-from qwen35_4b.metal41.sampling import CONTEXT_LENGTH  # noqa: E402
+from qwen35_4b.portable.chat import _usage  # noqa: E402
+from qwen35_4b.portable.sampling import CONTEXT_LENGTH  # noqa: E402
 
 
 def test_usage_reports_timings_and_context_length() -> None:

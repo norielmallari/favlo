@@ -164,32 +164,42 @@ def pipeline_names(root: Path | None = None) -> tuple[str, ...]:
 
 
 def pipeline_entries(root: Path | None = None) -> dict[str, Path]:
-    """Model id to a representative runtime package directory."""
+    """Model id to the runtime package directory this host loads."""
     found: dict[str, Path] = {}
     for model, runtimes in pipeline_runtimes(root).items():
-        if "metal41" in runtimes:
-            found[model] = runtimes["metal41"]
-        elif "portable" in runtimes:
-            found[model] = runtimes["portable"]
-        else:
-            found[model] = runtimes[sorted(runtimes)[0]]
+        chosen = default_runtime(model, root)
+        found[model] = runtimes[chosen]
     return found
 
 
 def default_runtime(name: str, root: Path | None = None) -> str:
-    """Sole runtime for a model, else ``metal41``, else ``portable``."""
+    """The package serve loads. ``portable`` wins when that model ships it."""
     runtimes = pipeline_runtimes(root).get(name) or {}
     if not runtimes:
         message = f"pipeline is missing: {name}"
         raise FileNotFoundError(message)
+    if "portable" in runtimes:
+        return "portable"
     if len(runtimes) == 1:
         return next(iter(runtimes))
     if "metal41" in runtimes:
         return "metal41"
-    if "portable" in runtimes:
-        return "portable"
     message = f"pipeline {name} has multiple runtimes; pass runtime explicitly"
     raise ValueError(message)
+
+
+def serving_runtime(name: str, requested: str | None = None, root: Path | None = None) -> str:
+    """Runtime package a call actually imports.
+
+    A model that ships ``portable/`` is entered there even when the caller
+    names ``metal41`` or ``cuda``. Those names are device packages.
+    """
+    runtimes = pipeline_runtimes(root).get(name) or {}
+    if "portable" in runtimes:
+        return "portable"
+    if requested and (not runtimes or requested in runtimes):
+        return requested
+    return default_runtime(name, root)
 
 
 def _help(names: Sequence[str]) -> str:
@@ -229,7 +239,7 @@ def load_pipeline(
     if not runtimes:
         message = f"pipeline file is missing: {name}"
         raise FileNotFoundError(message)
-    chosen = runtime or default_runtime(name, root=base)
+    chosen = serving_runtime(name, runtime, base)
     if chosen not in runtimes:
         chosen = default_runtime(name, root=base)
     module_name = f"{name}.{chosen}"

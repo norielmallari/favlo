@@ -79,6 +79,24 @@ def test_load_pipeline_falls_back_when_registry_runtime_is_gone(
     assert module.__name__ == "moved_model.portable"
 
 
+def test_portable_wins_when_a_device_package_is_also_present(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from favlo.cli import drop_pipeline_modules, load_pipeline
+
+    model = tmp_path / "pipelines" / "both_model"
+    for name in ("portable", "metal41"):
+        runtime = model / name
+        runtime.mkdir(parents=True)
+        (runtime / "__init__.py").write_text(_DEMO_INIT, encoding="utf-8")
+    (model / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.delenv("FAVLO_PIPELINE_ROOTS", raising=False)
+    monkeypatch.setattr("favlo.logs.configured_pipeline_roots", lambda settings=None: ())
+    drop_pipeline_modules()
+    module = load_pipeline("both_model", tmp_path, runtime="metal41")
+    assert module.__name__ == "both_model.portable"
+
+
 def test_media_exits_when_serve_is_down(capsys) -> None:
     assert main(
         [

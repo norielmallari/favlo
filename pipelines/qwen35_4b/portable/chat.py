@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import json
 import queue
 import re
 import threading
-import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, TemplateError
 from tokenizers import Tokenizer
 
+import qwen35_4b.portable.sampling as _sampling_mod
 from favlo.language_pipeline import LanguagePipeline
-from . import sampling as _sampling_mod
 from favlo.responses import (
     RequestError,
     format_instruction,
@@ -28,12 +26,23 @@ from favlo.responses import (
     usage_object,
     web_search_context,
 )
-from qwen35_4b.metal41.closed import RequestClosed
-from qwen35_4b.metal41.vision import prepare_prompt
-from qwen35_4b.metal41.layout import EOS, IM_END
-from qwen35_4b.metal41.sampling import CONTEXT_LENGTH, mode_card
+from qwen35_4b.portable.closed import RequestClosed
+from qwen35_4b.portable.sampling import CONTEXT_LENGTH, mode_card
 
+# Same ids as layout.EOS and layout.IM_END. The shell does not import the device to read them.
+EOS = 248_044
+IM_END = 248_046
 STOP = {EOS, IM_END}
+
+
+def _device_packages() -> frozenset[str]:
+    """Device directories shipped beside this entry. The host picks one."""
+    root = Path(__file__).resolve().parent.parent
+    return frozenset(
+        name for name in ("metal41", "cuda") if (root / name / "__init__.py").is_file()
+    )
+
+
 _THINK_END = "</think>"
 _TOOL_MARK = "<tool_call>"
 _TOOL = re.compile(
@@ -430,6 +439,14 @@ def parse_tool_calls(text: str) -> tuple[str, list[dict[str, Any]]]:
     return visible, calls
 
 
+def _argument_fragments(arguments: str) -> tuple[str, ...]:
+    """Split a finished call so the first streamed piece is not a JSON object."""
+    if len(arguments) < 2:
+        return (arguments,) if arguments else ()
+    cut = len(arguments) // 2
+    return arguments[:cut], arguments[cut:]
+
+
 def _coerce(value: str) -> Any:
     try:
         return json.loads(value)
@@ -453,7 +470,7 @@ class Pipeline(LanguagePipeline):
         runtime._halted = False
 
     def on_finish(self, runtime: Any, selection: Any, *, complete: bool) -> None:
-        from qwen35_4b.metal41.vision import release_vision
+        from qwen35_4b.metal41.vision import release_vision  # device release after the turn
 
         release_vision(runtime)
         super().on_finish(runtime, selection, complete=complete)
@@ -481,10 +498,16 @@ class Pipeline(LanguagePipeline):
         return int(cli_main(argv))
 
     def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from qwen35_4b.metal41.runtime import open_runtime as open_rt
+        from favlo.host import select_device
         from favlo.pipelines import bind_open_runtime
 
-        return bind_open_runtime(open_rt, path, **kwargs)
+        chosen = select_device(_device_packages())
+        if chosen != "metal41":
+            message = "this runtime cannot run here"
+            raise RuntimeError(message)
+        from qwen35_4b.metal41.runtime import open_device
+
+        return bind_open_runtime(open_device, path, **kwargs)
 
 pipeline = Pipeline()
 handle_responses = pipeline
@@ -652,6 +675,8 @@ def _respond(
             else user_turn_cut(runtime.root, messages, tools or None, thinking)
         )
         text_prompt = prompt
+        from qwen35_4b.metal41.vision import prepare_prompt
+
         prompt = prepare_prompt(runtime, messages, prompt)
         runtime._stable_cut = _expanded_cut(runtime, text_prompt, text_cut)
         _prefix_run(runtime, prepared)
@@ -766,6 +791,7 @@ def _payload(
     *,
     response_id: str | None = None,
     reasoning_id: str | None = None,
+    message_id: str | None = None,
 ) -> dict[str, Any]:
     output: list[dict[str, Any]] = []
     if search is not None:
@@ -799,7 +825,7 @@ def _payload(
         output.append(
             {
                 "type": "message",
-                "id": new_id("msg_"),
+                "id": message_id or new_id("msg_"),
                 "role": "assistant",
                 "status": "completed",
                 "content": [{"type": "output_text", "text": visible, "annotations": []}],
@@ -975,6 +1001,7 @@ def _stream(
                                 "type": "response.output_text.delta",
                                 "item_id": message_id,
                                 "output_index": 1,
+                                "content_index": 0,
                                 "delta": delta,
                             }
                         )
@@ -1041,6 +1068,7 @@ def _stream(
         hit_limit,
         response_id=response_id,
         reasoning_id=reasoning_id,
+        message_id=message_id,
     )
     for index, item in enumerate(payload.get("output") or []):
         if not isinstance(item, dict):
@@ -1053,11 +1081,23 @@ def _stream(
             opened_call = dict(item)
             opened_call["arguments"] = ""
             event({"type": "response.output_item.added", "output_index": index, "item": opened_call})
+            call_id = str(item.get("call_id") or "")
+            item_id = str(item.get("id") or "")
+            for fragment in _argument_fragments(arguments):
+                event(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "delta": fragment,
+                        "item_id": item_id,
+                        "output_index": index,
+                        "call_id": call_id,
+                    }
+                )
             event(
                 {
                     "type": "response.function_call_arguments.done",
                     "arguments": arguments,
-                    "item_id": item.get("id") or "",
+                    "item_id": item_id,
                     "output_index": index,
                 }
             )

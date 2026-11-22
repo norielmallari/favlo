@@ -24,7 +24,7 @@ from qwen35_4b.metal41.layout import (  # noqa: E402
     kv_mode,
 )
 from qwen35_4b.metal41.mtp import kept_drafts, verify  # noqa: E402
-from qwen35_4b.metal41.sampling import DEFAULT_VARIANT, VARIANTS  # noqa: E402
+from qwen35_4b.portable.sampling import DEFAULT_VARIANT, VARIANTS  # noqa: E402
 
 
 def test_hybrid_layer_pattern() -> None:
@@ -66,7 +66,7 @@ def test_vision_pack_list() -> None:
 
 
 def test_thinking_has_no_2048_cap() -> None:
-    from qwen35_4b.metal41.chat import _output_limit
+    from qwen35_4b.portable.chat import _output_limit
 
     assert _output_limit({}, True, 60, 262144) == 262144 - 60
     assert _output_limit({"max_output_tokens": 32}, True, 60, 262144) == 32
@@ -76,8 +76,8 @@ def test_thinking_has_no_2048_cap() -> None:
 def test_effort_opens_thinking_without_changing_the_card() -> None:
     from types import SimpleNamespace
 
-    from qwen35_4b.metal41.chat import _request_effort
-    from qwen35_4b.metal41.sampling import mode_card
+    from qwen35_4b.portable.chat import _request_effort
+    from qwen35_4b.portable.sampling import mode_card
 
     instruct = SimpleNamespace(
         variant="instruct",
@@ -133,7 +133,7 @@ def test_effort_opens_thinking_without_changing_the_card() -> None:
 
 
 def test_unsupported_effort_steps_up_or_falls_back() -> None:
-    from qwen35_4b.metal41.sampling import resolve_effort
+    from qwen35_4b.portable.sampling import resolve_effort
 
     assert resolve_effort(None) is None
     assert resolve_effort("none") == "none"
@@ -167,7 +167,7 @@ def test_a_dropped_think_shares_the_prompt_before_the_generation_suffix() -> Non
     root = Path("models") / "Qwen3.5-4B-fp8"
     if not (root / "chat_template.jinja").is_file() or not (root / "tokenizer.json").is_file():
         pytest.skip("chat template is not installed")
-    from qwen35_4b.metal41.chat import encode_chat, generation_cut
+    from qwen35_4b.portable.chat import encode_chat, generation_cut
 
     first = [{"role": "user", "content": "Describe the picture."}]
     follow_up = [
@@ -195,7 +195,7 @@ def test_a_later_turn_shares_the_user_turn_not_the_open_think() -> None:
     root = Path("models") / "Qwen3.5-4B-fp8"
     if not (root / "chat_template.jinja").is_file() or not (root / "tokenizer.json").is_file():
         pytest.skip("chat template is not installed")
-    from qwen35_4b.metal41.chat import encode_chat, generation_cut, user_turn_cut
+    from qwen35_4b.portable.chat import encode_chat, generation_cut, user_turn_cut
 
     tools = [
         {
@@ -238,7 +238,7 @@ def test_a_later_turn_shares_the_user_turn_not_the_open_think() -> None:
 
 
 def test_preserve_thinking_defaults_off_and_the_request_wins() -> None:
-    from qwen35_4b.metal41.chat import preserve_thinking
+    from qwen35_4b.portable.chat import preserve_thinking
 
     assert preserve_thinking({}) is False
     assert preserve_thinking({}, None) is False
@@ -267,7 +267,7 @@ def test_preserve_thinking_defaults_off_and_the_request_wins() -> None:
 
 
 def test_an_image_pad_before_the_cut_shifts_the_stored_index() -> None:
-    from qwen35_4b.metal41.chat import _expanded_cut
+    from qwen35_4b.portable.chat import _expanded_cut
 
     class _Runtime:
         _image_lengths = [4]
@@ -280,7 +280,7 @@ def test_an_image_pad_before_the_cut_shifts_the_stored_index() -> None:
 
 
 def test_historical_reasoning_is_dropped() -> None:
-    from qwen35_4b.metal41.chat import _without_historical_reasoning
+    from qwen35_4b.portable.chat import _without_historical_reasoning
 
     history = _without_historical_reasoning(
         [

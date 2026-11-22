@@ -56,7 +56,9 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 
 - `pipeline`, `runtime`, `directory`, `source`, and `pipeline_root` are the row's identity.
 - `runtime` is `metal41`, `cuda`, or `portable`.
-- `serve` opens `directory` and imports `{pipeline}.{runtime}`.
+- `serve` opens `directory` and imports `qwen35_4b.portable`.
+- A row that still says `metal41` loads that same entry when the listener was started with the portable entry rule.
+- `metal41` re-exports that pipeline object so a listener that still imports the device name serves it. The device opens from `portable` `open_runtime`.
 - `source` is the BF16 checkout quantize checks.
 - `resident_percent` is stored as null and discarded at open.
 - This pipeline does not read `parts`.
@@ -219,6 +221,8 @@ The packed record may also hold the official MTP head as Metal `half` (`mtp-half
 - Prefill ends at the initial sampled token; decode runs from that sample to the last kept sample; prefix writes stay outside those clocks.
 - Chat Completions `usage` carries `context_length` and `timings` (`prompt_per_second`, `predicted_per_second`, `prompt_n`, `predicted_n`) from those clocks.
 - Decode streaming uses a separate queue thread.
+- A text delta sets `content_index` to 0.
+- A function call streams its arguments in two fragments, then `response.function_call_arguments.done` with the whole object.
 - NumPy stays off the hot path.
 - Presence and frequency stay on device (`penalize`, `bump_count`).
 - Those kernels, plus argmax, share the decode command buffer with the token step, and the draft buffer when MTP is on.

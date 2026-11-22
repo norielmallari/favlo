@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -12,10 +13,10 @@ _ROOT = Path(__file__).resolve().parents[1] / "pipelines" / "metal41" / "qwen35_
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from qwen35_4b.metal41.chat import STOP, decode_text, encode_chat, split_thinking  # noqa: E402
-from qwen35_4b.metal41.commands import CARROT_PROMPT, installed_record  # noqa: E402
-from qwen35_4b.metal41.forward import Qwen35Runtime  # noqa: E402
-from qwen35_4b.metal41.sampling import VARIANTS  # noqa: E402
+from qwen35_4b.portable import open_runtime  # noqa: E402
+from qwen35_4b.portable.chat import STOP, decode_text, encode_chat, split_thinking  # noqa: E402
+from qwen35_4b.portable.record import CARROT_PROMPT, installed_record  # noqa: E402
+from qwen35_4b.portable.sampling import VARIANTS  # noqa: E402
 
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768
@@ -30,7 +31,7 @@ def carrot_runtime():
     root = installed_record()
     if root is None:
         pytest.skip("quantized record is not installed")
-    runtime = Qwen35Runtime(root)
+    runtime = open_runtime(root)
     try:
         yield runtime
     finally:
@@ -38,7 +39,7 @@ def carrot_runtime():
 
 
 def _complete(
-    runtime: Qwen35Runtime,
+    runtime: Any,
     *,
     thinking: bool,
     temperature: float,
@@ -66,12 +67,12 @@ def _complete(
     return decode_text(runtime.root, tokens)
 
 
-def test_greedy_instruct(carrot_runtime: Qwen35Runtime) -> None:
+def test_greedy_instruct(carrot_runtime: Any) -> None:
     text = _complete(carrot_runtime, thinking=False, temperature=0.0)
     assert _ANSWER.search(text)
 
 
-def test_greedy_mtp(carrot_runtime: Qwen35Runtime) -> None:
+def test_greedy_mtp(carrot_runtime: Any) -> None:
     if not carrot_runtime._mtp_ready:
         pytest.skip("mtp half is not packed into the record")
     text = _complete(carrot_runtime, thinking=False, temperature=0.0, mtp=True)
@@ -79,12 +80,12 @@ def test_greedy_mtp(carrot_runtime: Qwen35Runtime) -> None:
     assert carrot_runtime._mtp_tries > 0
 
 
-def test_instruct_card(carrot_runtime: Qwen35Runtime) -> None:
+def test_instruct_card(carrot_runtime: Any) -> None:
     text = _complete(carrot_runtime, thinking=False, temperature=0.7)
     assert _ANSWER.search(text)
 
 
-def test_thinking_card(carrot_runtime: Qwen35Runtime) -> None:
+def test_thinking_card(carrot_runtime: Any) -> None:
     text = _complete(carrot_runtime, thinking=True, temperature=1.0)
     reasoning, visible = split_thinking(text, True)
     assert reasoning

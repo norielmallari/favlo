@@ -1,13 +1,10 @@
-"""Qwen3.5-4B pipeline."""
+"""Qwen3.5-4B Metal device.
 
-from __future__ import annotations
+The pipeline entry is ``qwen35_4b.portable``. This package re-exports that
+pipeline so a listener that still imports the device name serves the same
+object. The device opens from ``portable`` ``open_runtime``.
+"""
 
-from qwen35_4b.metal41.chat import pipeline
+from qwen35_4b.portable import pipeline
 
-PIPELINE = "qwen35_4b"
-
-handle_responses = pipeline
-main = pipeline.main
-open_runtime = pipeline.open_runtime
-
-__all__ = ["pipeline", "handle_responses", "main", "open_runtime"]
+__all__ = ["pipeline"]

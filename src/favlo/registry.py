@@ -1367,10 +1367,18 @@ def _resolved_effort(
 
 
 def _sampling_path(pipeline: str, *, runtime: str, pipeline_root: str | None) -> Path:
-    from favlo.cli import pipeline_tree
+    from favlo.cli import pipeline_tree, serving_runtime
 
-    directory = pipeline_tree(runtime, pipeline=pipeline, pipeline_root=pipeline_root)
-    return directory / "sampling.py"
+    chosen = serving_runtime(pipeline, runtime)
+    directory = pipeline_tree(chosen, pipeline=pipeline, pipeline_root=pipeline_root)
+    card = directory / "sampling.py"
+    if card.is_file():
+        return card
+    if chosen == "portable":
+        entry = pipeline_tree("portable", pipeline=pipeline, pipeline_root=None)
+        if (entry / "sampling.py").is_file():
+            return entry / "sampling.py"
+    return card
 
 
 def _repo_root() -> Path:

@@ -351,7 +351,7 @@ def source_mtime(selection: Any) -> float:
     pipeline = getattr(selection, "pipeline", "")
     if not isinstance(runtime, str) or not runtime or not isinstance(pipeline, str) or not pipeline:
         return 0.0
-    from favlo.cli import pipeline_tree
+    from favlo.cli import RUNTIMES, pipeline_tree
 
     try:
         root = pipeline_tree(
@@ -363,8 +363,13 @@ def source_mtime(selection: Any) -> float:
         return 0.0
     newest = 0.0
     files: list[Path] = []
-    if root.is_dir():
-        for path in root.rglob("*"):
+    trees = [root]
+    for name in RUNTIMES:
+        sibling = root.parent / name
+        if sibling.is_dir() and sibling not in trees:
+            trees.append(sibling)
+    for tree in trees:
+        for path in tree.rglob("*"):
             if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
                 continue
             files.append(path)

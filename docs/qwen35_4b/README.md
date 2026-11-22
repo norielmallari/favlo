@@ -4,7 +4,7 @@ Summary for the `qwen35_4b` language pipeline. Kernels, the packed record, the f
 
 - `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
 - After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
-- Package commands (`download`, `quantize`, `setup`, `mtp-half`, `kernels`, `complete`, `models`) require `favlo --qwen35_4b`, which loads `qwen35_4b.metal41`.
+- Package commands (`download`, `quantize`, `setup`, `mtp-half`, `kernels`, `complete`, `models`) require `favlo --qwen35_4b`, which loads `qwen35_4b.portable`. That entry opens the Metal device on Apple Silicon.
 
 - The official checkpoint is [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B).
 - Those weights are under the Apache License, Version 2.0.

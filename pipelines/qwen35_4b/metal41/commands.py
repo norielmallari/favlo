@@ -13,13 +13,10 @@ from favlo.console import Console, publish_count
 from favlo.registry import load_registry, models_dir, register_quantized, set_alias
 from qwen35_4b.metal41.convert import checkout_dir, pack_mtp_half, quantize, record_dir
 from qwen35_4b.metal41.layout import FOLDER, REPO, STEM
-from qwen35_4b.metal41.sampling import CONTEXT_LENGTH
+from qwen35_4b.portable.record import CARROT_PROMPT, installed_record
+from qwen35_4b.portable.sampling import CONTEXT_LENGTH
 
 PIPELINE = STEM
-CARROT_PROMPT = (
-    "Amanda and Celestia have 15 carrots. They collect more carrots for Favlo the Horse. "
-    "After collecting, they have 21 carrots. How many carrots did they collect?"
-)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -89,20 +86,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _models(args)
     parser.print_help()
     return 2
-
-
-def installed_record() -> Path | None:
-    path = models_dir() / FOLDER
-    manifest = path / "manifest.json"
-    if not manifest.is_file():
-        return None
-    try:
-        body = json.loads(manifest.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    if body.get("complete") is not True or not (path / "weights.bin").is_file():
-        return None
-    return path
 
 
 def _checkout_present(dest: Path) -> bool:
@@ -286,15 +269,15 @@ def _complete(args: argparse.Namespace) -> int:
         sys.stderr.write(f"missing packed record {FOLDER}\n")
         return 1
     try:
-        from qwen35_4b.metal41.runtime import open_runtime
+        from qwen35_4b.portable import open_runtime
 
         runtime = open_runtime(path, max_memory=args.max_memory)
         try:
-            from qwen35_4b.metal41.chat import encode_prompt
+            from qwen35_4b.portable.chat import encode_prompt
 
             prompt = encode_prompt(runtime.root, args.prompt)
             tokens = runtime.generate(prompt, args.max_tokens, {248044}, temperature=0.0)
-            from qwen35_4b.metal41.chat import decode_text
+            from qwen35_4b.portable.chat import decode_text
 
             sys.stdout.write(decode_text(runtime.root, tokens) + "\n")
         finally:

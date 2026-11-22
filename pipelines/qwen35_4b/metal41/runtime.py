@@ -5,11 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from qwen35_4b.metal41.chat import handle_responses
 from qwen35_4b.metal41.forward import Qwen35Runtime
 
 
-def open_runtime(
+def open_device(
     path: Path,
     *,
     kv_cache: str = "fp8_e4m3",
@@ -33,4 +32,4 @@ def open_runtime(
     )
 
 
-__all__ = ["handle_responses", "open_runtime"]
+__all__ = ["open_device"]

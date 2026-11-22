@@ -10,8 +10,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from favlo.memory import memory
-from qwen35_4b.metal41 import progress
-from qwen35_4b.metal41.closed import RequestClosed
 from qwen35_4b.metal41.layout import (
     ATTN_HEADS,
     ATTN_SCALE,
@@ -40,6 +38,8 @@ from qwen35_4b.metal41.layout import (
     kv_mode,
 )
 from qwen35_4b.metal41.session import GEMV_ROWS, PREFILL_TILE, Session, f32, u32
+from qwen35_4b.portable import progress
+from qwen35_4b.portable.closed import RequestClosed
 
 _PIECE = 8 << 20
 _CONV_CH = LINEAR_KEY_HEADS * LINEAR_HEAD_DIM * 2 + LINEAR_VALUE_HEADS * LINEAR_HEAD_DIM
@@ -440,7 +440,7 @@ class Qwen35Runtime:
         close_call = int(tool_close) if tool_close is not None and pending_forced else None
         try:
             done = 0
-            from qwen35_4b.metal41.chat import generation_cut
+            from qwen35_4b.portable.chat import generation_cut
 
             cuts: list[int] = []
             stable = getattr(self, "_stable_cut", None)

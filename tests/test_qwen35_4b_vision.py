@@ -87,8 +87,8 @@ def test_an_image_past_the_hit_is_the_only_one_embedded(monkeypatch: pytest.Monk
 def test_row_file_is_the_only_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from favlo import vision_cache
     from qwen35_4b.metal41 import vision
-    from qwen35_4b.metal41.chat import Pipeline
     from qwen35_4b.metal41.vision import release_vision
+    from qwen35_4b.portable.chat import Pipeline
 
     monkeypatch.setattr(vision_cache, "cache_dir", lambda pipeline: tmp_path / pipeline)
     assert not hasattr(vision, "_ROW_CACHE")
