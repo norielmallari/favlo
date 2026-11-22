@@ -6,7 +6,7 @@ The weights are the 5B transformer from [Wan-AI/Wan2.2-TI2V-5B](https://huggingf
 
 The packed record is `models/Wan2.2-TI2V-5B-int8`.
 
-`favlo --wan22_ti2v_5b` loads `pipelines/wan22_ti2v_5b/metal41/`.
+Apple Silicon loads `pipelines/wan22_ti2v_5b/metal41/`. Windows loads `pipelines/wan22_ti2v_5b/cuda/`.
 
 With `favlo serve` listening, `favlo media --pipeline wan22_ti2v_5b` posts a clip job.
 
