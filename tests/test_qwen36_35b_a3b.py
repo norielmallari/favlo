@@ -802,6 +802,119 @@ def test_stream_chunks_carry_reasoning_then_the_reply() -> None:
     ]
 
 
+def test_a_thinking_off_reply_streams_before_the_response_completes() -> None:
+    from favlo.reply import MemoryReply
+    from qwen36_35b_a3b.metal41.chat import _stream
+
+    class _Runtime:
+        _hit_limit = False
+        _cached_tokens = 0
+        _prefill_seconds = 0.1
+        _decode_seconds = 0.2
+        _output_ids: list[int] = []
+
+        def decode(self, ids: list[int]) -> str:
+            words = {1: "Hello", 2: " there", 3: "."}
+            return "".join(words[token] for token in ids)
+
+        def generate(self, prompt, limit, temperature, top_p, top_k, presence, stop, **kwargs):
+            del prompt, limit, temperature, top_p, top_k, presence, stop
+            ids = [1, 2, 3]
+            for token in ids:
+                kwargs["on_token"](token)
+            self._output_ids = ids
+            return ids
+
+    reply = MemoryReply("qwen36_35b_a3b")
+    _stream(reply, _Runtime(), [9], [], False, 8, 0.0, 1.0, 1, 0.0, False, [], None)
+    deltas = [
+        str(payload.get("delta") or "")
+        for payload in reply.events
+        if payload.get("type") == "response.output_text.delta"
+    ]
+    indexes = [
+        payload.get("output_index")
+        for payload in reply.events
+        if payload.get("type") == "response.output_text.delta"
+    ]
+    added = next(
+        payload
+        for payload in reply.events
+        if payload.get("type") == "response.output_item.added"
+        and (payload.get("item") or {}).get("type") == "message"
+    )
+    completed = next(
+        payload for payload in reply.events if payload.get("type") == "response.completed"
+    )
+    message = next(
+        item
+        for item in (completed.get("response") or {}).get("output") or []
+        if item.get("type") == "message"
+    )
+    assert indexes == [0, 0, 0]
+    assert deltas == ["Hello", " there", "."]
+    assert message["id"] == added["item"]["id"]
+    assert message["content"][0]["text"] == "Hello there."
+    assert _responses_stream_accepts(reply.events) == []
+
+
+def test_a_thinking_reply_completes_after_the_text_deltas() -> None:
+    from favlo.reply import MemoryReply
+    from qwen36_35b_a3b.metal41.chat import _stream
+
+    class _Runtime:
+        _hit_limit = False
+        _cached_tokens = 0
+        _prefill_seconds = 0.1
+        _decode_seconds = 0.2
+        _output_ids: list[int] = []
+
+        def decode(self, ids: list[int]) -> str:
+            words = {1: "Need", 2: " a plan", 3: "\n</think>\n\n", 4: "The", 5: " answer."}
+            return "".join(words[token] for token in ids)
+
+        def generate(self, prompt, limit, temperature, top_p, top_k, presence, stop, **kwargs):
+            del prompt, limit, temperature, top_p, top_k, presence, stop
+            ids = [1, 2, 3, 4, 5]
+            for token in ids:
+                kwargs["on_token"](token)
+            self._output_ids = ids
+            return ids
+
+    reply = MemoryReply("qwen36_35b_a3b")
+    _stream(reply, _Runtime(), [9], [], False, 8, 0.0, 1.0, 1, 0.0, True, [], None)
+    content_indexes = [
+        payload.get("output_index")
+        for payload in reply.events
+        if payload.get("type") == "response.output_text.delta"
+    ]
+    assert content_indexes
+    assert set(content_indexes) == {1}
+    assert _responses_stream_accepts(reply.events) == []
+
+
+def _responses_stream_accepts(events: list[dict]) -> list[str]:
+    from openai._models import construct_type_unchecked
+    from openai._types import omit
+    from openai.lib.streaming.responses._responses import ResponseStreamState
+    from openai.types.responses import ResponseStreamEvent as RawResponseStreamEvent
+
+    state = ResponseStreamState(input_tools=omit, text_format=omit)
+    deltas: list[str] = []
+    for payload in events:
+        try:
+            event = construct_type_unchecked(type_=RawResponseStreamEvent, value=payload)
+            fired = state.handle_event(event)
+        except Exception as exc:
+            return [f"stream error: {exc}"]
+        for item in fired:
+            if getattr(item, "type", "") == "response.output_text.delta":
+                deltas.append(str(getattr(item, "delta", "") or ""))
+    if len(deltas) < 2:
+        return ["the reply did not stream"]
+    return []
+
+
 def test_an_open_think_block_stays_out_of_the_reply() -> None:
     reasoning, reply = completion_fields("the draft reply", True)
     assert reasoning == "the draft reply"
@@ -1696,8 +1809,8 @@ def test_a_prefill_chunk_splits_experts_that_do_not_fit() -> None:
 
 
 def test_kv_widths_and_atlas_budget() -> None:
-    assert kv_mode(None) == "fp8_e4m3"
-    assert kv_mode("") == "fp8_e4m3"
+    assert kv_mode(None) == "half"
+    assert kv_mode("") == "half"
     assert kv_mode("f16") == "half"
     assert kv_mode("fp16") == "half"
     assert kv_mode("half") == "half"

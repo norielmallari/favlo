@@ -161,8 +161,8 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - `half` is tagged `half-vchan-mrope-mtp`.
 - Every other mode is tagged `<mode>-mrope-mtp`.
 - `complete` does not read `kv_cache`.
-- It takes `--kv-cache`, and that flag's default is `fp8_e4m3`.
-- A runtime constructed without a cache argument uses `fp8_e4m3`.
+- It takes `--kv-cache`, and that flag's default is `half`.
+- A runtime constructed without a cache argument uses `half`.
 
 ## Forward
 
@@ -235,7 +235,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - On a machine where the full atlas and the full limit both fit, the atlas stays complete.
 - The 10 language full-attention layers and the MTP layer share that context.
 - The served cache is the registry field in [Registry](#registry).
-- A runtime constructed without a cache argument uses `fp8_e4m3`.
+- A runtime constructed without a cache argument uses `half`.
 - `fp8_e4m3` stores a key as one byte per channel with an E8M0 scale every 32 channels, contiguous across tokens, and a value as one byte per channel along the token axis, with an E8M0 scale every 32 tokens.
 - An older `e4m3` or `fp8` row resolves to that name.
 - Prefill on that cache scores up to 4096 keys at a time on the 64 by 64 `matmul2d`, softmaxes those keys in parallel 256-key chunks, and mixes the values in one strided product.
@@ -416,6 +416,10 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - A streamed call sends the function name when `<function=...>` closes.
 - Each finished parameter follows as a `tool_calls` argument fragment.
 - Those fragments join to the same JSON object as the finished call.
+- A reply with no reasoning item is output index 0, and its text deltas use that index.
+- A reply after a reasoning item stays output index 1.
+- The completed response reuses the streamed message id.
+- `response.output_item.done` for that message is sent before `response.completed`.
 - A parameter body that is a JSON array, object, or number is that value.
 - Any other body stays a string.
 - A leading zero keeps a digit string as text.

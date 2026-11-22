@@ -164,8 +164,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     complete.add_argument(
         "--kv-cache",
         choices=("half", "fp8_e4m3", "e2m1", "f32"),
-        default="fp8_e4m3",
-        help="key/value width: fp8_e4m3, half, e2m1, or float32",
+        default="half",
+        help="key/value width: half (default), fp8_e4m3, e2m1, or float32",
     )
     complete.add_argument(
         "--max-memory",

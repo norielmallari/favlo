@@ -895,6 +895,7 @@ def _stream(
     pending: queue.Queue[int | None] = queue.Queue()
     failed: list[BaseException] = []
     text = ""
+    content_index: list[int] = []
 
     def write() -> None:
         nonlocal text
@@ -952,8 +953,17 @@ def _stream(
                 return
             if channel not in opened:
                 opened.add(channel)
-                _open_item(event, channel, reasoning_id, message_id)
-            _emit_response(event, channel, visible, reasoning_id, message_id)
+                if channel == "content":
+                    content_index.append(1 if "reasoning" in opened else 0)
+                _open_item(
+                    event,
+                    channel,
+                    reasoning_id,
+                    message_id,
+                    0 if channel == "reasoning" else content_index[0],
+                )
+            index = 0 if channel == "reasoning" else content_index[0]
+            _emit_response(event, channel, visible, reasoning_id, message_id, index)
 
         try:
             while True:
@@ -1030,6 +1040,20 @@ def _stream(
         bool(getattr(runtime, "_hit_limit", False)),
         response_id,
     )
+    message = next(
+        (item for item in payload["output"] if item.get("type") == "message"),
+        None,
+    )
+    if isinstance(message, dict):
+        message["id"] = message_id
+    if content_index and isinstance(message, dict):
+        event(
+            {
+                "type": "response.output_item.done",
+                "output_index": content_index[0],
+                "item": message,
+            }
+        )
     for index, item in enumerate(payload["output"]):
         kind = item.get("type")
         if kind == "reasoning":
@@ -1059,7 +1083,13 @@ def _stream(
         raise RequestClosed() from exc
 
 
-def _open_item(event: Any, channel: str, reasoning_id: str, message_id: str) -> None:
+def _open_item(
+    event: Any,
+    channel: str,
+    reasoning_id: str,
+    message_id: str,
+    output_index: int,
+) -> None:
     if channel == "reasoning":
         item: dict[str, Any] = {
             "type": "reasoning",
@@ -1077,11 +1107,18 @@ def _open_item(event: Any, channel: str, reasoning_id: str, message_id: str) -> 
             "status": "in_progress",
             "content": [{"type": "output_text", "text": "", "annotations": []}],
         }
-        index = 1
+        index = output_index
     event({"type": "response.output_item.added", "output_index": index, "item": item})
 
 
-def _emit_response(event: Any, channel: str, visible: str, reasoning_id: str, message_id: str) -> None:
+def _emit_response(
+    event: Any,
+    channel: str,
+    visible: str,
+    reasoning_id: str,
+    message_id: str,
+    output_index: int,
+) -> None:
     if not visible:
         return
     if channel == "reasoning":
@@ -1101,7 +1138,7 @@ def _emit_response(event: Any, channel: str, visible: str, reasoning_id: str, me
             "content_index": 0,
             "delta": visible,
             "item_id": message_id,
-            "output_index": 1,
+            "output_index": output_index,
             "logprobs": [],
         }
     )

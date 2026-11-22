@@ -4,8 +4,8 @@ The checkpoint cap is ``max_position_embeddings``. The served window stops at
 ``DEFAULT_CONTEXT_LENGTH``. The live cache starts at one 4096-token chunk and
 grows with the prompt and with decode, up to the longest multiple of 4096 that
 still leaves eight expert images and still fits that window. The atlas then keeps
-as many images as the remaining bytes allow. The cache is ``fp8_e4m3`` unless
-the caller asks for half, ``e2m1``, or the float32 values. half keys are
+as many images as the remaining bytes allow. The cache is half unless
+the caller asks for ``fp8_e4m3``, ``e2m1``, or the float32 values. half keys are
 ``[head, token, channel]`` and half values lie along the token axis, with no
 scale plane. float32 stores both planes ``[head, token, channel]``.
 ``fp8_e4m3`` and ``e2m1`` keys scale every 32 channels. Their values lie
@@ -46,11 +46,11 @@ KV_BUFFERS = FULL_ATTENTION * 2
 
 
 def kv_mode(name: str | None) -> str:
-    """``half``, ``fp8_e4m3``, ``e2m1``, or ``f32``. Empty means ``fp8_e4m3``.
+    """``half``, ``fp8_e4m3``, ``e2m1``, or ``f32``. Empty means ``half``.
 
     ``f16`` and ``fp16`` are half. ``e4m3`` and ``fp8`` are ``fp8_e4m3``.
     """
-    text = "fp8_e4m3" if name is None or name == "" else str(name)
+    text = "half" if name is None or name == "" else str(name)
     text = _ALIASES.get(text, text)
     if text not in MODES:
         message = f"kv cache {name} is not half, fp8_e4m3, e2m1, or f32"

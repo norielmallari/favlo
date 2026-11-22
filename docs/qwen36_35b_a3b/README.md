@@ -10,6 +10,7 @@ Summary for the `qwen36_35b_a3b` language pipeline. Kernels, the packed record, 
 - Those weights are under the Apache License, Version 2.0.
 - Registration sets `default_variant` to `thinking` and `mtp_depth` to 3 unless the request overrides them.
 - The served context window is 131072 tokens.
+- The key/value plane is half. `fp8_e4m3`, `e2m1`, and `f32` are the other widths.
 - The default packed record is `Qwen3.6-35B-A3B-fp8-e20`.
 
 After changing an open-time registry field, unload the resident model:
