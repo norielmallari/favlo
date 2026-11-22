@@ -204,6 +204,27 @@ def test_alias_must_be_one_unused_name(tmp_path) -> None:
     assert resolve("renamed", root=tmp_path).folder == "one"
 
 
+def test_a_hyphen_spelling_is_the_underscore_alias(tmp_path) -> None:
+    folder = "Qwen3.6-35B-A3B-fp8-e30-24h"
+    _record(tmp_path, folder)
+    add_model(folder, alias="qwen36_35b_a3b", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
+    found = resolve("qwen36-35b-a3b:instruct", root=tmp_path)
+    assert found.folder == folder
+    assert found.variant == "instruct"
+    assert resolve("qwen36-35b-a3b", root=tmp_path).folder == folder
+
+
+def test_two_rows_with_one_spelling_stay_unknown(tmp_path) -> None:
+    _record(tmp_path, "one")
+    _record(tmp_path, "two")
+    add_model("one", alias="a_b-c", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
+    add_model("two", alias="a-b_c", root=tmp_path, pipeline=PIPELINE, runtime="metal41")
+    with pytest.raises(LookupError, match="unknown model"):
+        resolve("a_b_c", root=tmp_path)
+    assert resolve("a_b-c", root=tmp_path).folder == "one"
+    assert resolve("a-b_c", root=tmp_path).folder == "two"
+
+
 def test_a_second_pipeline_is_listed_without_a_default(tmp_path) -> None:
     small = "Qwen3.6-35B-A3B-fp4"
     dense = "Qwen3.8-27B-fp4"

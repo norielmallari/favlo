@@ -373,7 +373,8 @@ def resolve(model: str, *, root: Path | None = None, resident: str | None = None
 
     The id is the alias when the row stores one, otherwise the folder. A folder
     name is not accepted when that row has an alias. A pipeline name is not a
-    resolve target unless it is that public id.
+    resolve target unless it is that public id. Hyphens and underscores in
+    that id name the same row when exactly one row matches.
     """
     del resident
     data = load_registry(root)
@@ -1062,11 +1063,31 @@ def _unknown(text: str, data: dict[str, Any]) -> NoReturn:
     raise LookupError(message)
 
 
+def _id_spelling(text: str) -> str:
+    """Public-id spelling with hyphens and underscores treated as one character."""
+    return text.replace("-", "_")
+
+
 def _folder_for(data: dict[str, Any], base: str) -> str | None:
-    """Storage folder for a public id. Folder and pipeline names are not aliases."""
+    """Storage folder for a public id. Folder and pipeline names are not aliases.
+
+    An exact public id wins. A hyphen or an underscore that is the only other
+    difference matches when one row has that spelling.
+    """
+    exact: str | None = None
+    spelled: list[str] = []
+    wanted = _id_spelling(base)
     for folder, entry in data["models"].items():
-        if _public_id(entry, folder) == base:
-            return folder
+        public = _public_id(entry, folder)
+        if public == base:
+            exact = folder
+            break
+        if _id_spelling(public) == wanted:
+            spelled.append(folder)
+    if exact is not None:
+        return exact
+    if len(spelled) == 1:
+        return spelled[0]
     return None
 
 

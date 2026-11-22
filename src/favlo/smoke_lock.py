@@ -243,28 +243,32 @@ def unload_if_changed(
     host: str = _HOST,
     port: int = _PORT,
 ) -> bool:
-    """Close the resident model when ``pipeline`` sources are newer than its worker.
+    """Close the resident model when it is a different folder, or when its sources are newer.
 
-    A stamp that names a different model stays until the next request names
-    this one. With no stamp, the newest pipeline worker's start time is the
-    clock. A request that is open is left running. The listener reloads on
-    the next request for this pipeline.
+    The same folder stays, including when the request spells that alias with
+    hyphens. A different folder closes even when both rows use one pipeline.
+    With no stamp, the newest pipeline worker's start time is the clock. A
+    request that is open is left running.
     """
     from favlo.daemon import read_resident_stamp
     from favlo.pipelines import source_mtime
     from favlo.registry import resolve
 
-    stamp = read_resident_stamp(port)
-    if stamp is not None and stamp.get("pipeline") != pipeline:
-        return False
-    started = stamp.get("started") if stamp is not None else _worker_started()
-    if isinstance(started, bool) or not isinstance(started, (int, float)):
-        return False
     try:
         selection = resolve(pipeline, root=root)
     except (LookupError, OSError, ValueError):
         return False
-    if source_mtime(selection) <= float(started):
+    stamp = read_resident_stamp(port)
+    started = stamp.get("started") if stamp is not None else _worker_started()
+    if isinstance(started, bool) or not isinstance(started, (int, float)):
+        return False
+    resident_folder = stamp.get("folder") if stamp is not None else None
+    different = isinstance(resident_folder, str) and resident_folder and resident_folder != selection.folder
+    if stamp is not None and not different:
+        if not (isinstance(resident_folder, str) and resident_folder):
+            if stamp.get("pipeline") != selection.pipeline:
+                return False
+    if not different and source_mtime(selection) <= float(started):
         return False
     code, body = _post(host, port, "/v1/pipelines/close", {})
     if code == 200:

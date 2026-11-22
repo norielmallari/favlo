@@ -373,7 +373,12 @@ def test_unload_if_changed_closes_a_stale_pipeline(tmp_path: Path, monkeypatch) 
         lambda _port, home=None: {"pipeline": "qwen36_35b_a3b", "started": 1.0},
     )
     monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 50.0)
-    monkeypatch.setattr("favlo.registry.resolve", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda *_args, **_kwargs: type(
+            "Selection", (), {"folder": "packed", "pipeline": "qwen36_35b_a3b"}
+        )(),
+    )
     try:
         closed = unload_if_changed(root=tmp_path, pipeline="qwen36_35b_a3b", port=port)
     finally:
@@ -408,7 +413,12 @@ def test_unload_if_changed_uses_the_worker_clock_without_a_stamp(
     monkeypatch.setattr("favlo.daemon.read_resident_stamp", lambda _port, home=None: None)
     monkeypatch.setattr("favlo.smoke_lock._worker_started", lambda: 1.0)
     monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 50.0)
-    monkeypatch.setattr("favlo.registry.resolve", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda *_args, **_kwargs: type(
+            "Selection", (), {"folder": "packed", "pipeline": "qwen36_35b_a3b"}
+        )(),
+    )
     try:
         closed = unload_if_changed(root=tmp_path, pipeline="qwen36_35b_a3b", port=port)
     finally:
@@ -426,11 +436,79 @@ def test_etime_parses_days_hours_and_minutes() -> None:
     assert _etime_seconds("nope") is None
 
 
+def test_unload_if_changed_closes_a_different_folder(tmp_path: Path, monkeypatch) -> None:
+    class _Close(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            del fmt, args
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            self.rfile.read(length)
+            body = json.dumps({"unloaded": True, "closed": "other"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Close)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = int(server.server_address[1])
+    monkeypatch.setattr(
+        "favlo.daemon.read_resident_stamp",
+        lambda _port, home=None: {
+            "pipeline": "qwen36_35b_a3b",
+            "folder": "world",
+            "started": 50.0,
+        },
+    )
+    monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 1.0)
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda *_args, **_kwargs: type(
+            "Selection", (), {"folder": "base", "pipeline": "qwen36_35b_a3b"}
+        )(),
+    )
+    try:
+        closed = unload_if_changed(root=tmp_path, pipeline="qwen36_35b_a3b", port=port)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert closed is True
+
+
+def test_unload_if_changed_keeps_the_same_folder(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "favlo.daemon.read_resident_stamp",
+        lambda _port, home=None: {
+            "pipeline": "qwen36_35b_a3b",
+            "folder": "packed",
+            "started": 50.0,
+        },
+    )
+    monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 1.0)
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda *_args, **_kwargs: type(
+            "Selection", (), {"folder": "packed", "pipeline": "qwen36_35b_a3b"}
+        )(),
+    )
+    assert unload_if_changed(root=tmp_path, pipeline="qwen36-35b-a3b", port=1) is False
+
+
 def test_unload_if_changed_keeps_a_current_pipeline(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "favlo.daemon.read_resident_stamp",
         lambda _port, home=None: {"pipeline": "qwen36_35b_a3b", "started": 50.0},
     )
     monkeypatch.setattr("favlo.pipelines.source_mtime", lambda _selection: 1.0)
-    monkeypatch.setattr("favlo.registry.resolve", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "favlo.registry.resolve",
+        lambda *_args, **_kwargs: type(
+            "Selection", (), {"folder": "packed", "pipeline": "qwen36_35b_a3b"}
+        )(),
+    )
     assert unload_if_changed(root=tmp_path, pipeline="qwen36_35b_a3b", port=1) is False
