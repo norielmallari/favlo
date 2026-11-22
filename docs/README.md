@@ -32,6 +32,10 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38_27b/research/synthetic-prompt-half.md](qwen38_27b/research/synthetic-prompt-half.md) | Qwen3.8-27B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e20 pack with half keys and values |
 | [qwen38_27b/research/synthetic-prompt-mtp-half.md](qwen38_27b/research/synthetic-prompt-mtp-half.md) | Qwen3.8-27B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e20 pack with half keys and values and MTP on |
 | [qwen36_35b_a3b/README.md](qwen36_35b_a3b/README.md) | Qwen3.6-35B-A3B summary |
+| [inkling_2_mini/README.md](inkling_2_mini/README.md) | Inkling 2 Mini summary |
+| [inkling_2_mini/ceilings.md](inkling_2_mini/ceilings.md) | Inkling 2 Mini bandwidth ceiling and kernel costs |
+| [inkling_2_mini/research/synthetic-prompt-half.md](inkling_2_mini/research/synthetic-prompt-half.md) | Inkling 2 Mini cold 512, 1024, 4096, and 10000-token prompts on the GPTQ dense fp4 pack with half keys and values |
+| [inkling_2_mini/research/coding-text-half.md](inkling_2_mini/research/coding-text-half.md) | Inkling 2 Mini text coding agent on the GPTQ dense fp4 pack with half keys and values |
 | [qwen36_35b_a3b/research/fp16-peak-restore.md](qwen36_35b_a3b/research/fp16-peak-restore.md) | Qwen3.6-35B-A3B float16 peak-restore bound |
 | [qwen36_35b_a3b/research/kernel-ceilings.md](qwen36_35b_a3b/research/kernel-ceilings.md) | Qwen3.6-35B-A3B isolated dispatch sum |
 | [qwen36_35b_a3b/research/recorded-forward.md](qwen36_35b_a3b/research/recorded-forward.md) | Qwen3.6-35B-A3B recorded prefill and decode sums |

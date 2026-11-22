@@ -95,6 +95,7 @@ A Gallery is a workspace on an agent's channel.
 |---|---|---|---|---|
 | `qwen35_4b` | [Qwen3.5-4B](docs/qwen35_4b/README.md) | ✅ | ✅ | ✅ |
 | `qwen36_35b_a3b` | [Qwen3.6-35B-A3B](docs/qwen36_35b_a3b/README.md) | ⚠️ | ⚠️ | ✅ |
+| `inkling_2_mini` | [Inkling 2 Mini](docs/inkling_2_mini/README.md) | ❌ | ❌ | ✅ |
 | `gemma4_26b_a4b` | [Gemma 4 26B-A4B](docs/gemma4_26b_a4b/README.md) | ⚠️ | ⚠️ | ✅ |
 | `qwen38_27b` | [Qwen3.8-27B](docs/qwen38_27b/README.md) | ⚠️ | ⚠️ | ✅ |
 | `bge_m3` | [BGE-M3](docs/bge_m3/README.md) | ✅ | ✅ | ✅ |
@@ -238,6 +239,7 @@ Favlo is licensed under the Apache License, Version 2.0. The terms are in [LICEN
 |---|---|---|
 | Qwen3.5-4B | Apache License, Version 2.0 | [note](docs/qwen35_4b/README.md) |
 | Qwen3.6-35B-A3B | Apache License, Version 2.0 | [note](docs/qwen36_35b_a3b/README.md) |
+| Inkling 2 Mini | Apache License, Version 2.0 | [note](docs/inkling_2_mini/README.md) |
 | Gemma 4 26B-A4B | [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license) | [note](docs/gemma4_26b_a4b/README.md) |
 | Qwen3.8-27B | Apache License, Version 2.0 | [note](docs/qwen38_27b/README.md) |
 | bge-m3 | MIT License | [note](docs/bge_m3/README.md) |

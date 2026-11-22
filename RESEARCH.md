@@ -15,6 +15,7 @@ The model cell is `<id>, MTP off`, or `<id>, MTP on, depth <n>`. Weights is the 
 | `qwen36_35b_a3b, MTP off` | fp8-e30-24h (resident fp8; 3072/10240 experts fp8, rest fp4) | `half` | 691.10 / 71.36 | 998.83 / 71.08 | 1337.47 / 69.31 | 1317.11 / 67.50 | 2026-11-15 | [docs/qwen36_35b_a3b/research/synthetic-prompt-half.md](docs/qwen36_35b_a3b/research/synthetic-prompt-half.md) |
 | `qwen38_27b, MTP off` | fp8-e20 | `half` | 293.68 / 14.37 | 403.33 / 14.82 | 446.84 / 14.00 | 467.09 / 13.77 | 2026-11-16 | [docs/qwen38_27b/research/synthetic-prompt-half.md](docs/qwen38_27b/research/synthetic-prompt-half.md) |
 | `qwen38_27b, MTP on, depth 3` | fp8-e20 | `half` | 298.20 / 15.99 | 396.65 / 17.27 | 487.60 / 15.80 | 467.52 / 15.33 | 2026-11-19 | [docs/qwen38_27b/research/synthetic-prompt-mtp-half.md](docs/qwen38_27b/research/synthetic-prompt-mtp-half.md) |
+| `inkling_2_mini, MTP off` | fp4-gptq (dense fp4 GPTQ; experts in layers 0–19 fp4, 20–23 mxfp8) | `half` | 1221.30 / 68.89 | 1388.06 / 67.60 | 1430.63 / 65.41 | 1328.57 / 62.56 | 2026-11-22 | [docs/inkling_2_mini/research/synthetic-prompt-half.md](docs/inkling_2_mini/research/synthetic-prompt-half.md) |
 
 ## Historical
 
@@ -65,6 +66,7 @@ The model cell is `<id>, MTP off`, or `<id>, MTP on, depth <n>`. Weights is the 
 | `coding-agent` | `qwen35_4b` | narrowed | 2026-11-05 |  | 2026-11-05 | On an M5 Pro with 48 GB, `fp8_e4m3` MTP off passed the vision coding agent at 1416.98 / 27.46 tok/s (thinking) and 1414.22 / 27.24 tok/s (instruct). | [docs/qwen35_4b/research/coding-agent.md](docs/qwen35_4b/research/coding-agent.md) |
 | `coding-agent-mtp` | `qwen35_4b` | narrowed | 2026-11-15 |  | 2026-11-15 | On an M5 Pro with 48 GB, `fp8_e4m3` MTP on at depth 3 passed the vision coding agent on the thinking card at 560.55 / 18.04 tok/s; the instruct card stays 1469.46 / 23.91 tok/s. | [docs/qwen35_4b/research/coding-agent-mtp.md](docs/qwen35_4b/research/coding-agent-mtp.md) |
 | `coding-text` | `qwen35_4b` | measured | 2026-11-15 |  | 2026-11-15 | On an M5 Pro with 48 GB, `fp8_e4m3` MTP off passed the text coding agent, thinking on and vision off, at 738.46 tok/s prefill and 28.26 tok/s decode. | [docs/qwen35_4b/research/coding-text.md](docs/qwen35_4b/research/coding-text.md) |
+| `coding-text-half` | `inkling_2_mini` | measured | 2026-11-22 |  | 2026-11-22 | On an M5 Pro with 48 GB, the GPTQ dense fp4 pack with `half` MTP off passed the text coding agent at 816.27 / 64.60 tok/s (thinking) and 859.82 / 64.48 tok/s (instruct). | [docs/inkling_2_mini/research/coding-text-half.md](docs/inkling_2_mini/research/coding-text-half.md) |
 
 ## Media
 

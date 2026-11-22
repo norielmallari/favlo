@@ -1,0 +1,422 @@
+"""CLI for the Inkling 2 Mini pipeline. NVFP4 experts are requantized at open."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+
+import numpy as np
+
+from inkling_2_mini.metal41.codec import nvfp4_row
+from inkling_2_mini.metal41.layout import EOS
+from inkling_2_mini.metal41.session import Session, f32, u32
+
+PIPELINE = "inkling_2_mini"
+FOLDER = "Inkling-2-Mini"
+CARROT_PROMPT = (
+    "Amanda and Celestia have 15 carrots. They collect more carrots for Favlo the Horse. "
+    "After collecting, they have 21 carrots. How many carrots did they collect?"
+)
+
+
+def _folder() -> Path:
+    from favlo.registry import models_dir
+
+    return models_dir() / FOLDER
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="favlo --inkling_2_mini")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("kernels", help="compile the shader library and run the dispatch checks")
+    setup = sub.add_parser("setup", help="register the checkpoint folder under models/")
+    setup.add_argument("--name", default=FOLDER)
+    complete = sub.add_parser("complete", help="greedy carrot completion from the checkpoint")
+    complete.add_argument("--max-memory", default=None)
+    complete.add_argument("--limit", type=int, default=64)
+    sub.add_parser("models", help="list registered checkpoints")
+    calibrate = sub.add_parser(
+        "calibrate", help="round the dense fp4 planes with GPTQ from calibration inputs"
+    )
+    calibrate.add_argument("--limit", type=int, default=384)
+    calibrate.add_argument(
+        "--reuse", action="store_true", help="round again from the saved calibration input sums"
+    )
+    try:
+        args = parser.parse_args(list(argv) if argv is not None else None)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    if args.command == "kernels":
+        return _kernels()
+    if args.command == "setup":
+        return _setup(args.name)
+    if args.command == "complete":
+        return _complete(args.max_memory, args.limit)
+    if args.command == "calibrate":
+        return _calibrate(args.limit, args.reuse)
+    return _models()
+
+
+def _calibrate(limit: int, reuse: bool) -> int:
+    from inkling_2_mini.metal41.calibration import calibrate
+
+    calibrate(_folder(), limit=limit, reuse=reuse, log=lambda line: print(line, flush=True))
+    return 0
+
+
+def _kernels() -> int:
+    from favlo.memory import memory
+
+    owner = "inkling_2_mini:kernels"
+    session = Session(owner)
+    try:
+        rng = np.random.default_rng(7)
+        _check_f16(session, rng)
+        _check_fp4(session, rng)
+        _check_nvfp4(session, rng)
+        _check_argmax(session, rng)
+        _check_attention(session, rng)
+    finally:
+        session.close()
+        memory.sweep(owner)
+    print("kernels ok")
+    return 0
+
+
+_E2M1 = np.array(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+)
+
+
+def _metal_fp4(packed: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    """Host dequant of Metal fp4 rows: E2M1 nibbles times 2 ** (scale - 127) per 32."""
+    low = _E2M1[packed & 0x0F]
+    high = _E2M1[packed >> 4]
+    values = np.stack([low, high], axis=-1).reshape(packed.shape[0], -1)
+    factor = np.repeat(np.exp2(scales.astype(np.float64) - 127.0), 32, axis=1)
+    return (values * factor).astype(np.float32)
+
+
+def _close(found: np.ndarray, expect: np.ndarray, tol: float, label: str) -> None:
+    scale = float(np.max(np.abs(expect))) or 1.0
+    error = float(np.max(np.abs(found - expect))) / scale
+    if not np.isfinite(error) or error > tol:
+        message = f"{label} error {error:.4f} is over {tol}"
+        raise RuntimeError(message)
+
+
+def _check_f16(session: Session, rng: np.random.Generator) -> None:
+    rows, cols, inner = 64, 128, 256
+    activation = rng.standard_normal((rows, inner)).astype(np.float16)
+    weight = rng.standard_normal((cols, inner)).astype(np.float16)
+    expect = activation.astype(np.float32) @ weight.astype(np.float32).T
+    dest = session.zeros(rows * cols * 4)
+    session.dispatch(
+        "matmul_f16_m64",
+        [session.upload(activation), session.upload(weight), dest],
+        [u32(rows), u32(cols), u32(inner)],
+        (cols // 64, rows // 64, 1),
+    )
+    _close(session.download_f32(dest, rows * cols).reshape(rows, cols), expect, 1e-3, "half matmul")
+    one = activation[0].astype(np.float32)
+    gemv = session.zeros(cols * 4)
+    session.dispatch(
+        "gemv_f16",
+        [session.upload(one), session.upload(weight), gemv],
+        [u32(cols), u32(inner)],
+        (cols, 1, 1),
+    )
+    _close(session.download_f32(gemv, cols), expect[0], 1e-3, "half gemv")
+
+
+def _check_fp4(session: Session, rng: np.random.Generator) -> None:
+    from inkling_2_mini.metal41.weights import _quantize_fp4
+
+    rows, cols, inner = 64, 256, 512
+    packed, scales = _quantize_fp4(rng.standard_normal((cols, inner)).astype(np.float32))
+    weight = _metal_fp4(packed, scales)
+    activation = rng.standard_normal((rows, inner)).astype(np.float16)
+    expect = activation.astype(np.float32) @ weight.T
+    data = session.upload(packed)
+    scale = session.upload(scales)
+    dest = session.zeros(rows * cols * 4)
+    session.dispatch(
+        "matmul_fp4_m32",
+        [session.upload(activation), data, scale, dest],
+        [u32(rows), u32(cols), u32(inner), u32(cols)],
+        (cols // 128, rows // 32, 1),
+    )
+    _close(session.download_f32(dest, rows * cols).reshape(rows, cols), expect, 2e-3, "fp4 matmul")
+    gemv = session.zeros(cols * 4)
+    session.dispatch(
+        "gemv_fp4",
+        [session.upload(activation[0].astype(np.float32)), data, scale, gemv],
+        [u32(cols), u32(inner)],
+        (cols // 4, 1, 1),
+    )
+    _close(session.download_f32(gemv, cols), expect[0], 1e-4, "fp4 gemv")
+
+
+def _check_nvfp4(session: Session, rng: np.random.Generator) -> None:
+    experts, rows, cols = 2, 64, 128
+    packed = rng.integers(0, 256, (experts, rows, cols // 2), dtype=np.uint8)
+    scales = rng.integers(0x20, 0x40, (experts, rows, cols // 16), dtype=np.uint8)
+    global_scale = np.array([0.5, 2.0], dtype=np.float32)
+    dest = session.zeros(rows * cols * 2)
+    session.launch(
+        "dequant_nvfp4",
+        [session.upload(packed[0]), session.upload(scales[0]), dest],
+        [u32(rows), u32(cols), f32(0.5)],
+        rows * cols,
+    )
+    found = np.frombuffer(session.download(dest, rows * cols * 2), dtype=np.float16).astype(
+        np.float32
+    )
+    expect = np.stack([nvfp4_row(packed[0, row], scales[0, row], 0.5) for row in range(rows)])
+    _close(found.reshape(rows, cols), expect, 1e-3, "NVFP4 dequant")
+    out_data = session.zeros(experts * rows * cols // 2)
+    out_scale = session.zeros(experts * rows * cols // 32)
+    session.launch(
+        "pack_nvfp4_fp4",
+        [
+            session.upload(packed),
+            session.upload(scales),
+            session.upload(global_scale),
+            out_data,
+            out_scale,
+        ],
+        [u32(experts), u32(rows), u32(cols), u32(cols)],
+        experts * rows * cols // 32,
+    )
+    got = np.frombuffer(session.download(out_data, experts * rows * cols // 2), dtype=np.uint8)
+    got_scale = np.frombuffer(
+        session.download(out_scale, experts * rows * cols // 32), dtype=np.uint8
+    )
+    for expert in range(experts):
+        source = np.stack(
+            [
+                nvfp4_row(packed[expert, row], scales[expert, row], float(global_scale[expert]))
+                for row in range(rows)
+            ]
+        )
+        requant = _metal_fp4(
+            got.reshape(experts, rows, cols // 2)[expert],
+            got_scale.reshape(experts, rows, cols // 32)[expert],
+        )
+        _close(requant, source, 0.2, "NVFP4 requant")
+
+
+def _check_argmax(session: Session, rng: np.random.Generator) -> None:
+    count = 200064
+    logits = rng.standard_normal(count).astype(np.float32)
+    logits[123457] = 50.0
+    groups = (count + 255) // 256
+    values = session.zeros(groups * 4)
+    index = session.zeros(groups * 4)
+    chosen = session.zeros(16)
+    session.dispatch(
+        "argmax_span",
+        [session.upload(logits), values, index],
+        [u32(count), f32(0.0), u32(1)],
+        (groups, 1, 1),
+    )
+    session.dispatch("argmax_index", [values, index, chosen], [u32(groups)], (1, 1, 1))
+    picked = int(np.frombuffer(session.download(chosen, 4), dtype=np.uint32)[0])
+    if picked != 123457:
+        message = f"argmax picked {picked}"
+        raise RuntimeError(message)
+    # A logit 60 above the rest wins every Gumbel draw unless the noise is infinite.
+    draws = 2000
+    sharp = np.zeros(count, dtype=np.float32)
+    sharp[777] = 60.0
+    sharp_handle = session.upload(sharp)
+    picks = session.zeros(draws * 4)
+    session.begin()
+    for draw in range(draws):
+        session.dispatch(
+            "argmax_span",
+            [sharp_handle, values, index],
+            [u32(count), f32(1.0), u32(draw * 2654435761 & 0xFFFFFFFF)],
+            (groups, 1, 1),
+        )
+        session.dispatch(
+            "argmax_index", [values, index, (picks, draw * 4)], [u32(groups)], (1, 1, 1)
+        )
+    session.end()
+    won = np.frombuffer(session.download(picks, draws * 4), dtype=np.uint32)
+    strays = int(np.count_nonzero(won != 777))
+    if strays:
+        message = f"Gumbel draw picked a token 60 below the top {strays} times in {draws}"
+        raise RuntimeError(message)
+
+
+def _attention_reference(
+    q: np.ndarray,
+    rel: np.ndarray,
+    gate: np.ndarray,
+    sink: np.ndarray,
+    keys: np.ndarray,
+    values: np.ndarray,
+    table: np.ndarray,
+    position: int,
+    window: int,
+) -> np.ndarray:
+    """One token, 24 query heads over 8 key heads, with sink, relative bias, and gate."""
+    lo = max(0, position + 1 - window) if window else 0
+    dist = position - np.arange(lo, position + 1)
+    near = dist < 1024
+    out = np.zeros((24, 128), dtype=np.float64)
+    for head in range(24):
+        kv = head // 3
+        k = keys[lo : position + 1, kv * 128 : kv * 128 + 128].astype(np.float64)
+        v = values[lo : position + 1, kv * 128 : kv * 128 + 128].astype(np.float64)
+        scores = k @ q[head].astype(np.float64) * 128**-0.5
+        bias = rel[head].astype(np.float64) @ table[:, np.minimum(dist, 1023)]
+        scores = scores + np.where(near, bias, 0.0)
+        logits = np.concatenate([[float(sink[head])], scores])
+        weights = np.exp(logits - logits.max())
+        weights /= weights.sum()
+        out[head] = weights[1:] @ v / (1.0 + np.exp(-gate[head].astype(np.float64)))
+    return out.astype(np.float32)
+
+
+def _check_attention(session: Session, rng: np.random.Generator) -> None:
+    from inkling_2_mini.metal41.weights import ATTN_ROWS, ROW_GATE, ROW_REL
+
+    tokens, pos0, context = 40, 1100, 1140
+    keys = (rng.standard_normal((context, 1024)) * 0.3).astype(np.float16)
+    values = rng.standard_normal((context, 1024)).astype(np.float16)
+    proj = rng.standard_normal((tokens, ATTN_ROWS)).astype(np.float32)
+    table = (rng.standard_normal((16, 1024)) * 0.3).astype(np.float32)
+    sink = rng.standard_normal((tokens, 64)).astype(np.float32)
+    k_cache = session.upload(keys)
+    v_cache = session.upload(values)
+    proj_h = session.upload(proj)
+    table_h = session.upload(table)
+    sink_h = session.upload(sink)
+    out = session.zeros(tokens * 3072 * 4)
+
+    def heads(row: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        q = proj[row, :3072].reshape(24, 128)
+        rel = proj[row, ROW_REL : ROW_REL + 384].reshape(24, 16)
+        gate = proj[row, ROW_GATE : ROW_GATE + 3072].reshape(24, 128)
+        return q, rel, gate
+
+    for window in (0, 1024):
+        session.dispatch(
+            "attend_flash",
+            [
+                proj_h,
+                k_cache,
+                v_cache,
+                (proj_h, ROW_REL * 4),
+                table_h,
+                sink_h,
+                (proj_h, ROW_GATE * 4),
+                out,
+            ],
+            [
+                u32(tokens),
+                u32(pos0),
+                u32(window),
+                u32(ATTN_ROWS),
+                u32(ATTN_ROWS),
+                u32(64),
+                u32(ATTN_ROWS),
+            ],
+            (24, (tokens + 31) // 32, 1),
+        )
+        found = session.download_f32(out, tokens * 3072).reshape(tokens, 24, 128)
+        for row in (0, tokens - 1):
+            q, rel, gate = heads(row)
+            expect = _attention_reference(
+                q, rel, gate, sink[row], keys, values, table, pos0 + row, window
+            )
+            _close(found[row], expect, 5e-3, f"prefill attention window {window}")
+        position = context - 1
+        span = max(256, -(-(position + 1) // 1024) * 256)
+        q, rel, gate = heads(0)
+        session.dispatch(
+            "attend_group",
+            [
+                proj_h,
+                k_cache,
+                v_cache,
+                (proj_h, ROW_REL * 4),
+                table_h,
+                sink_h,
+                (proj_h, ROW_GATE * 4),
+                session.zeros(4 * 24 * 132 * 4),
+                session.zeros(64 * 4),
+                out,
+            ],
+            [u32(position), u32(window), u32(span)],
+            (1, 8, -(-(position + 1 - (max(0, position + 1 - window) if window else 0)) // span)),
+        )
+        found = session.download_f32(out, 3072).reshape(24, 128)
+        expect = _attention_reference(q, rel, gate, sink[0], keys, values, table, position, window)
+        _close(found, expect, 1e-4, f"decode attention window {window}")
+
+
+def _setup(name: str) -> int:
+    folder = _folder() if name == FOLDER else _folder().parent / name
+    if not (folder / "model-00001-of-00001.safetensors").is_file():
+        sys.stderr.write(f"checkpoint is not at {folder}\n")
+        return 1
+    from favlo.registry import register_quantized
+    from inkling_2_mini.metal41.sampling import CONTEXT_LENGTH
+
+    register_quantized(
+        folder.name,
+        source=folder,
+        alias="inkling_2_mini",
+        directory=folder,
+        pipeline=PIPELINE,
+        runtime="metal41",
+        max_prompt_tokens=CONTEXT_LENGTH,
+        kv_cache="half",
+    )
+    print(f"registered {folder.name}")
+    return 0
+
+
+def _complete(max_memory: str | None, limit: int) -> int:
+    from favlo.memory import memory
+    from inkling_2_mini.metal41.chat import STOP, decode_text, encode_chat
+    from inkling_2_mini.metal41.forward import InklingRuntime
+
+    folder = _folder()
+    memory.set_max_memory(max_memory)
+    runtime = InklingRuntime(folder, owner="inkling_2_mini:complete")
+    print(f"context {runtime.context}", flush=True)
+    try:
+        prompt = encode_chat(
+            runtime.root,
+            [{"role": "user", "content": CARROT_PROMPT}],
+            None,
+            False,
+            effort="none",
+        )
+        tokens = runtime.generate(prompt, limit, 0.0, 1.0, 0, 0.0, STOP)
+        print(decode_text(runtime.root, tokens))
+        if limit >= 32:
+            fill = runtime.generate(prompt, limit, 0.0, 1.0, 0, 0.0, STOP, fill=True)
+            print(f"fill {len(fill)} tokens", flush=True)
+    finally:
+        runtime.close()
+    return 0
+
+
+def _models() -> int:
+    from favlo.registry import load_registry
+
+    data = load_registry()
+    for folder, entry in data.get("models", {}).items():
+        if isinstance(entry, dict) and entry.get("pipeline") == PIPELINE:
+            print(f"{folder} alias {entry.get('alias') or ''}")
+    return 0
+
+
+__all__ = ["CARROT_PROMPT", "EOS", "main"]

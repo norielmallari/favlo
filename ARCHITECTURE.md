@@ -33,6 +33,7 @@ Each runtime is a separate write set. An agent developing one runtime edits that
 |---|---|---|
 | `qwen38_27b` | `pipelines/qwen38_27b/metal41/` | [docs/qwen38_27b/README.md](docs/qwen38_27b/README.md) |
 | `qwen36_35b_a3b` | `pipelines/qwen36_35b_a3b/metal41/` | [docs/qwen36_35b_a3b/README.md](docs/qwen36_35b_a3b/README.md) |
+| `inkling_2_mini` | `pipelines/inkling_2_mini/metal41/` | [docs/inkling_2_mini/README.md](docs/inkling_2_mini/README.md) |
 | `gemma4_26b_a4b` | `pipelines/gemma4_26b_a4b/metal41/` | [docs/gemma4_26b_a4b/README.md](docs/gemma4_26b_a4b/README.md) |
 | `qwen35_4b` | `pipelines/qwen35_4b/metal41/` | [docs/qwen35_4b/README.md](docs/qwen35_4b/README.md) |
 | `bge_m3` | `pipelines/bge_m3/metal41/` | [docs/bge_m3/README.md](docs/bge_m3/README.md) |

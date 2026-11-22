@@ -1,0 +1,482 @@
+"""Load the safetensors checkpoint. Experts stay packed in the file.
+
+Dense projections are Metal fp4 with one E8M0 scale per 32. The attention
+inputs of a layer are one fused plane, ``[wq; wr; gate; wk; wv]``, so a layer
+whose three streams agree runs one GEMV. The router, the sink, the dynamic
+conv taps, and the message gates stay half. The head keeps the unpadded
+vocabulary rows. The fp4 planes come from the calibrated pack beside the
+checkpoint when it matches, and are rounded to the nearest code otherwise.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import mmap
+import struct
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from inkling_2_mini.metal41.gptq import (
+    PACK_FORMAT,
+    PACK_NAME,
+    config_digest,
+    e2m1,
+    e8m0,
+    pack_nibbles,
+)
+from inkling_2_mini.metal41.layout import (
+    CORE_END,
+    CORE_START,
+    EXPERTS,
+    FULL_LAYERS,
+    HIDDEN,
+    INTERMEDIATE,
+    KV_DIM,
+    LAYERS,
+    NVFP4_LAYERS,
+    OUTER_SCALE_DENOMINATOR,
+    Q_DIM,
+    REL_DIM,
+    UNPADDED_VOCAB,
+    VOCAB,
+)
+from inkling_2_mini.metal41.session import Session
+
+# Row offsets inside the fused attention plane.
+ROW_Q = 0
+ROW_REL = Q_DIM
+ROW_GATE = Q_DIM + REL_DIM
+ROW_K = 2 * Q_DIM + REL_DIM
+ROW_V = ROW_K + KV_DIM
+ATTN_ROWS = ROW_V + KV_DIM
+Q_ROWS = ROW_K
+HEAD_ROWS = (UNPADDED_VOCAB + 63) // 64 * 64
+
+
+class Plane:
+    """A matrix stored [padded, inner]. ``scale`` is set for Metal fp4."""
+
+    def __init__(self, handle: Any, cols: int, padded: int, inner: int, scale: Any = None) -> None:
+        self.handle = handle
+        self.cols = int(cols)
+        self.padded = int(padded)
+        self.inner = int(inner)
+        self.scale = scale
+        self.fp4 = scale is not None
+
+    def rows_at(self, row: int) -> tuple[tuple[Any, int], tuple[Any, int]]:
+        """(data, offset) and (scale, offset) bindings that start at ``row``."""
+        return (self.handle, row * (self.inner // 2)), (self.scale, row * (self.inner // 32))
+
+
+class Experts:
+    """One fused expert tensor. The atlas fills ``data`` and ``scale``."""
+
+    def __init__(
+        self,
+        rows: int,
+        cols: int,
+        scale_cols: int,
+        data_stride: int,
+        scale_stride: int,
+        global_scale: np.ndarray | None,
+        file_data: tuple[int, int],
+        file_scale: tuple[int, int],
+        nvfp4: bool,
+    ) -> None:
+        self.data = None
+        self.scale = None
+        self.rows = int(rows)
+        self.cols = int(cols)
+        self.scale_cols = int(scale_cols)
+        self.data_stride = int(data_stride)
+        self.scale_stride = int(scale_stride)
+        self.global_scale = global_scale
+        self.file_data = file_data
+        self.file_scale = file_scale
+        self.nvfp4 = bool(nvfp4)
+        self.fp4 = False
+        self.inner = int(cols)
+
+
+class Layer:
+    def __init__(self) -> None:
+        self.index = 0
+        self.full = False
+        self.nvfp4 = True
+        self.core = False
+        self.attn = None
+        self.wo = None
+        self.sink = None
+        self.k_proj = None
+        self.v_proj = None
+        self.router = None
+        self.router_bias = None
+        self.q_scale = None
+        self.rel_scale = None
+        self.rel_table = None
+        self.norms = None
+        self.mlp_norm = None
+        self.attn_conv = None
+        self.mlp_conv = None
+        self.k_conv = None
+        self.v_conv = None
+        self.ctl_down = None
+        self.ctl_fg = None
+        self.w13 = None
+        self.w2 = None
+        self.attn_query = None
+        self.attn_queries = 1
+        self.mlp_query = None
+
+
+def _bf16_f32(raw: bytes, shape: tuple[int, ...]) -> np.ndarray:
+    wide = np.frombuffer(raw, dtype=np.uint16).astype(np.uint32) << 16
+    return wide.view(np.float32).reshape(shape).copy()
+
+
+def _quantize_fp4(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Pack [rows, inner] as E2M1 with one E8M0 scale per 32. Inner is a multiple of 32."""
+    rows, inner = matrix.shape
+    if inner % 32:
+        message = f"inner dimension {inner} is not a multiple of 32"
+        raise ValueError(message)
+    packed = np.empty((rows, inner // 2), dtype=np.uint8)
+    scales = np.empty((rows, inner // 32), dtype=np.uint8)
+    for start in range(0, rows, 2048):
+        stop = min(start + 2048, rows)
+        tile = np.asarray(matrix[start:stop], dtype=np.float32)
+        values = tile.reshape(stop - start, inner // 32, 32)
+        biased, scale = e8m0(np.max(np.abs(values), axis=-1))
+        nibbles = e2m1(values / scale[..., None]).reshape(stop - start, inner)
+        packed[start:stop] = pack_nibbles(nibbles)
+        scales[start:stop] = biased
+    return packed, scales
+
+
+class Tensors:
+    """One mapped safetensors file. ``on_read`` sees the byte count of each read."""
+
+    def __init__(self, path: Path, on_read: Any = None) -> None:
+        self._file = path.open("rb")
+        self._map = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
+        header_bytes = struct.unpack_from("<Q", self._map, 0)[0]
+        header = json.loads(self._map[8 : 8 + header_bytes])
+        self.metadata = header.pop("__metadata__", None) or {}
+        self.header = header
+        self.header_digest = hashlib.sha256(self._map[8 : 8 + header_bytes]).hexdigest()
+        self._data = 8 + header_bytes
+        self._on_read = on_read
+
+    def close(self) -> None:
+        self._map.close()
+        self._file.close()
+
+    def raw(self, name: str) -> tuple[bytes, dict[str, Any]]:
+        info = self.header.get(name)
+        if info is None:
+            message = f"checkpoint is missing {name}"
+            raise KeyError(message)
+        start, end = info["data_offsets"]
+        raw = self._map[self._data + start : self._data + end]
+        if self._on_read is not None:
+            self._on_read(end - start)
+        return bytes(raw), info
+
+    def vector(self, name: str, shape: tuple[int, ...]) -> np.ndarray:
+        raw, info = self.raw(name)
+        found = tuple(info["shape"])
+        if found != shape:
+            message = f"{name} shape {found} is not {shape}"
+            raise ValueError(message)
+        if info["dtype"] == "F32":
+            return np.frombuffer(raw, dtype=np.float32).reshape(shape).copy()
+        if info["dtype"] == "BF16":
+            return _bf16_f32(raw, shape)
+        message = f"{name} dtype {info['dtype']} is not a float tensor"
+        raise ValueError(message)
+
+    def bytes_of(self, name: str, shape: tuple[int, ...]) -> np.ndarray:
+        raw, info = self.raw(name)
+        if info["dtype"] != "U8" or tuple(info["shape"]) != shape:
+            message = f"{name} is not U8 {shape}"
+            raise ValueError(message)
+        return np.frombuffer(raw, dtype=np.uint8).reshape(shape)
+
+    def span(self, name: str, shape: tuple[int, ...]) -> tuple[int, int]:
+        info = self.header.get(name)
+        if info is None:
+            message = f"checkpoint is missing {name}"
+            raise KeyError(message)
+        found = tuple(info["shape"])
+        if found != shape:
+            message = f"{name} shape {found} is not {shape}"
+            raise ValueError(message)
+        start, end = info["data_offsets"]
+        return self._data + int(start), int(end) - int(start)
+
+    def blob(self, offset: int, nbytes: int) -> bytes:
+        return self._map[int(offset) : int(offset) + int(nbytes)]
+
+
+def checkpoint_file(root: Path) -> Path:
+    return Path(root) / "model-00001-of-00001.safetensors"
+
+
+def attn_matrix(tensors: Tensors, index: int) -> np.ndarray:
+    """The fused ``[wq; wr; gate; wk; wv]`` rows of one layer."""
+    attn = f"model.llm.layers.{index}.attn"
+    return np.concatenate(
+        [
+            tensors.vector(f"{attn}.wq_du.weight", (Q_DIM, HIDDEN)),
+            tensors.vector(f"{attn}.wr_du.weight", (REL_DIM, HIDDEN)),
+            tensors.vector(f"{attn}.gate_attn.weight", (Q_DIM, HIDDEN)),
+            tensors.vector(f"{attn}.wk_dv.weight", (KV_DIM, HIDDEN)),
+            tensors.vector(f"{attn}.wv_dv.weight", (KV_DIM, HIDDEN)),
+        ],
+        axis=0,
+    )
+
+
+def wo_matrix(tensors: Tensors, index: int) -> np.ndarray:
+    return tensors.vector(f"model.llm.layers.{index}.attn.wo_ud.weight", (HIDDEN, Q_DIM))
+
+
+def head_matrix(tensors: Tensors) -> np.ndarray:
+    return tensors.vector("model.llm.unembed.weight", (VOCAB, HIDDEN))[:UNPADDED_VOCAB]
+
+
+def open_pack(root: Path) -> Tensors | None:
+    """The calibrated dense planes, when the file matches this checkpoint."""
+    path = Path(root) / PACK_NAME
+    if not path.is_file():
+        return None
+    pack = Tensors(path)
+    meta = pack.metadata
+    if meta.get("format") != PACK_FORMAT or meta.get("config") != config_digest(root):
+        pack.close()
+        return None
+    return pack
+
+
+def _pad_rows(matrix: np.ndarray, padded: int) -> np.ndarray:
+    rows, inner = matrix.shape
+    if rows == padded:
+        return np.ascontiguousarray(matrix)
+    out = np.zeros((padded, inner), dtype=matrix.dtype)
+    out[:rows] = matrix
+    return out
+
+
+class Checkpoint:
+    """The language tensors. Vision and the drafter stay on disk."""
+
+    def __init__(
+        self, root: Path, session: Session, progress: Any = None, *, calibrated: bool = True
+    ) -> None:
+        path = checkpoint_file(root)
+        if not path.is_file():
+            message = f"checkpoint is missing {path.name}"
+            raise FileNotFoundError(message)
+        self.root = root
+        self.session = session
+        self._progress = progress
+        self._done = 0
+        self._noted = 0
+        self._tensors = Tensors(path, on_read=self._read)
+        self._pack = open_pack(root) if calibrated else None
+        self.dense_tag = self._pack.header_digest[:16] if self._pack is not None else "rtn"
+        try:
+            self._load()
+        finally:
+            if self._pack is not None:
+                self._pack.close()
+                self._pack = None
+
+    def _load(self) -> None:
+        session = self.session
+        embed = self._matrix("model.llm.embed.weight", (VOCAB, HIDDEN))
+        self.embed = session.upload(embed.astype(np.float16))
+        del embed
+        self.embed_norm = self._f32("model.llm.embed_norm.weight", (HIDDEN,))
+        self.final_norm = self._f32("model.llm.norm.weight", (HIDDEN,))
+        self.unembed = self._dense(
+            "unembed",
+            UNPADDED_VOCAB,
+            HEAD_ROWS,
+            HIDDEN,
+            lambda: _pad_rows(head_matrix(self._tensors), HEAD_ROWS),
+        )
+        self.output_query = self._f32("model.llm.attn_res.output_query", (HIDDEN,))
+        cross_q = self._vector_f32("model.llm.middle_cycle_cross_pass_queries", (24, HIDDEN))
+        cross_kv = self._vector_f32("model.llm.middle_cycle_cross_pass_kv_queries", (24, HIDDEN))
+        # Rows 0..23 are the query and MLP messages, rows 24..47 the key and value messages.
+        self.cross = session.upload(
+            np.ascontiguousarray(np.concatenate([cross_q, cross_kv], axis=0))
+        )
+        self.layers = [self._layer(index) for index in range(LAYERS)]
+        self.expert_bytes = 0
+        for layer in self.layers:
+            for experts in (layer.w13, layer.w2):
+                self.expert_bytes += experts.file_data[1] + experts.file_scale[1]
+
+    def close(self) -> None:
+        self._tensors.close()
+
+    def _read(self, nbytes: int) -> None:
+        self._done += nbytes
+        progress = self._progress
+        if progress is not None and self._done - self._noted > (32 << 20):
+            self._noted = self._done
+            note = getattr(progress, "tick", None)
+            if callable(note):
+                note(self._done)
+
+    def blob(self, offset: int, nbytes: int) -> bytes:
+        """Bytes from the mapped checkpoint. ``offset`` is into the map."""
+        return self._tensors.blob(offset, nbytes)
+
+    def _vector_f32(self, name: str, shape: tuple[int, ...]) -> np.ndarray:
+        return self._tensors.vector(name, shape)
+
+    def _matrix(self, name: str, shape: tuple[int, int]) -> np.ndarray:
+        return self._tensors.vector(name, shape)
+
+    def _f32(self, name: str, shape: tuple[int, ...]) -> Any:
+        return self.session.upload(np.ascontiguousarray(self._vector_f32(name, shape)))
+
+    def _dense(self, name: str, cols: int, rows: int, inner: int, build: Any) -> Plane:
+        """A Metal fp4 plane: the calibrated pack when present, else round to nearest."""
+        pack = self._pack
+        if pack is not None:
+            packed = pack.bytes_of(f"{name}.data", (rows, inner // 2))
+            scales = pack.bytes_of(f"{name}.scale", (rows, inner // 32))
+        else:
+            packed, scales = _quantize_fp4(build())
+        return Plane(
+            self.session.upload(packed), cols, rows, inner, scale=self.session.upload(scales)
+        )
+
+    def _f16(self, name: str, shape: tuple[int, int], padded: int) -> Plane:
+        matrix = _pad_rows(self._matrix(name, shape), padded).astype(np.float16)
+        return Plane(self.session.upload(matrix), shape[0], padded, shape[1])
+
+    def _span(self, name: str, shape: tuple[int, ...]) -> tuple[int, int]:
+        return self._tensors.span(name, shape)
+
+    def _conv(self, name: str, channels: int) -> Any:
+        array = self._vector_f32(name, (channels, 1, 4)).reshape(channels, 4)
+        return self.session.upload(np.ascontiguousarray(array))
+
+    def _experts(self, layer: int, kind: str, rows: int, cols: int, nvfp4: bool) -> Experts:
+        stem = f"model.llm.layers.{layer}.mlp.experts.{kind}"
+        scale_cols = cols // 16 if nvfp4 else cols // 32
+        data_shape = (EXPERTS, rows, cols // 2 if nvfp4 else cols)
+        scale_shape = (EXPERTS, rows, scale_cols)
+        file_data = self._span(f"{stem}_weight", data_shape)
+        file_scale = self._span(f"{stem}_weight_scale", scale_shape)
+        global_scale = None
+        if nvfp4:
+            amax = self._vector_f32(f"{stem}_weight_amax", (EXPERTS,))
+            denom = self._vector_f32(f"{stem}_weight_outer_scale_denominator", (1,))
+            if float(denom[0]) != OUTER_SCALE_DENOMINATOR:
+                message = f"{stem} outer scale denominator is not {OUTER_SCALE_DENOMINATOR}"
+                raise ValueError(message)
+            global_scale = (amax / denom[0]).astype(np.float32)
+        return Experts(
+            rows,
+            cols,
+            scale_cols,
+            int(np.prod(data_shape[1:])),
+            int(np.prod(scale_shape[1:])),
+            global_scale,
+            file_data,
+            file_scale,
+            nvfp4,
+        )
+
+    def _controllers(self, layer: int) -> tuple[Any, Any]:
+        downs = []
+        fgs = []
+        for name in ("attn", "k", "v", "mlp"):
+            stem = f"model.llm.layers.{layer}.controllers.{name}"
+            downs.append(self._matrix(f"{stem}.down_weight", (64, HIDDEN * 2)))
+            forget = self._matrix(f"{stem}.forget_weight", (HIDDEN, 64))
+            gain = self._matrix(f"{stem}.gain_weight", (HIDDEN, 64))
+            fgs.append(np.concatenate([forget, gain], axis=0))
+        down = np.ascontiguousarray(np.stack(downs).astype(np.float16))
+        fg = np.ascontiguousarray(np.stack(fgs).astype(np.float16))
+        return self.session.upload(down), self.session.upload(fg)
+
+    def _query(self, name: str) -> tuple[Any, int]:
+        info = self._tensors.header[name]
+        shape = tuple(info["shape"])
+        if shape == (HIDDEN,):
+            count = 1
+        elif len(shape) == 2 and shape[1] == HIDDEN:
+            count = int(shape[0])
+        else:
+            message = f"{name} shape {shape} is not a hidden query"
+            raise ValueError(message)
+        array = self._vector_f32(name, shape).reshape(count, HIDDEN)
+        return self.session.upload(np.ascontiguousarray(array)), count
+
+    def _layer(self, index: int) -> Layer:
+        layer = Layer()
+        layer.index = index
+        layer.full = index in FULL_LAYERS
+        layer.nvfp4 = index < NVFP4_LAYERS
+        layer.core = CORE_START <= index < CORE_END
+        stem = f"model.llm.layers.{index}"
+        attn = f"{stem}.attn"
+        layer.attn = self._dense(
+            f"layers.{index}.attn",
+            ATTN_ROWS,
+            ATTN_ROWS,
+            HIDDEN,
+            lambda: attn_matrix(self._tensors, index),
+        )
+        layer.wo = self._dense(
+            f"layers.{index}.wo", HIDDEN, HIDDEN, Q_DIM, lambda: wo_matrix(self._tensors, index)
+        )
+        layer.sink = self._f16(f"{attn}.attn_sink_proj.weight", (24, HIDDEN), 64)
+        layer.q_scale = self._f32(f"{attn}.q_l2_clip.scale", (24, 128))
+        layer.rel_scale = self._f32(f"{attn}.rel_l2_clip.scale", (24, 16))
+        layer.rel_table = self._f32(f"{attn}.rel_logits_proj.proj", (16, 1024))
+        layer.attn_conv = self._conv(f"{stem}.attn_sconv.weight", HIDDEN)
+        layer.mlp_conv = self._conv(f"{stem}.mlp_sconv.weight", HIDDEN)
+        layer.mlp_norm = self._f32(f"{stem}.mlp_norm.weight", (HIDDEN,))
+        layer.router = self._f16(f"{stem}.mlp.gate.weight", (128, HIDDEN), 128)
+        layer.router_bias = self._f32(f"{stem}.mlp.gate.bias", (128,))
+        if layer.full:
+            norms = np.stack(
+                [
+                    self._vector_f32(f"{stem}.q_input_norm.weight", (HIDDEN,)),
+                    self._vector_f32(f"{stem}.k_input_norm.weight", (HIDDEN,)),
+                    self._vector_f32(f"{stem}.v_input_norm.weight", (HIDDEN,)),
+                ]
+            )
+            layer.norms = self.session.upload(np.ascontiguousarray(norms))
+            layer.k_conv = self._f32(f"{attn}.k_sconv.static_w", (4, KV_DIM))
+            layer.v_conv = self._f32(f"{attn}.v_sconv.static_w", (4, KV_DIM))
+            layer.k_proj = self._f16(f"{attn}.k_sconv.weight_proj", (32, HIDDEN), 64)
+            layer.v_proj = self._f16(f"{attn}.v_sconv.weight_proj", (32, HIDDEN), 64)
+        else:
+            layer.norms = self._f32(f"{stem}.attn_norm.weight", (HIDDEN,))
+            layer.k_conv = self._conv(f"{attn}.k_sconv.weight", KV_DIM)
+            layer.v_conv = self._conv(f"{attn}.v_sconv.weight", KV_DIM)
+        layer.w13 = self._experts(index, "w13", INTERMEDIATE * 2, HIDDEN, layer.nvfp4)
+        layer.w2 = self._experts(index, "w2", HIDDEN, INTERMEDIATE, layer.nvfp4)
+        if layer.core:
+            layer.ctl_down, layer.ctl_fg = self._controllers(index)
+        if index == 0:
+            layer.attn_query, layer.attn_queries = None, 0
+        else:
+            layer.attn_query, layer.attn_queries = self._query(
+                f"model.llm.attn_res.attn_queries.{index - 1}"
+            )
+        layer.mlp_query, _count = self._query(f"model.llm.attn_res.mlp_queries.{index}")
+        return layer

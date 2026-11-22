@@ -1,0 +1,62 @@
+"""Sampling card for Inkling 2 Mini.
+
+``generation_config.json`` publishes temperature 1.0 and ``do_sample``. It does
+not publish top-p, top-k, or a presence penalty, so those stay unrestricted.
+The chat template publishes the effort map. Every listed OpenAI effort is a
+template key. ``high`` is the template default, 0.9.
+"""
+
+DEFAULT_VARIANT = "thinking"
+DEFAULT_THINKING = True
+CONTEXT_LENGTH = 16384
+
+EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+SUPPORTED_EFFORTS = frozenset(EFFORT_ORDER)
+
+# The template's own map. A string effort is rendered by the checkpoint Jinja.
+EFFORT_LEVEL = {
+    "none": 0.0,
+    "minimal": 0.1,
+    "low": 0.2,
+    "medium": 0.7,
+    "high": 0.9,
+    "xhigh": 0.99,
+    "max": 0.99,
+}
+
+_CARD = {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": 0,
+    "presence_penalty": 0.0,
+}
+
+VARIANTS = {
+    "thinking": {**_CARD, "reasoning_effort": "high"},
+    "instruct": {**_CARD, "reasoning_effort": "none"},
+}
+
+
+def resolve_effort(requested: str | None) -> str | None:
+    """Map a request effort onto a value this pipeline supports.
+
+    An omitted effort stays omitted. A supported name is unchanged. An
+    unsupported name uses the next higher supported value, then the next lower.
+    """
+    if requested is None:
+        return None
+    name = requested.strip().lower()
+    if not name:
+        return None
+    if name in SUPPORTED_EFFORTS:
+        return name
+    if name not in EFFORT_ORDER:
+        return name
+    index = EFFORT_ORDER.index(name)
+    for candidate in EFFORT_ORDER[index + 1 :]:
+        if candidate in SUPPORTED_EFFORTS:
+            return candidate
+    for candidate in reversed(EFFORT_ORDER[:index]):
+        if candidate in SUPPORTED_EFFORTS:
+            return candidate
+    return name
