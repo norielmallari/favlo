@@ -1,5 +1,5 @@
 ---
-description: Save generated media to disk, then return that file. Generate tools are optional MCP tasks.
+description: Save generated media to disk, then return that file. Use when a pipeline writes an image, video, music, or voice file, including a new video package, its pack step, or an encode. Generate tools are optional MCP tasks.
 alwaysApply: false
 ---
 
@@ -7,7 +7,7 @@ alwaysApply: false
 
 When an API returns generated media, write the file first and send that file. The kind does not matter: image, audio, video, or another download.
 
-This applies to a new endpoint and to a change in how an existing one returns bytes. A kernel, a quantizer, a CLI `--out` path, and a harness artifact stay where they are.
+This applies to a new endpoint, a new video package, its pack step, and a change in how an existing one returns bytes. A kernel, a quantizer, a CLI `--out` path, and a harness artifact stay where they are.
 
 ## Tasks
 
@@ -30,9 +30,15 @@ Tests pass a temporary home on the request state. They do not write `~/.favlo`.
 
 A kept file expires through one integer in `~/.favlo/settings.json`. The sweep moves a file whose age has reached that value to Trash and drops the matching job. The default for a new kind is one day when the pipeline note does not name another value.
 
+## Video
+
+The uncompressed clip is the AVI. `store_source` writes `~/.favlo/videos/<id>.avi`. The served MP4 is `encode_mp4` of that file, or the social encode when the request asks for the 1080p frame and the 30 fps interpolation. Do not pipe the frame buffer into `libx264` and store that MP4 as the only file.
+
+The forward's host read of picture bytes is the buffer that becomes that AVI. The layer does not encode. A request that skips the MP4 leaves the AVI, and the result URI is that file.
+
 ## Examples
 
-Video: save `~/.favlo/videos/<id>.avi`, encode `<id>.mp4` from that file, then `resources/read` of `favlo://videos/{id}` reads the MP4 as `video/mp4`.
+Video: save `~/.favlo/videos/<id>.avi`, encode `<id>.mp4` from that file, then `resources/read` of `favlo://videos/{id}` reads the MP4 as `video/mp4`. When the MP4 was skipped, that read is the AVI.
 
 The same shape for a PNG. An audio clip uses the shared `audio` directory, one extension, and one read of the saved file.
 

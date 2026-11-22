@@ -1,11 +1,17 @@
 ---
 name: smoke-testing
-description: Run Favlo language-model pipeline smoke and agent smoke. Pipeline smoke is greedy decode, the instruct card, the thinking card, and each reasoning effort. Agent smoke is the file agent (instruct context ladder) and the coding agent (thinking card). Use for a text model after a pipeline change, or when the language-model optimization skill points here. Do not use for image generation.
+description: Run a Favlo GPU smoke through the machine lock. Every pipeline uses python -m favlo.smoke_lock. run owns the lock when this process compiles, dispatches, loads weights, or quantizes. attach is the listener path and does not take the lock. Language pipeline smoke is greedy decode, the instruct card, the thinking card, and each reasoning effort. Agent smoke is the file agent and the coding agent. Use for any image, video, music, voice, or text GPU smoke. No exceptions.
 ---
 
 # Smoke testing
 
-One pipeline. Read this skill when another skill says to smoke. Do not copy these commands into that skill.
+One pipeline. Read this skill when another skill says to smoke, and whenever a command in this process compiles shaders, dispatches Metal, loads a checkpoint, or quantizes. Image, video, music, voice, and text are the same rule. Do not copy these commands into that skill.
+
+## Lock
+
+Every GPU smoke uses `python -m favlo.smoke_lock`. No exceptions. Do not launch `pytest`, `kernels`, `quantize`, or a generate that touches the GPU except as the command after `--`. Do not take the lock by hand. Do not sleep and retry outside the script.
+
+`run` owns the lock when this process uses the GPU. `attach` is the only listener path. It waits until the lock is clear, reuses `127.0.0.1:8129`, and does not take the lock. It starts the daemon only when that port is closed, and stops it only when this call started it. When `--pipeline` is the resident model and that package's sources are newer than its worker, `attach` closes the model before the command. Do not wrap a listener command in `run`.
 
 Wait until the machine is free before a command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve` in its own process. That includes `pytest`, `kernels`, `quantize`, `complete`, `bf16`, `probe`, and `matmul`. Editing the write set does not wait. Reading another package does not.
 
@@ -18,8 +24,6 @@ uv run python -m favlo.smoke_lock run --pipeline <stem> --command smoke -- \
   uv run python -m pytest tests/<file> -s
 uv run python -m favlo.smoke_lock attach --pipeline <stem> --command <name> -- <command...>
 ```
-
-A command that calls the listener uses `attach`. It waits until the lock is clear, reuses `127.0.0.1:8129`, and does not take the lock. It starts the daemon only when that port is closed, and stops it only when this call started it. When `--pipeline` is the resident model and that package's sources are newer than its worker, `attach` closes the model before the command.
 
 A stretch of several commands in one shell uses one blocking acquire and one release at the end. `acquire` without `--wait` is for tests of exit 2 and 3. Agents do not use it.
 
@@ -40,7 +44,7 @@ The file-agent and coding-agent commands reuse the listener on `127.0.0.1:8129` 
 
 Stop at the first failure. Do not start agent smoke while a pipeline smoke is failing.
 
-Every smoke keeps the prefill and decode tok/s. Each line has the rate, the token count, and the seconds. A pipeline smoke prints those lines from the runtime; run it with `-s` so pytest does not hide them. An agent smoke prints each request's prefill and decode line, then the summed rates. A run that drops those lines is not a finished smoke. Do not write a rate that was not printed.
+A language pipeline smoke keeps the prefill and decode tok/s. Each line has the rate, the token count, and the seconds. That smoke prints those lines from the runtime; run it with `-s` so pytest does not hide them. An agent smoke prints each request's prefill and decode line, then the summed rates. A language run that drops those lines is not a finished smoke. Do not write a rate that was not printed. An image, video, music, or voice smoke does not print those lines. It still uses `run` or `attach`.
 
 ## Sampling
 

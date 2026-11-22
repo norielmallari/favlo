@@ -32,6 +32,7 @@ The runtime package exports a typed `pipeline` instance. `favlo --<pipeline>` ca
 | Language | `LanguagePipeline` | `handle_responses` |
 | Embeddings | `EmbeddingsPipeline` | `embed` |
 | Media | `MediaPipeline` | `parse`, `generate`, `pack`, `mcp_tools` |
+| Video | `BulkMediaPipeline` | the same methods. A video package does not stop at `MediaPipeline` |
 
 Bind one instance: `pipeline = Pipeline()`. A media module sets `handle_image = pipeline` (or the handler name `mcp_tools` declares). A language module binds `handle_responses` to the instance. An embeddings module binds `handle_embed` to the instance.
 
@@ -57,9 +58,23 @@ A quantize command and a harness may load the file once for that command.
 
 ## CLI
 
-`pipeline.main` is `favlo --<pipeline>`. Media commands on that flag are `setup`, `quantize`, and `kernels`. `setup` downloads the official checkpoint. `quantize` writes the packed record and registers it. `kernels` compiles the shader library and checks a dispatch. A GPU command takes `favlo.smoke_lock`. Generation is `favlo media`.
+`pipeline.main` is `favlo --<pipeline>`. Media commands on that flag are `setup`, `quantize`, and `kernels`. `setup` downloads the official checkpoint. `quantize` writes the packed record and registers it. `kernels` compiles the shader library and checks a dispatch. Generation is `favlo media`.
 
-`favlo media --pipeline <pipeline>` is the listener path. It does not start `serve`. The body fields are the ones `parse` accepts. Do not add a route under `/v1/images`.
+`favlo media --pipeline <pipeline>` is the listener path. It does not start `serve`. The body fields are the ones `parse` accepts. Do not add a route under `/v1/images`. The listener pack is `metadata` and `mediaUri`. A command that copies the stored file reads `mediaUri`.
+
+## Video
+
+A served video package subclasses `BulkMediaPipeline`. Image, music, and voice stay on `MediaPipeline`. Yield to a language or embeddings call at each diffusion boundary the sibling video package uses, after the submitted command finishes. The hold is host values. Device buffers do not survive `close`.
+
+Read [serving-media](../../rules/serving-media.mdc). The stored clip is an uncompressed AVI. The served MP4 is encoded from that file. Do not pipe frames into an encoder and store only the MP4.
+
+The serve path does not import torch. NumPy stops at quantization and tests. A layer product is `matmul2d` on one packed span. A missing kernel stays missing. A host matmul is not a stand-in.
+
+Weights are one kernel-order file and a plane index. Open allocates one shared span and reads the file into it. The forward binds that span.
+
+A full clip is a listener job. `print` does not paint `favlo serve`. Progress is `begin`, `count`, and `end` on the console the worker forwards.
+
+The package `AGENTS.md` copies the sibling video package note, including bulk, yield, the lock, and the AVI. Do not leave it as a stub.
 
 ## MCP
 
@@ -96,10 +111,12 @@ Prefill, decode, and calibration are Metal shaders. A missing kernel stays missi
 
 Run this package's checks. Stop if one fails. Do not start `favlo serve` yourself, and do not leave another model resident.
 
-1. `uv run pytest` on the tests that import only this package.
-2. `uv run favlo --<pipeline> kernels` when this pipeline has that command. It compiles the shader library and runs that package's dispatch checks.
-3. A language model then follows [smoke-testing](../smoke-testing/SKILL.md): pipeline smoke, then the file agent, then the coding agent.
-4. A media model runs its recorded smoke through `favlo media` against a listener already up, then the picture harness for that kind. The harness calls the published tool. Exit 0 is the pass.
+Every GPU command, for every pipeline, uses [smoke-testing](../smoke-testing/SKILL.md). No exceptions. `run` when this process compiles, dispatches, loads weights, or quantizes. `attach` when the command only calls the listener. Do not launch pytest, `kernels`, or a generate except as the command after `--`.
+
+1. The tests that import only this package, under `run` when they touch the GPU.
+2. `kernels`, under `run`, when this pipeline has that command. It compiles the shader library and runs that package's dispatch checks.
+3. A language model then follows that skill: pipeline smoke, then the file agent, then the coding agent.
+4. A media model runs its recorded smoke through `favlo media` against a listener already up, under `attach`, then the picture harness for that kind. The harness calls the published tool. Exit 0 is the pass. An in-process generate is not that smoke, and its temp file is not the stored clip.
 
 Record a printed measurement in this pipeline's note. Do not invent one, and do not write it into another pipeline's note.
 
