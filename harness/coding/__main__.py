@@ -13,7 +13,9 @@ After the ledger, the same listener runs the chat contract.
 The ledger stores its prefix under a scratch partition that this command
 clears first, so a file from an earlier run cannot satisfy the restart.
 Exit 0 means ``ledger.py`` ``collect`` returns 6, 0, and -6, and every
-contract check held. Which tools the model called is not part of that result.
+contract check held. After that, two raw Responses calls with thinking off,
+stream on and stream off, must hold. A stream error fails the run. Which
+tools the model called is not part of that result.
 Each request's server prefill and decode lines are the thinking series. The
 harness reuses ``127.0.0.1:8129``. After the first model turn it unloads the
 resident model so the next turn loads the prefix from disk. Exit 1 when that
@@ -37,7 +39,7 @@ import time
 from pathlib import Path
 
 from harness.benchmarks.serve import Request, Server
-from harness.coding.compliance import run_contract
+from harness.coding.compliance import run_contract, run_raw_responses
 from harness.coding.grade import grade
 from harness.coding.loop import ledger_log, reset_coding_prefix, run_session
 from harness.file_session import (
@@ -144,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
         _print_rates(server.log, stem)
         base_url = f"http://127.0.0.1:{server.port}/v1"
         problems.extend(asyncio.run(run_contract(base_url, stem, store=store)))
+        if not problems:
+            problems.extend(run_raw_responses(base_url, args.model))
         result = grade(workspace)
     finally:
         server.stop()

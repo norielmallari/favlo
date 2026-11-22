@@ -10,6 +10,7 @@ from harness.coding.compliance import (
     CODE,
     LABEL,
     STOP_WORD,
+    TEXT_EFFORTS,
     WORD,
     ToolRound,
     choice_problems,
@@ -19,19 +20,22 @@ from harness.coding.compliance import (
     image_message,
     image_turn_problems,
     length_problems,
-    recall_problems,
+    raw_closed_problems,
+    raw_reply_problems,
+    reasoning_level_problems,
     reasoning_problems,
+    recall_problems,
     reply_problems,
     search_calls,
-    web_search_problems,
     stop_problems,
     stored_reasoning,
     stream_problems,
     tool_problems,
-    tool_stream_problems,
     tool_rounds,
+    tool_stream_problems,
     usage_problems,
     vision_problems,
+    web_search_problems,
 )
 from harness.image_attachment import QUESTION
 
@@ -41,6 +45,13 @@ def test_a_reply_keeps_markup_and_reasoning_out() -> None:
     assert any(WORD in item for item in reply_problems("pear", ""))
     assert any("think" in item for item in reply_problems("apple <think>hidden</think>", ""))
     assert any("repeats" in item for item in reply_problems("look", "look"))
+
+
+def test_every_text_effort_is_a_reasoning_check() -> None:
+    assert TEXT_EFFORTS == ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+    assert reasoning_level_problems("oats", "", stored="", effort="none") == []
+    missing = reasoning_level_problems("oats", "", stored="", effort="max")
+    assert any("no reasoning" in item for item in missing)
 
 
 def test_reasoning_must_stay_on_the_session() -> None:
@@ -103,6 +114,16 @@ def test_a_thinking_stream_shows_the_tool_name_then_the_arguments() -> None:
     )
     assert any("reasoning" in item for item in late)
     assert any("one piece" in item for item in late)
+
+
+def test_a_raw_responses_stream_needs_more_than_one_piece() -> None:
+    assert raw_reply_problems(deltas=["one ", "two"], text="one two") == []
+    assert any("did not stream" in item for item in raw_reply_problems(deltas=["one two"], text="one two"))
+    assert any("one piece" in item for item in raw_reply_problems(deltas=["one two", ""], text="one two"))
+    closed = {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "one two"}]}]}
+    assert raw_closed_problems(closed) == []
+    assert any("one object" in item for item in raw_closed_problems("data: {}"))
+    assert any("empty" in item for item in raw_closed_problems({"status": "completed", "output": []}))
 
 
 def test_length_and_stop_replies() -> None:

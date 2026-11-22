@@ -1,11 +1,14 @@
 """OpenAI chat contract for the coding harness.
 
 The coding agent is the production-readiness run. These checks share its
-listener: a system instruction and a user reply, one thinking turn, a
-stored follow-up, a required tool call, ``tool_choice`` ``none``, a hosted
+listener: a system instruction and a user reply, one short reply at each
+text reasoning effort, a stored follow-up, a required tool call,
+``tool_choice`` ``none``, a hosted
 ``web_search``, ``finish_reason`` ``length``, a streamed reply, and a second
 streamed chat that keeps thinking on and must show the tool name, then argument
-fragments, after the think block. The horse
+fragments, after the think block. After that contract holds, the command
+posts two raw ``/v1/responses`` calls with thinking off, one streamed and one
+not. A stream error fails the run. The horse
 still is the first coding chat when ``--vision`` is set, not a separate check.
 
 The listener's chat object uses ``stop``, ``length``, and ``tool_calls``. It does
@@ -19,6 +22,8 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
+import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -36,12 +41,14 @@ WORD = "apple"
 CODE = "pebble-7"
 LABEL = f"drawer holds {CODE}"
 STOP_WORD = "STOPWORD"
+TEXT_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 _MARKUP = ("<think>", "</think>", "<tool_call>", "</tool_call>")
 _INSTRUCTION = "The reply is the single word apple."
 _REPLY = "Name one fruit."
 _LENGTH = "Write a sentence of at least twelve words about a horse."
 _STOP = "Repeat exactly: alpha STOPWORD omega"
-_REASONING = "What vegetable does a horse eat?"
+_REASONING = "Reply with the word oats."
+_REASONING_TOKENS = 256
 _SECRET = "The secret word is apple. Reply with ok."
 _RECALL = "What is the secret word? Reply with that word only."
 _SEARCH = "Search the web for the Qwen3.6-35B-A3B model card and answer in one sentence."
@@ -89,6 +96,25 @@ def reasoning_problems(text: str, reasoning: str, *, stored: str) -> list[str]:
     if not stored:
         problems.append("the session did not store reasoning")
     return problems
+
+
+def reasoning_level_problems(
+    text: str, reasoning: str, *, stored: str, effort: str
+) -> list[str]:
+    """Problems for one text effort. ``none`` may omit the trace."""
+    if effort == "none":
+        problems: list[str] = []
+        if not text:
+            problems.append("the turn returned no reply")
+        leaked = markup_problem(text)
+        if leaked is not None:
+            problems.append(leaked)
+        if reasoning and reasoning == text:
+            problems.append("the reply repeats the reasoning")
+        if reasoning and not stored:
+            problems.append("the session did not store reasoning")
+        return problems
+    return reasoning_problems(text, reasoning, stored=stored)
 
 
 @dataclass(frozen=True)
@@ -501,28 +527,32 @@ async def run_reply(base_url: str, model: str, *, store: bool) -> list[str]:
 
 
 async def run_reasoning(base_url: str, model: str, *, store: bool) -> list[str]:
-    """One thinking turn. The reasoning stays on the session."""
+    """One short reply at each text effort. A trace stays on the session."""
     from agent_framework import Agent
 
     from favlo.chat_client import close_chat_client, open_chat_client
 
-    options = _quiet(True, store=store)
     client = open_chat_client(model.partition(":")[0], base_url)
-    agent = Agent(
-        client=client,
-        name="coding",
-        default_options=options,
-    )
-    session = agent.create_session()
+    agent = Agent(client=client, name="coding")
+    problems: list[str] = []
     try:
-        response = await agent.run(_REASONING, session=session, options=options)
-        reasoning, text = reply_parts(response)
-        stored = stored_reasoning(session)
-        if store and not stored:
-            stored = reasoning
-        print(f"reasoning reply {text!r}", flush=True)
-        problems = reasoning_problems(text, reasoning, stored=stored)
-        problems.extend(ended(response, "stop"))
+        for effort in TEXT_EFFORTS:
+            print(f"reasoning {effort}", flush=True)
+            options: dict[str, object] = {
+                **_quiet(effort != "none", store=store),
+                "max_tokens": _REASONING_TOKENS,
+            }
+            options["reasoning"] = {"effort": effort}
+            session = agent.create_session()
+            response = await agent.run(_REASONING, session=session, options=options)
+            reasoning, text = reply_parts(response)
+            stored = stored_reasoning(session)
+            if store and not stored:
+                stored = reasoning
+            print(f"reasoning {effort} reply {text!r}", flush=True)
+            found = reasoning_level_problems(text, reasoning, stored=stored, effort=effort)
+            found.extend(ended(response, "stop"))
+            problems.extend(f"{effort}: {item}" for item in found)
     finally:
         await close_chat_client(client)
     return problems
@@ -756,3 +786,169 @@ async def run_contract(base_url: str, model: str, *, store: bool) -> list[str]:
         else:
             print(f"{name} held", flush=True)
     return problems
+
+
+def raw_reply_problems(*, deltas: list[str], text: str) -> list[str]:
+    """Problems when a thinking-off reply did not arrive as text deltas."""
+    if len(deltas) < 2:
+        return ["the reply did not stream"]
+    if deltas[0] == text:
+        return ["the reply arrived in one piece"]
+    if "".join(deltas) != text:
+        return ["the streamed text is not the reply"]
+    return []
+
+
+def raw_closed_problems(body: object) -> list[str]:
+    """Problems when a non-stream response is not one finished reply."""
+    if not isinstance(body, dict):
+        return ["the response was not one object"]
+    status = body.get("status")
+    if status not in {"completed", "incomplete"}:
+        return [f"status {status}"]
+    if not _output_text(body):
+        return ["the reply was empty"]
+    return []
+
+
+def run_raw_responses(base_url: str, model: str) -> list[str]:
+    """Thinking-off Responses calls, stream on then stream off."""
+    problems: list[str] = []
+    print("check raw_stream", flush=True)
+    found = _raw_stream(base_url, model)
+    problems.extend(_report("raw_stream", found))
+    print("check raw_closed", flush=True)
+    found = _raw_closed(base_url, model)
+    problems.extend(_report("raw_closed", found))
+    return problems
+
+
+def _report(name: str, found: list[str]) -> list[str]:
+    for item in found:
+        print(item, flush=True)
+    if found:
+        return found
+    print(f"{name} held", flush=True)
+    return []
+
+
+def _raw_body(model: str, *, stream: bool) -> dict[str, Any]:
+    return {
+        "model": model,
+        "input": "Count from one to five in one sentence.",
+        "stream": stream,
+        "store": False,
+        "reasoning": {"effort": "none"},
+        "max_output_tokens": 64,
+    }
+
+
+def _raw_stream(base_url: str, model: str) -> list[str]:
+    try:
+        raw = _post(base_url, _raw_body(model, stream=True))
+    except RuntimeError as exc:
+        return [str(exc)]
+    events = _sse_events(raw)
+    if not events:
+        return ["the stream returned no events"]
+    deltas, text, error = _consume_responses(events)
+    if error:
+        return [error]
+    print(f"raw stream deltas {len(deltas)}", flush=True)
+    return raw_reply_problems(deltas=deltas, text=text)
+
+
+def _raw_closed(base_url: str, model: str) -> list[str]:
+    try:
+        raw = _post(base_url, _raw_body(model, stream=False))
+    except RuntimeError as exc:
+        return [str(exc)]
+    text = raw.decode("utf-8", errors="replace").lstrip()
+    if text.startswith("data:"):
+        return ["stream false returned a stream"]
+    try:
+        body = json.loads(text)
+    except json.JSONDecodeError:
+        return ["the response was not one object"]
+    return raw_closed_problems(body)
+
+
+def _post(base_url: str, body: dict[str, Any]) -> bytes:
+    request = urllib.request.Request(
+        f"{base_url}/responses",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        message = f"HTTP {exc.code} {detail}"
+        raise RuntimeError(message) from exc
+    except urllib.error.URLError as exc:
+        message = f"responses request failed: {exc.reason}"
+        raise RuntimeError(message) from exc
+
+
+def _sse_events(raw: bytes) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("data:"):
+            continue
+        payload = stripped[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _output_text(body: Mapping[str, Any]) -> str:
+    output = body.get("output")
+    if not isinstance(output, list):
+        return ""
+    parts: list[str] = []
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                parts.append(str(part.get("text") or ""))
+    return "".join(parts)
+
+
+def _consume_responses(events: list[dict[str, Any]]) -> tuple[list[str], str, str]:
+    from openai._models import construct_type_unchecked
+    from openai._types import omit
+    from openai.lib.streaming.responses._responses import ResponseStreamState
+    from openai.types.responses import ResponseStreamEvent as RawResponseStreamEvent
+
+    state = ResponseStreamState(input_tools=omit, text_format=omit)
+    deltas: list[str] = []
+    for payload in events:
+        try:
+            event = construct_type_unchecked(type_=RawResponseStreamEvent, value=payload)
+            fired = state.handle_event(event)
+        except Exception as exc:
+            return deltas, "", f"stream error: {exc}"
+        for item in fired:
+            if getattr(item, "type", "") == "response.output_text.delta":
+                deltas.append(str(getattr(item, "delta", "") or ""))
+    text = ""
+    for payload in reversed(events):
+        if payload.get("type") == "response.completed":
+            response = payload.get("response")
+            if isinstance(response, dict):
+                text = _output_text(response)
+            break
+    return deltas, text, ""
