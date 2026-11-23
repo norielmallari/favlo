@@ -56,6 +56,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen36_35b_a3b/research/coding-agent.md](qwen36_35b_a3b/research/coding-agent.md) | Qwen3.6-35B-A3B coding agent on fp8 keys and values |
 | [qwen36_35b_a3b/research/coding-agent-half.md](qwen36_35b_a3b/research/coding-agent-half.md) | Qwen3.6-35B-A3B coding agent on half keys and values |
 | [qwen36_35b_a3b/research/coding-text.md](qwen36_35b_a3b/research/coding-text.md) | Qwen3.6-35B-A3B text coding agent on half keys and values |
+| [qwen36_35b_a3b/research/coding-text-cuda.md](qwen36_35b_a3b/research/coding-text-cuda.md) | Qwen3.6-35B-A3B text coding agent on the int4 pack with int8 keys and values |
 | [qwen36_35b_a3b/research/synthetic-prompt.md](qwen36_35b_a3b/research/synthetic-prompt.md) | Qwen3.6-35B-A3B cold 512-token and 10000-token prompts |
 | [qwen36_35b_a3b/research/synthetic-prompt-half.md](qwen36_35b_a3b/research/synthetic-prompt-half.md) | Qwen3.6-35B-A3B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e30-24h pack with half keys and values |
 | [qwen36_35b_a3b/performance.md](qwen36_35b_a3b/performance.md) | Qwen3.6-35B-A3B recorded prefill and decode rates |
@@ -68,6 +69,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen35_4b/research/recorded-forward.md](qwen35_4b/research/recorded-forward.md) | Qwen3.5-4B recorded prefill and decode runs |
 | [qwen35_4b/research/needle-page.md](qwen35_4b/research/needle-page.md) | Qwen3.5-4B page needle on fp8 keys and values |
 | [qwen35_4b/research/coding-agent.md](qwen35_4b/research/coding-agent.md) | Qwen3.5-4B vision coding agent on fp8 keys and values |
+| [qwen35_4b/research/coding-vision-cuda.md](qwen35_4b/research/coding-vision-cuda.md) | Qwen3.5-4B vision coding agent on int8 keys and values |
 | [qwen35_4b/research/coding-agent-mtp.md](qwen35_4b/research/coding-agent-mtp.md) | Qwen3.5-4B vision coding agent with MTP on |
 | [qwen35_4b/research/coding-text.md](qwen35_4b/research/coding-text.md) | Qwen3.5-4B text coding agent on fp8 keys and values |
 | [qwen35_4b/research/synthetic-prompt.md](qwen35_4b/research/synthetic-prompt.md) | Qwen3.5-4B cold 512, 1024, 4096, and 10000-token prompts |
@@ -78,6 +80,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [gemma4_26b_a4b/research/coding-agent.md](gemma4_26b_a4b/research/coding-agent.md) | Gemma 4 26B-A4B vision coding-agent rates on fp8 keys and values |
 | [gemma4_26b_a4b/research/coding-agent-half.md](gemma4_26b_a4b/research/coding-agent-half.md) | Gemma 4 26B-A4B vision coding-agent rates on the fp8-e20 pack with half keys and values |
 | [gemma4_26b_a4b/research/coding-text.md](gemma4_26b_a4b/research/coding-text.md) | Gemma 4 26B-A4B text coding-agent rate |
+| [gemma4_26b_a4b/research/coding-text-cuda.md](gemma4_26b_a4b/research/coding-text-cuda.md) | Gemma 4 26B-A4B text coding-agent rates on CUDA |
 | [gemma4_26b_a4b/research/needle-page.md](gemma4_26b_a4b/research/needle-page.md) | Gemma 4 26B-A4B page-needle rate |
 | [gemma4_26b_a4b/research/synthetic-prompt.md](gemma4_26b_a4b/research/synthetic-prompt.md) | Gemma 4 26B-A4B cold 512-token and 10000-token prompts on fp8 keys and values |
 | [gemma4_26b_a4b/research/synthetic-prompt-half.md](gemma4_26b_a4b/research/synthetic-prompt-half.md) | Gemma 4 26B-A4B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e20 pack with half keys and values |
