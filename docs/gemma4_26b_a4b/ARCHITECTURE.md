@@ -299,7 +299,8 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - The stream holds back only a suffix that might still be the channel close, a tool call, or a repeated thought open.
 - A newline inside an open thought is sent.
 - A whitespace-only thought still opens no reasoning item.
-- A function call is `response.output_item.added` with empty arguments, then `response.function_call_arguments.done`.
+- A function call is `response.output_item.added` with empty arguments, then `response.function_call_arguments.delta` pieces, then `response.function_call_arguments.done`.
+- The delta pieces join to the arguments, and the first piece is not a JSON object.
 - Text deltas send `logprobs` as an empty list.
 - The sampled logit row stays on device.
 - The Chat Completions adapter writes the items back as `reasoning`, `reasoning_content`, `content`, and `tool_calls`.
@@ -307,6 +308,9 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - Text after a call is split the same way: a later thought is reasoning, and the remaining text is the reply.
 - An unclosed call stays in the reply.
 - A tool call is `<|tool_call>call:` through `<tool_call|>`, and `<|tool_response>` is a stop.
+- A tools turn stops sampling when the completion contains `<tool_call|>`.
+- Thinking on with tools, when the template ended at `<|turn>model`, opens `<|channel>thought` on the generation prompt so the trace is sampled before the call.
+- While that channel is open, the channel close and `<|tool_call>` stay masked until eight tokens have been sampled.
 - Thinking off ends the prompt with an empty `<|channel>thought` so this size does not open a ghost channel.
 - Thinking on, after a tool result, leaves that model turn open and starts the next thought channel.
 - A tool-call thought stays when the next user turn starts.
@@ -365,6 +369,7 @@ Bandwidth and kernel ceilings are in [ceilings.md](ceilings.md).
 - The recorded prefill and decode runs are [research/recorded-forward.md](research/recorded-forward.md).
 - The vision coding-agent rates are [research/coding-agent.md](research/coding-agent.md).
 - The text coding-agent rate on this attention is [research/coding-text.md](research/coding-text.md): thinking on, vision off, 836.90 tok/s prefill and 25.94 tok/s decode.
+- The CUDA text coding-agent rates are [research/coding-text-cuda.md](research/coding-text-cuda.md).
 - The page-needle rate is [research/needle-page.md](research/needle-page.md).
 - The cold synthetic prompts on `fp8_e4m3` are [research/synthetic-prompt.md](research/synthetic-prompt.md). The `half` run is [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md).
 - Harness scores are in [benchmarks.md](benchmarks.md).

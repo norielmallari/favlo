@@ -44,6 +44,12 @@ def _device_packages() -> frozenset[str]:
     )
 
 
+def _chosen_device() -> str:
+    from favlo.host import select_device
+
+    return select_device(_device_packages())
+
+
 _DEFAULT_LIMIT = 4096
 # An open thought that runs past this many tokens is closed, then the reply continues.
 THOUGHT_BUDGET = 2048
@@ -461,7 +467,10 @@ class Pipeline(LanguagePipeline):
 
 
     def main(self, argv: Sequence[str]) -> int:
-        from gemma4_26b_a4b.metal41.commands import main as cli_main
+        if _chosen_device() == "cuda":
+            from gemma4_26b_a4b.cuda.commands import main as cli_main
+        else:
+            from gemma4_26b_a4b.metal41.commands import main as cli_main
 
         return int(cli_main(argv))
 
@@ -470,11 +479,13 @@ class Pipeline(LanguagePipeline):
         from favlo.pipelines import bind_open_runtime
 
         chosen = select_device(_device_packages())
-        if chosen != "metal41":
+        if chosen == "cuda":
+            from gemma4_26b_a4b.cuda.runtime import open_runtime as open_device
+        elif chosen == "metal41":
+            from gemma4_26b_a4b.metal41.runtime import open_device
+        else:
             message = "this runtime cannot run here"
             raise RuntimeError(message)
-        from gemma4_26b_a4b.metal41.runtime import open_device
-
         return bind_open_runtime(open_device, path, **kwargs)
 
 pipeline = Pipeline()
@@ -531,10 +542,15 @@ def _respond(
     from gemma4_26b_a4b.metal41.vision import collect_images
 
     pictures = collect_images(messages)
-    channel_open = rendered.endswith("<|channel>thought\n")
     emit_tools = prepared.get("tool_choice") != "none"
     required = required_function(prepared.get("tool_choice")) if emit_tools else None
     lead = _call_lead(runtime, tools, required)
+    if thinking and tools and lead is None and not rendered.endswith("<|channel>thought\n"):
+        opener = "<|channel>thought\n"
+        rendered += opener
+        prompt = [*prompt, *encode_text(runtime.root, opener)]
+        runtime._body_len = len(prompt)
+    channel_open = rendered.endswith("<|channel>thought\n")
     if lead:
         suffix = _generation_suffix(runtime.root)
         prompt = close_model_turn(prompt, suffix[2], suffix[0])
@@ -542,6 +558,7 @@ def _respond(
         prompt = [*prompt, *lead[1]]
     cap = prepared.get("max_output_tokens")
     limit = int(cap) if cap is not None else _DEFAULT_LIMIT
+    stops = ["<tool_call|>"] if tools and emit_tools else None
     stream = bool(prepared.get("stream", False))
     if stream:
         _stream(
@@ -561,6 +578,7 @@ def _respond(
             lead[0] if lead else "",
             search,
             note,
+            stops,
         )
         return
     tokens, _prefill_line, _decode_line = runtime.generate(
@@ -572,7 +590,8 @@ def _respond(
         presence,
         images=pictures,
         channel_open=channel_open,
-        thought_budget=THOUGHT_BUDGET,
+        stops=stops,
+        thought_budget=THOUGHT_BUDGET if channel_open else 0,
         fill=bool(prepared.get("favlo:fill_decode")),
     )
     text = (lead[0] if lead else "") + decode_text(runtime.root, tokens)
@@ -776,6 +795,14 @@ def _response_payload(
     return payload
 
 
+def _argument_fragments(arguments: str) -> tuple[str, ...]:
+    """Split a finished call so the first streamed piece is not a JSON object."""
+    if len(arguments) < 2:
+        return (arguments,) if arguments else ()
+    cut = len(arguments) // 2
+    return arguments[:cut], arguments[cut:]
+
+
 def _message_item(text: str, annotations: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "type": "message",
@@ -803,6 +830,7 @@ def _stream(
     lead: str,
     search: dict[str, Any] | None,
     note: str,
+    stops: list[str] | None,
 ) -> None:
     try:
         reply.begin_events()
@@ -890,7 +918,8 @@ def _stream(
             on_token=enqueue,
             images=pictures,
             channel_open=channel_open,
-            thought_budget=THOUGHT_BUDGET,
+            stops=stops,
+            thought_budget=THOUGHT_BUDGET if channel_open else 0,
             fill=bool(prepared.get("favlo:fill_decode")),
         )
     finally:
@@ -927,15 +956,32 @@ def _stream(
             opened_item = dict(item)
             opened_item["arguments"] = ""
             event({"type": "response.output_item.added", "output_index": index, "item": opened_item})
+            call_id = str(item.get("call_id") or "")
+            item_id = str(item.get("id") or "")
+            for fragment in _argument_fragments(arguments):
+                event(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "delta": fragment,
+                        "item_id": item_id,
+                        "output_index": index,
+                        "call_id": call_id,
+                    }
+                )
             event(
                 {
                     "type": "response.function_call_arguments.done",
                     "arguments": arguments,
-                    "item_id": item.get("id") or "",
+                    "item_id": item_id,
                     "output_index": index,
                 }
             )
             event({"type": "response.output_item.done", "output_index": index, "item": item})
+        elif kind == "message":
+            item["id"] = message_id
+            if "content" not in opened:
+                _open_item(event, "content", reasoning_id, message_id)
+            event({"type": "response.output_item.done", "output_index": 1, "item": item})
     event({"type": "response.completed", "response": payload})
     try:
         reply.done()

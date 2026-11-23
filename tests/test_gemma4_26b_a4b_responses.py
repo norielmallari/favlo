@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -324,21 +325,31 @@ def test_a_stream_shares_one_response_id(monkeypatch: Any) -> None:
     assert reasoning["encrypted_content"] == "Look at the notes."
 
 
-def test_a_streamed_call_sends_the_arguments_once(monkeypatch: Any) -> None:
+def test_a_streamed_call_splits_the_arguments(monkeypatch: Any) -> None:
     runtime = _Runtime(_CALL)
     _install(monkeypatch, runtime)
     reply = MemoryReply()
     handle_responses.handle_responses(reply, runtime, {"input": "Hi", "stream": True}, None, None, {})
-    kinds = [event["type"] for event in reply.events]
-    assert "response.function_call_arguments.delta" not in kinds
     added = next(
         event
         for event in reply.events
         if event["type"] == "response.output_item.added" and event["item"]["type"] == "function_call"
     )
+    deltas = [
+        event["delta"]
+        for event in reply.events
+        if event["type"] == "response.function_call_arguments.delta"
+    ]
     done = next(event for event in reply.events if event["type"] == "response.function_call_arguments.done")
     assert added["item"]["arguments"] == ""
     assert added["item"]["name"] == "glob"
+    assert len(deltas) >= 2
+    assert "".join(deltas) == done["arguments"]
+    try:
+        opened = json.loads(deltas[0])
+    except json.JSONDecodeError:
+        opened = None
+    assert not isinstance(opened, dict)
     assert "pattern" in done["arguments"]
 
 

@@ -4,7 +4,7 @@ Summary for the `gemma4_26b_a4b` language pipeline. Kernels, the packed record, 
 
 - `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
 - After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
-- `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`, which loads `gemma4_26b_a4b.portable`. That entry opens the Metal device on Apple Silicon. `metal41` is the device.
+- `plan`, `quantize`, `kernels`, and `complete` require `favlo --gemma4_26b_a4b`, which loads `gemma4_26b_a4b.portable`. That entry opens `metal41` on Apple Silicon and `cuda` on Windows.
 
 - The official checkpoint is [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it).
 - Those weights are under the [Apache License, Version 2.0](https://ai.google.dev/gemma/docs/gemma_4_license).
@@ -142,6 +142,7 @@ uv run favlo --gemma4_26b_a4b complete
 - [research/coding-agent.md](research/coding-agent.md) — vision coding-agent rates on fp8 keys and values
 - [research/coding-agent-half.md](research/coding-agent-half.md) — vision coding-agent rates on the fp8-e20 pack with half keys and values
 - [research/coding-text.md](research/coding-text.md) — text coding-agent rate
+- [research/coding-text-cuda.md](research/coding-text-cuda.md) — text coding-agent rates on CUDA with half keys and values
 - [research/needle-page.md](research/needle-page.md) — page-needle rate
 - [research/synthetic-prompt.md](research/synthetic-prompt.md) — cold synthetic prompts on fp8 keys and values
 - [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md) — cold 512, 1024, 4096, and 10000-token prompts on the fp8-e20 pack with half keys and values
