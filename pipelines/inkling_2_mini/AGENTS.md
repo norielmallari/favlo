@@ -20,7 +20,7 @@ Registration copies `VARIANTS` and `DEFAULT_VARIANT` from `sampling.py`. `genera
 
 ## Setup
 
-`setup` downloads `thinkingmachines/Inkling-2-Mini`, registers the folder, runs `calibrate` when `dense-fp4.safetensors` is missing or does not match `config.json`, and runs `bake` when `experts-fp4.safetensors` is missing or does not match. `--no-calibrate` skips the dense pack. `--repo` accepts another repository with the same tensor names, as `org/name` or a `huggingface.co` link. The drafter is not part of the download. There is no BF16 checkout to remove.
+`setup` downloads `thinkingmachines/Inkling-2-Mini` into `Inkling-2-Mini-fp4-gptq-foem`, rewrites bf16 tensors as float16, splits vision into `vision.safetensors`, leaves `mtp.safetensors` as its own file, registers that folder, and runs `bake` when `experts-fp4.safetensors` is missing or does not match. The fused attention plane, the output projection, and the head are pread as float16. `--repo` accepts another repository with the same tensor names, as `org/name` or a `huggingface.co` link. There is no separate BF16 checkout to remove.
 
 ## Memory
 
@@ -32,8 +32,8 @@ Load, prefill, and decode report through `favlo.console`. The load row stays ope
 
 ## Kernels
 
-`kernels` compiles the shader library and checks half `matmul2d`, the half GEMV, Metal fp4 `matmul2d`, the fp4 GEMV, NVFP4 dequant and its fp4 requant, the argmax and the Gumbel draw, and prefill and decode attention against a host reference. The hot path does not run a host GEMV. `bake` requantizes NVFP4 experts to Metal fp4 once and writes `experts-fp4.safetensors`. The open reads that file and the dense GPTQ pack in 8 MiB pieces. Without the expert pack, the open requantizes. The dense fp4 planes load from `dense-fp4.safetensors` when `calibrate` wrote it, and are rounded to the nearest code otherwise. The embedding stays half. A single token uses the fp4 GEMV. Prefill uses `matmul2d`. The token RMSNorm and the block mix each use one threadgroup of 256.
+`kernels` compiles the shader library and checks half `matmul2d`, the half GEMV, Metal fp4 `matmul2d`, the fp4 GEMV, NVFP4 dequant and its fp4 requant, the argmax and the Gumbel draw, and prefill and decode attention against a host reference. The hot path does not run a host GEMV. `bake` requantizes NVFP4 experts to Metal fp4 once and writes `experts-fp4.safetensors`. The open preads that file and the float16 planes in 8 MiB pieces. Without the expert pack, the open requantizes. The embedding, the fused attention plane, the output projection, and the head are float16. A single token uses the half GEMV for those planes. Prefill uses `matmul2d`. The token RMSNorm and the block mix each use one threadgroup of 256.
 
 ## Calibration
 
-`calibrate` changes weights, so rerun the pipeline smoke and the coding agent after it. Resolved agent traces, coding instructions, and function-calling dialogs are downloaded into `artifacts/` when those files are missing. General chat fills only the remaining sequences. The model does not write the sequences. A finished sequence and a finished plane are written before the next one starts. An out-of-memory capture reopens with fewer rows and continues from the last finished sequence. A change to the dense plane layout bumps `PACK_FORMAT` in `gptq.py`.
+`bake` requantizes NVFP4 experts to Metal fp4 and writes `experts-fp4.safetensors`. The fused attention plane, the output projection, and the head are half and are not part of that pack.

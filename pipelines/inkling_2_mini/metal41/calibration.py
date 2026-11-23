@@ -1,4 +1,4 @@
-"""Calibrate the dense fp4 planes: capture plane inputs, then round with GPTQ.
+"""Calibrate the dense fp4 planes: capture plane inputs, then round with FOEM.
 
 Sequences are packed to 2048 tokens and rendered with the checkpoint template.
 Resolved software-agent traces come first, then coding instructions, then
@@ -7,8 +7,8 @@ Downloads are stored under ``artifacts/`` and are not committed. Nothing is
 generated. The capture prefill sums ``X^T X``. Each finished sequence is
 written before the next one starts. An out-of-memory capture closes, reopens
 with fewer rows, and continues. Each rounded plane is written before the next
-one starts. The runtime then closes, and every dense plane is rounded against
-the Hessian of its own inputs.
+one starts. The runtime then closes, and every dense plane is rounded on the
+device against the Hessian of its own inputs.
 """
 
 from __future__ import annotations
@@ -26,12 +26,14 @@ from typing import Any
 import numpy as np
 
 from inkling_2_mini.metal41.gptq import (
+    BETA,
     PACK_FORMAT,
     PACK_NAME,
     Capture,
     config_digest,
     dequant,
-    gptq_fp4,
+    foem_device_matches,
+    foem_fp4_device,
     write_pack,
 )
 from inkling_2_mini.metal41.layout import HIDDEN, LAYERS, Q_DIM, UNPADDED_VOCAB
@@ -504,28 +506,38 @@ def weighted_error(
 
 
 def _round(
-    name: str, matrix: np.ndarray, hessian: np.ndarray, log: Any
+    name: str, matrix: np.ndarray, hessian: np.ndarray, log: Any, session: Any
 ) -> tuple[np.ndarray, np.ndarray]:
     started = time.perf_counter()
-    packed, scales = gptq_fp4(matrix, hessian)
+    packed, scales = foem_fp4_device(session, matrix, hessian, beta=BETA)
     nearest = _quantize_fp4(matrix)
     before = weighted_error(matrix, *nearest, hessian)
     after = weighted_error(matrix, packed, scales, hessian)
+    kept = "foem"
+    if after > before:
+        packed, scales = nearest
+        kept = "nearest"
     log(
-        f"{name} output error nearest {before**0.5:.4f} gptq {after**0.5:.4f} "
-        f"{time.perf_counter() - started:.1f}s"
+        f"{name} output error nearest {before**0.5:.4f} foem {after**0.5:.4f} "
+        f"kept {kept} {time.perf_counter() - started:.1f}s"
     )
     return packed, scales
 
 
 def _attention(
-    tensors: Tensors, capture: Capture, index: int, log: Any
+    tensors: Tensors, capture: Capture, index: int, log: Any, session: Any
 ) -> tuple[np.ndarray, np.ndarray]:
     matrix = attn_matrix(tensors, index)
     parts = []
     for stream, lo, hi in (("q", 0, ROW_K), ("k", ROW_K, ROW_V), ("v", ROW_V, ATTN_ROWS)):
         parts.append(
-            _round(f"layer {index} {stream}", matrix[lo:hi], capture.hessian(index, stream), log)
+            _round(
+                f"layer {index} {stream}",
+                matrix[lo:hi],
+                capture.hessian(index, stream),
+                log,
+                session,
+            )
         )
     return np.concatenate([p[0] for p in parts]), np.concatenate([p[1] for p in parts])
 
@@ -586,8 +598,16 @@ def _capture(folder: Path, limit: int, log: Any) -> Capture:
 def calibrate(
     folder: Path, *, limit: int = SEQUENCE_LENGTH, reuse: bool = False, log: Any = print
 ) -> Path:
-    """Write the GPTQ pack. ``reuse`` rounds again from the saved input sums."""
+    """Write the GPTQ-FOEM pack. ``reuse`` rounds again from the saved input sums."""
+    from inkling_2_mini.metal41.session import Session
+
     folder = Path(folder)
+    probe = Session("inkling_2_mini:gptq")
+    try:
+        foem_device_matches(probe)
+    finally:
+        probe.close()
+    log("foem device matches")
     saved = folder / HESSIANS_NAME
     if reuse and saved.is_file():
         capture = Capture.load(saved)
@@ -599,30 +619,32 @@ def calibrate(
     out = _load_round(partial, capture.source)
     if out:
         log(f"resuming round with {len(out)} saved tensors")
+    session = Session("inkling_2_mini:gptq")
     try:
         for index in range(LAYERS):
             data = f"layers.{index}.attn.data"
             if data not in out:
                 out[data], out[f"layers.{index}.attn.scale"] = _attention(
-                    tensors, capture, index, log
+                    tensors, capture, index, log, session
                 )
                 _store_round(partial, capture.source, out)
             wo_name = f"layers.{index}.wo.data"
             if wo_name not in out:
                 wo = wo_matrix(tensors, index)
                 out[wo_name], out[f"layers.{index}.wo.scale"] = _round(
-                    f"layer {index} wo", wo, capture.hessian(index, "wo"), log
+                    f"layer {index} wo", wo, capture.hessian(index, "wo"), log, session
                 )
                 _store_round(partial, capture.source, out)
             for stream in ("shared", "q", "k", "v", "wo"):
                 capture.sums.pop((index, stream), None)
         if "unembed.data" not in out:
             head = head_matrix(tensors)
-            packed, scales = _round("head", head, capture.hessian(-1, "head"), log)
+            packed, scales = _round("head", head, capture.hessian(-1, "head"), log, session)
             out["unembed.data"] = _pad_rows(packed, HEAD_ROWS)
             out["unembed.scale"] = _pad_rows(scales, HEAD_ROWS)
             _store_round(partial, capture.source, out)
     finally:
+        session.close()
         tensors.close()
     if out["unembed.data"].shape != (HEAD_ROWS, HIDDEN // 2) or UNPADDED_VOCAB > HEAD_ROWS:
         message = "head pack shape is wrong"

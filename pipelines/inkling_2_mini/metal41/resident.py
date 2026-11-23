@@ -212,7 +212,7 @@ class ExpertFile:
         return self._fd
 
 
-def open_expert_pack(root: Path) -> ExpertFile | None:
+def open_expert_pack(root: Path, config_root: Path | None = None) -> ExpertFile | None:
     """The baked experts, when the file matches this checkpoint."""
     path = Path(root) / EXPERT_PACK
     if not path.is_file():
@@ -223,9 +223,10 @@ def open_expert_pack(root: Path) -> ExpertFile | None:
         return None
     meta = record.metadata
     names = {spec.name for spec in catalog()}
+    check = Path(config_root or root)
     if (
         meta.get("format") != EXPERT_FORMAT
-        or meta.get("config") != config_digest(root)
+        or meta.get("config") != config_digest(check)
         or names - set(record.header)
     ):
         record.close()
@@ -328,13 +329,18 @@ class Sink:
         return at
 
 
-def bake(root: Path, log: Callable[[str], None] | None = None) -> None:
+def bake(
+    root: Path, dest: Path | None = None, log: Callable[[str], None] | None = None
+) -> None:
     """Requant NVFP4 experts once and write the pack the open reads."""
     from favlo.memory import memory
     from inkling_2_mini.metal41.session import Session
     from inkling_2_mini.metal41.weights import Tensors, checkpoint_file
 
-    ready = open_expert_pack(root)
+    base = Path(root)
+    pack = Path(dest or root)
+    pack.mkdir(parents=True, exist_ok=True)
+    ready = open_expert_pack(pack, base)
     if ready is not None:
         ready.close()
         if log is not None:
@@ -342,11 +348,11 @@ def bake(root: Path, log: Callable[[str], None] | None = None) -> None:
         return
     owner = "inkling_2_mini:bake"
     session = Session(owner)
-    source = Tensors(checkpoint_file(root))
+    source = Tensors(checkpoint_file(base))
     sink = Sink(
-        Path(root) / EXPERT_PACK,
+        pack / EXPERT_PACK,
         [(spec.name, spec.shape) for spec in catalog()],
-        {"format": EXPERT_FORMAT, "config": config_digest(root)},
+        {"format": EXPERT_FORMAT, "config": config_digest(base)},
     )
     try:
         _write_experts(session, source, sink, owner, log)

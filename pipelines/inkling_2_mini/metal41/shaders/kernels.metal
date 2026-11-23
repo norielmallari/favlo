@@ -111,6 +111,32 @@ kernel void matmul_f16_m64(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// Half matmul of one row band. The destination row stride can be wider than the band.
+kernel void matmul_f16_band(
+    device half* activation [[buffer(0)]],
+    device half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    constant uint& out_stride [[buffer(6)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        weights, dextents<int, 2>(int(inner), int(cols)), array<int, 2>{1, int(inner)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(out_stride)});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 64);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(tile_left, tile_right, tile_out);
+}
+
 // Scaled fp4 on the 32x128 tile. Output rows are out_stride floats apart.
 kernel void matmul_fp4_m32(
     device half* activation [[buffer(0)]],
@@ -380,6 +406,46 @@ kernel void gemv_fp4_logits(
     }
 }
 
+static inline float4 f16_part4(device const float* act, device const half* weights, uint row0, uint inner, uint lane) {
+    device const half4* p0 = (device const half4*)(weights + (ulong)row0 * inner);
+    device const half4* p1 = (device const half4*)(weights + (ulong)(row0 + 1u) * inner);
+    device const half4* p2 = (device const half4*)(weights + (ulong)(row0 + 2u) * inner);
+    device const half4* p3 = (device const half4*)(weights + (ulong)(row0 + 3u) * inner);
+    device const float4* a = (device const float4*)act;
+    float4 acc = float4(0.0f);
+    for (uint i = lane; i < (inner >> 2u); i += 32u) {
+        float4 x = a[i];
+        acc.x += dot(float4(p0[i]), x);
+        acc.y += dot(float4(p1[i]), x);
+        acc.z += dot(float4(p2[i]), x);
+        acc.w += dot(float4(p3[i]), x);
+    }
+    return acc;
+}
+
+// The head, half weights. Rows at or past valid are -inf. The rest are cap * tanh(x / cap).
+kernel void gemv_f16_logits(
+    device const float* activation [[buffer(0)]],
+    device const half* weights [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& cols [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    constant uint& valid [[buffer(5)]],
+    constant float& cap [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group * 4u;
+    if (row0 >= cols) {
+        return;
+    }
+    float4 acc = simd_sum4(f16_part4(activation, weights, row0, inner, lane));
+    if (lane < 4u) {
+        uint row = row0 + lane;
+        destination[row] = row < valid ? cap * tanh(acc[lane] / cap) : -INFINITY;
+    }
+}
+
 // Residual short convolution of one channel, then the state shift.
 // y = (x + w3 x + w2 x[t-1] + w1 x[t-2] + w0 x[t-3]) / sqrt(5).
 static inline float conv_step(float x, device const float* w, device float* state, uint c, uint channels) {
@@ -418,52 +484,57 @@ kernel void gemv_fp4_conv_add(
     }
 }
 
-static inline float4 f16_part4(device const float* act, device const half* weights, uint row0, uint inner, uint lane) {
-    device const half4* p0 = (device const half4*)(weights + (ulong)row0 * inner);
-    device const half4* p1 = (device const half4*)(weights + (ulong)(row0 + 1u) * inner);
-    device const half4* p2 = (device const half4*)(weights + (ulong)(row0 + 2u) * inner);
-    device const half4* p3 = (device const half4*)(weights + (ulong)(row0 + 3u) * inner);
-    device const float4* a = (device const float4*)act;
-    float4 acc = float4(0.0f);
-    for (uint i = lane; i < (inner >> 2u); i += 32u) {
-        float4 x = a[i];
-        acc.x += dot(float4(p0[i]), x);
-        acc.y += dot(float4(p1[i]), x);
-        acc.z += dot(float4(p2[i]), x);
-        acc.w += dot(float4(p3[i]), x);
+// Output projection in half, its short convolution, and the add into the block sum.
+kernel void gemv_f16_conv_add(
+    device const float* activation [[buffer(0)]],
+    device const half* weights [[buffer(1)]],
+    device const float* conv_w [[buffer(2)]],
+    device float* state [[buffer(3)]],
+    device float* sum [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant uint& inner [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group * 4u;
+    if (row0 >= cols) {
+        return;
     }
-    return acc;
+    float4 acc = simd_sum4(f16_part4(activation, weights, row0, inner, lane));
+    if (lane < 4u) {
+        uint c = row0 + lane;
+        sum[c] += conv_step(acc[lane], conv_w, state, c, cols);
+    }
 }
 
 constant uint ATTN_ROW_K = 6528u;
 constant uint ATTN_ROW_V = 7552u;
 
-// Every attention input of one layer in one dispatch. The fused fp4 plane
+// Every attention input of one layer in one dispatch. The fused half plane
 // [q; rel; gate; k; v] reads q_in, k_in, and v_in by row band. Then half rows:
 // the sink (6 groups, q_in), and on full layers the key taps (8 groups, k_in)
-// and value taps (8 groups, v_in). Outputs follow the fp4 rows in order.
+// and value taps (8 groups, v_in). Outputs follow the fused rows in order.
 kernel void gemv_attn(
     device const float* q_in [[buffer(0)]],
     device const float* k_in [[buffer(1)]],
     device const float* v_in [[buffer(2)]],
-    device const uchar* weights [[buffer(3)]],
-    device const uchar* scales [[buffer(4)]],
-    device const half* sink_w [[buffer(5)]],
-    device const half* k_tap_w [[buffer(6)]],
-    device const half* v_tap_w [[buffer(7)]],
-    device float* destination [[buffer(8)]],
-    constant uint& fp4_rows [[buffer(9)]],
-    constant uint& inner [[buffer(10)]],
+    device const half* weights [[buffer(3)]],
+    device const half* sink_w [[buffer(4)]],
+    device const half* k_tap_w [[buffer(5)]],
+    device const half* v_tap_w [[buffer(6)]],
+    device float* destination [[buffer(7)]],
+    constant uint& attn_rows [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
     uint lane [[thread_index_in_simdgroup]],
     uint group [[threadgroup_position_in_grid]])
 {
     uint row0 = group * 4u;
     float4 acc;
-    if (row0 < fp4_rows) {
+    if (row0 < attn_rows) {
         device const float* act = row0 < ATTN_ROW_K ? q_in : (row0 < ATTN_ROW_V ? k_in : v_in);
-        acc = fp4_part4(act, weights, scales, row0, inner >> 3u, inner >> 1u, inner >> 5u, lane);
+        acc = f16_part4(act, weights, row0, inner, lane);
     } else {
-        uint local = row0 - fp4_rows;
+        uint local = row0 - attn_rows;
         if (local < 24u) {
             acc = f16_part4(q_in, sink_w, local, inner, lane);
         } else if (local < 56u) {
@@ -2514,3 +2585,141 @@ kernel void vision_scatter(
     }
     hidden[tid] = float(bank[(uint)slot * width + col]);
 }
+
+// GPTQ column update with the FOEM pull (Zheng et al., AAAI 2026, Eq. 19).
+// One thread owns one row. Columns in the block stay in order. fp contract
+// stays off so the rank-1 update matches the host multiply-then-subtract.
+#pragma clang fp contract(off)
+
+constant float FOEM_EDGE[7] = {0.25f, 0.75f, 1.25f, 1.75f, 2.5f, 3.5f, 5.0f};
+constant float FOEM_GRID[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+
+static uchar foem_nibble(float scaled) {
+    float mag = fabs(scaled);
+    uint choice = 0u;
+    for (uint edge = 0u; edge < 7u; ++edge) {
+        choice += FOEM_EDGE[edge] < mag ? 1u : 0u;
+    }
+    if (choice < 7u && mag == FOEM_EDGE[choice] && (choice & 1u) == 1u) {
+        choice += 1u;
+    }
+    uint sign = signbit(scaled) ? 8u : 0u;
+    return uchar(min(choice, 7u) | sign);
+}
+
+static void foem_scale(float amax, thread uchar& biased, thread float& scale) {
+    biased = 0u;
+    scale = 1.0f;
+    if (amax <= 0.0f) {
+        return;
+    }
+    int exponent = 0;
+    float mantissa = frexp(max(amax / 6.0f, 1.1754944e-38f), exponent);
+    int power = exponent - (mantissa == 0.5f ? 1 : 0);
+    int code = clamp(power + 127, 0, 254);
+    biased = uchar(code);
+    scale = ldexp(1.0f, code - 127);
+}
+
+kernel void foem_block(
+    device float* work [[buffer(0)]],
+    device const float* original [[buffer(1)]],
+    device const float* factor [[buffer(2)]],
+    device const uchar* dead [[buffer(3)]],
+    device uchar* nibbles [[buffer(4)]],
+    device uchar* scales [[buffer(5)]],
+    device float* errors [[buffer(6)]],
+    device uint* flag [[buffer(7)]],
+    constant uint& rows [[buffer(8)]],
+    constant uint& stride [[buffer(9)]],
+    constant uint& column0 [[buffer(10)]],
+    constant uint& width [[buffer(11)]],
+    constant float& beta [[buffer(12)]],
+    uint row [[thread_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    device float* line = work + (ulong)row * stride + column0;
+    device const float* orig = original + (ulong)row * stride + column0;
+    device uchar* codes = nibbles + (ulong)row * stride + column0;
+    device float* residual = errors + (ulong)row * width;
+    float scale = 1.0f;
+    for (uint i = 0u; i < width; ++i) {
+        uint column = column0 + i;
+        if (dead[i]) {
+            codes[i] = 0u;
+            residual[i] = 0.0f;
+            if (column % 32u == 0u) {
+                scales[(ulong)row * (stride / 32u) + column / 32u] = 0u;
+            }
+            continue;
+        }
+        if (column % 32u == 0u) {
+            float amax = 0.0f;
+            for (uint k = 0u; k < 32u; ++k) {
+                amax = max(amax, fabs(line[i + k]));
+            }
+            uchar biased = 0u;
+            foem_scale(amax, biased, scale);
+            scales[(ulong)row * (stride / 32u) + column / 32u] = biased;
+        }
+        uchar code = foem_nibble(line[i] / scale);
+        codes[i] = code;
+        float grid = FOEM_GRID[code & 7u];
+        float restored = (code & 8u) ? -grid * scale : grid * scale;
+        float diagonal = factor[(ulong)i * width + i];
+        float drift = line[i] - orig[i];
+        float error = ((line[i] - restored) - beta * drift) / diagonal;
+        residual[i] = error;
+        if (!isfinite(error)) {
+            *flag = 1u;
+        }
+        for (uint j = i + 1u; j < width; ++j) {
+            if (!dead[j]) {
+                line[j] -= error * factor[(ulong)i * width + j];
+            }
+        }
+        if (i + 1u < width && !dead[i + 1u]) {
+            line[i + 1u] -= beta * (line[i + 1u] - orig[i + 1u]);
+        }
+    }
+}
+
+kernel void foem_tail(
+    device float* work [[buffer(0)]],
+    device const float* original [[buffer(1)]],
+    device const float* errors [[buffer(2)]],
+    device const float* coeff [[buffer(3)]],
+    device uint* flag [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    constant uint& stride [[buffer(6)]],
+    constant uint& column0 [[buffer(7)]],
+    constant uint& width [[buffer(8)]],
+    constant uint& tail [[buffer(9)]],
+    constant uint& pull [[buffer(10)]],
+    constant float& beta [[buffer(11)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= rows * tail) {
+        return;
+    }
+    uint col = tid % tail;
+    uint row = tid / tail;
+    float acc = 0.0f;
+    device const float* residual = errors + (ulong)row * width;
+    for (uint k = 0u; k < width; ++k) {
+        acc += residual[k] * coeff[(ulong)k * tail + col];
+    }
+    device float* value = work + (ulong)row * stride + column0 + col;
+    *value -= acc;
+    if (col == 0u && pull != 0u) {
+        device const float* source = original + (ulong)row * stride + column0;
+        *value -= beta * (*value - *source);
+    }
+    if (!isfinite(*value)) {
+        *flag = 1u;
+    }
+}
+#pragma clang fp contract(on)
+

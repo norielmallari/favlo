@@ -2,8 +2,8 @@
 
 - Bandwidth ceilings and measured kernel costs for the kernels this pipeline runs.
 - Measured on 22 November 2026 on an M5 Pro with 48 GB.
-- The planes are the GPTQ dense pack (`dense-fp4.safetensors`), NVFP4 experts requantized to Metal fp4 in layers 0–19, MXFP8 experts in layers 20–23, and `half` keys and values.
-- Reuse these figures while those kernels and that pack layout are unchanged. Recompute this note when one of them changes.
+- These tables were measured on the GPTQ dense pack (`dense-fp4.safetensors`), NVFP4 experts requantized to Metal fp4 in layers 0–19, MXFP8 experts in layers 20–23, and `half` keys and values.
+- The served fused attention plane, output projection, and head are now half. The decode byte totals below are that GPTQ pack, not the current layout. Recompute this note before using them as the current ceiling.
 - No committed command regenerates these tables. They came from a one-off script that times the runtime's own dispatches.
 
 ## Bandwidth

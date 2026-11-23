@@ -7,12 +7,13 @@ template default. The reply is 6 carrots.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
-from favlo.registry import models_dir
+from favlo.registry import resolve
 from inkling_2_mini.portable import open_runtime
 from inkling_2_mini.portable.chat import STOP, decode_text, encode_chat
 from inkling_2_mini.portable.record import CARROT_PROMPT
@@ -26,10 +27,18 @@ _ANSWER = re.compile(
 
 @pytest.fixture(scope="module")
 def carrot_runtime():
-    root = models_dir() / "Inkling-2-Mini"
-    if not (root / "model-00001-of-00001.safetensors").is_file():
+    from favlo.registry import load_registry
+
+    try:
+        selection = resolve("inkling_2_mini")
+    except LookupError:
         pytest.skip("Inkling checkpoint is not installed")
-    runtime = open_runtime(root)
+    row = load_registry()["models"][selection.folder]
+    source = Path(str(row.get("source") or selection.path))
+    marker = "model-00001-of-00001.safetensors"
+    if not (source / marker).is_file() and not (selection.path / marker).is_file():
+        pytest.skip("Inkling checkpoint is not installed")
+    runtime = open_runtime(selection.path)
     try:
         yield runtime
     finally:

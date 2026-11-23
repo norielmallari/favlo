@@ -90,6 +90,7 @@ class InklingRuntime:
     ) -> None:
         del kv_cache
         self.root = Path(path)
+        self.packs = self.root
         self.capture: Any = None
         self.console = console
         self._owner = owner or f"inkling_2_mini:{id(self)}"
@@ -124,7 +125,13 @@ class InklingRuntime:
         summary = ""
         try:
             self.session = Session(self._owner)
-            self.weights = Checkpoint(self.root, self.session, progress=self, calibrated=calibrated)
+            self.weights = Checkpoint(
+                self.root,
+                self.session,
+                progress=self,
+                calibrated=calibrated,
+                pack_root=self.packs,
+            )
             room = max(0, memory.room() - (512 << 20))
             self.rows = CHUNK
             complete = False
@@ -201,27 +208,21 @@ class InklingRuntime:
                 self._status(summary)
 
     def tick(self, done: int) -> None:
-        """Disk bytes read so far. The expert pack is read after the dense pack."""
+        """Disk bytes read so far. The expert pack is read after the checkpoint."""
         self._disk_done = int(done)
         self._publish_load()
 
     def _opening_bytes(self) -> int:
-        """Pack files plus the largest working set. A missing pack counts the checkpoint."""
-        from inkling_2_mini.metal41.gptq import PACK_NAME
+        """Checkpoint and expert pack plus the largest working set."""
         from inkling_2_mini.metal41.resident import EXPERT_PACK
 
         total = 0
         checkpoint = self.root / "model-00001-of-00001.safetensors"
-        dense = self.root / PACK_NAME
-        experts = self.root / EXPERT_PACK
-        if dense.is_file():
-            total += dense.stat().st_size
-        elif checkpoint.is_file():
+        experts = getattr(self, "packs", self.root) / EXPERT_PACK
+        if checkpoint.is_file():
             total += checkpoint.stat().st_size
         if experts.is_file():
             total += experts.stat().st_size
-        elif checkpoint.is_file() and dense.is_file():
-            total += checkpoint.stat().st_size
         total += self._footprint(CONTEXTS[0], CHUNK)
         return max(total, 1)
 
@@ -461,7 +462,7 @@ class InklingRuntime:
             (plane.padded // 64, padded // 64, 1),
         )
 
-    def _matmul_fp4(
+    def _matmul_f16_band(
         self,
         plane: Plane,
         row: int,
@@ -469,14 +470,12 @@ class InklingRuntime:
         dest: Any,
         padded: int,
         stride: int,
-        offset: int = 0,
     ) -> None:
-        data, scale = plane.rows_at(row)
         self.session.dispatch(
-            "matmul_fp4_m32",
-            [self.half, data, scale, (dest, offset)],
+            "matmul_f16_band",
+            [self.half, (plane.handle, row * plane.inner * 2), (dest, row * 4)],
             [u32(padded), u32(cols), u32(plane.inner), u32(stride)],
-            (cols // 128, padded // 32, 1),
+            (cols // 64, padded // 64, 1),
         )
 
     def _at(self, handle: Any, y: int) -> tuple[Any, int]:
@@ -613,7 +612,6 @@ class InklingRuntime:
                     k_in,
                     v_in,
                     plane.handle,
-                    plane.scale,
                     layer.sink.handle,
                     layer.k_proj.handle if layer.full else layer.sink.handle,
                     layer.v_proj.handle if layer.full else layer.sink.handle,
@@ -634,18 +632,18 @@ class InklingRuntime:
                     self.capture.add(layer.index, "shared", self._gather(q_in, tokens, HIDDEN))
             padded = self._cast(q_in, tokens, HIDDEN)
             if distinct:
-                self._matmul_fp4(plane, 0, Q_ROWS, self.proj, padded, ATTN_ROWS)
+                self._matmul_f16_band(plane, 0, Q_ROWS, self.proj, padded, ATTN_ROWS)
             else:
-                self._matmul_fp4(plane, 0, ATTN_ROWS, self.proj, padded, ATTN_ROWS)
+                self._matmul_f16(self.half, plane, self.proj, padded)
             self._matmul_f16(self.half, layer.sink, self.sink, padded)
             if distinct:
                 self._cast(k_in, tokens, HIDDEN)
-                self._matmul_fp4(plane, ROW_K, KV_DIM, self.proj, padded, ATTN_ROWS, ROW_K * 4)
+                self._matmul_f16_band(plane, ROW_K, KV_DIM, self.proj, padded, ATTN_ROWS)
             if layer.full:
                 self._matmul_f16(self.half, layer.k_proj, self.k_taps, padded)
             if distinct:
                 self._cast(v_in, tokens, HIDDEN)
-                self._matmul_fp4(plane, ROW_V, KV_DIM, self.proj, padded, ATTN_ROWS, ROW_V * 4)
+                self._matmul_f16_band(plane, ROW_V, KV_DIM, self.proj, padded, ATTN_ROWS)
             if layer.full:
                 self._matmul_f16(self.half, layer.v_proj, self.v_taps, padded)
         local = 0 if layer.full else cache_slots(layer.index, self.context)
@@ -718,8 +716,8 @@ class InklingRuntime:
                 (1, 8, -(-keys // span)),
             )
             self.session.dispatch(
-                "gemv_fp4_conv_add",
-                [self.attn_out, layer.wo.handle, layer.wo.scale, layer.attn_conv, attn_state, dest],
+                "gemv_f16_conv_add",
+                [self.attn_out, layer.wo.handle, layer.attn_conv, attn_state, dest],
                 [u32(HIDDEN), u32(Q_DIM)],
                 (HIDDEN // 4, 1, 1),
             )
@@ -751,7 +749,7 @@ class InklingRuntime:
         if self.capture is not None:
             self.capture.add(layer.index, "wo", self._gather(self.attn_out, tokens, Q_DIM))
         padded = self._cast(self.attn_out, tokens, Q_DIM)
-        self._matmul_fp4(layer.wo, 0, HIDDEN, self.wo_out, padded, HIDDEN)
+        self._matmul_f16(self.half, layer.wo, self.wo_out, padded)
         self._conv_add(self.wo_out, layer.attn_conv, attn_state, dest, tokens)
 
     def _conv_add(self, source: Any, weight: Any, state: Any, dest: Any, tokens: int) -> None:
@@ -1073,8 +1071,8 @@ class InklingRuntime:
     def _head(self, row: int) -> None:
         plane = self.weights.unembed
         self.session.dispatch(
-            "gemv_fp4_logits",
-            [(self.final, row * HIDDEN * 4), plane.handle, plane.scale, self.logits],
+            "gemv_f16_logits",
+            [(self.final, row * HIDDEN * 4), plane.handle, self.logits],
             [u32(HEAD_ROWS), u32(HIDDEN), u32(UNPADDED_VOCAB), f32(LOGIT_SOFTCAP)],
             (HEAD_ROWS // 4, 1, 1),
         )

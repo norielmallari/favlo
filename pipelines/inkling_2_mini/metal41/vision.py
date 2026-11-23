@@ -195,14 +195,17 @@ def expand_prompt(
     return out, plan
 
 
-def ensure_pack(root: Path, log: Any = None) -> None:
+def ensure_pack(root: Path, dest: Path | None = None, log: Any = None) -> None:
     """Write the fp8 vision pack when it is missing or does not match ``config.json``."""
-    path = Path(root) / PACK_NAME
-    if _pack_ready(path, root):
+    base = Path(root)
+    pack = Path(dest or root)
+    pack.mkdir(parents=True, exist_ok=True)
+    path = pack / PACK_NAME
+    if _pack_ready(path, base):
         return
     if log is not None:
         log("baking the vision fp8 planes")
-    _write_pack(Path(root), path, log)
+    _write_pack(base, path, log)
 
 
 def bind_vision(runtime: Any, tokens: list[int], hit: int, dropped: int) -> None:
@@ -227,7 +230,7 @@ def bind_vision(runtime: Any, tokens: list[int], hit: int, dropped: int) -> None
             if found is None:
                 _status(runtime, f"vision patches {count}")
                 if tower is None:
-                    tower = Tower(runtime.root, runtime.session)
+                    tower = Tower(runtime.root, runtime.session, getattr(runtime, "packs", None))
                 found = tower.encode_blob(blob)
                 if found.shape != (count, TEXT):
                     message = "vision rows do not match the image"
@@ -266,9 +269,10 @@ def release_vision(runtime: Any) -> None:
 class Tower:
     """One vision pack on the device. ``close`` releases it."""
 
-    def __init__(self, root: Path, session: Any) -> None:
-        ensure_pack(root)
+    def __init__(self, root: Path, session: Any, pack_root: Path | None = None) -> None:
         self.root = Path(root)
+        self.pack_root = Path(pack_root or root)
+        ensure_pack(self.root, self.pack_root)
         self.session = session
         self.owner = f"inkling-vision:{id(self)}"
         self.pack = None
@@ -295,7 +299,7 @@ class Tower:
         return self._encode(rgb, rows, cols)
 
     def _load(self) -> None:
-        path = self.root / PACK_NAME
+        path = self.pack_root / PACK_NAME
         tensors = Tensors(path)
         try:
             if tensors.metadata.get("format") != PACK_FORMAT:
@@ -763,7 +767,9 @@ def _pack_ready(path: Path, root: Path) -> bool:
 
 
 def _write_pack(root: Path, path: Path, log: Any = None) -> None:
-    source = root / "model-00001-of-00001.safetensors"
+    source = root / "vision.safetensors"
+    if not source.is_file():
+        source = root / "model-00001-of-00001.safetensors"
     tensors = Tensors(source)
     packed: dict[str, np.ndarray] = {}
     try:

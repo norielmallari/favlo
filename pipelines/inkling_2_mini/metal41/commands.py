@@ -16,7 +16,7 @@ from inkling_2_mini.metal41.session import Session, f32, u32
 from inkling_2_mini.portable.record import CARROT_PROMPT
 
 PIPELINE = "inkling_2_mini"
-FOLDER = "Inkling-2-Mini"
+FOLDER = "Inkling-2-Mini-fp4-gptq-foem"
 _REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 _FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -174,7 +174,10 @@ def _check_f16(session: Session, rng: np.random.Generator) -> None:
 
 
 def _check_fp4(session: Session, rng: np.random.Generator) -> None:
+    from inkling_2_mini.metal41.gptq import foem_device_matches
     from inkling_2_mini.metal41.weights import _quantize_fp4
+
+    foem_device_matches(session)
 
     rows, cols, inner = 64, 256, 512
     packed, scales = _quantize_fp4(rng.standard_normal((cols, inner)).astype(np.float32))
@@ -496,7 +499,7 @@ def _folder_name(text: str) -> str:
 
 
 def register_folder(folder: Path, *, alias: str | None, root: Path | None = None) -> None:
-    """Write the registry row with this pipeline's sampling card."""
+    """Write the registry row. The folder holds the language file and the packs."""
     from favlo.registry import load_registry, register_quantized, save_registry
     from inkling_2_mini.portable.sampling import CONTEXT_LENGTH, PRESERVE_THINKING
 
@@ -518,7 +521,7 @@ def register_folder(folder: Path, *, alias: str | None, root: Path | None = None
 
 
 def _setup(args: argparse.Namespace) -> int:
-    """Download the official checkpoint, calibrate the dense planes, and register it."""
+    """Download the checkpoint, bake the additive packs, and register that folder."""
     import os
 
     from favlo.console import Console, publish_count
@@ -526,12 +529,10 @@ def _setup(args: argparse.Namespace) -> int:
         REPO,
         download,
         list_files,
-        remaining_calibration,
         remaining_download,
         remaining_expert,
         shortfall,
     )
-    from inkling_2_mini.metal41.weights import open_pack
 
     repo = args.repo or REPO
     name = args.name or (FOLDER if repo == REPO else repo.split("/", 1)[1])
@@ -553,15 +554,9 @@ def _setup(args: argparse.Namespace) -> int:
             ui.log(str(exc))
             ui.log(f"using the checkpoint already in {folder.name}")
         need_download = remaining_download(folder, files)
-        pack = open_pack(folder)
-        ready = pack is not None
-        if pack is not None:
-            pack.close()
         need_experts = remaining_expert(folder)
         experts_ready = need_experts == 0
         need_record = need_experts
-        if not args.no_calibrate and not ready:
-            need_record += remaining_calibration(folder)
         message = shortfall(need_download, need_record, folder, folder)
         if message is not None:
             ui.log(message)
@@ -586,12 +581,11 @@ def _setup(args: argparse.Namespace) -> int:
 
             for stale in (PACK_NAME, HESSIANS_NAME, EXPERT_PACK, VISION_PACK):
                 (folder / stale).unlink(missing_ok=True)
-            ready = False
             experts_ready = False
+        from inkling_2_mini.metal41.repack import repack
+
+        repack(folder, log=ui.log)
         register_folder(folder, alias="inkling_2_mini" if name == FOLDER else None)
-        if not args.no_calibrate and not ready:
-            ui.log("calibrating the dense fp4 planes")
-            _calibrate(2048, False, folder)
         if not experts_ready:
             ui.log("baking the expert fp4 planes")
             _bake(folder)

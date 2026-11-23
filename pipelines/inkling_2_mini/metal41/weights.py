@@ -1,19 +1,17 @@
 """Load the safetensors checkpoint. Experts stay packed in the file.
 
-Dense projections are Metal fp4 with one E8M0 scale per 32. The attention
-inputs of a layer are one fused plane, ``[wq; wr; gate; wk; wv]``, so a layer
-whose three streams agree runs one GEMV. The router, the sink, the dynamic
-conv taps, and the message gates stay half. The head keeps the unpadded
-vocabulary rows. The fp4 planes come from the calibrated pack beside the
-checkpoint when it matches, and are rounded to the nearest code otherwise.
+The fused attention plane, the attention output projection, and the head are
+half, cast from the checkpoint bf16. The attention inputs of a layer are one
+fused plane, ``[wq; wr; gate; wk; wv]``, so a layer whose three streams agree
+runs one GEMV. The router, the sink, the dynamic conv taps, and the message
+gates stay half. The head keeps the unpadded vocabulary rows.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import mmap
-import struct
+import os
 from pathlib import Path
 from typing import Any
 
@@ -159,21 +157,25 @@ def _quantize_fp4(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 class Tensors:
-    """One mapped safetensors file. ``on_read`` sees the byte count of each read."""
+    """One safetensors file. The header is read. Payloads are pread in 8 MiB pieces."""
 
     def __init__(self, path: Path, on_read: Any = None) -> None:
-        self._file = path.open("rb")
-        self._map = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
-        header_bytes = struct.unpack_from("<Q", self._map, 0)[0]
-        header = json.loads(self._map[8 : 8 + header_bytes])
+        self.path = Path(path)
+        self._file = self.path.open("rb")
+        self._on_read = on_read
+        fd = self._file.fileno()
+        header_bytes = int.from_bytes(os.pread(fd, 8, 0), "little")
+        raw = os.pread(fd, header_bytes, 8)
+        if len(raw) != header_bytes:
+            message = f"{self.path.name} header is short"
+            raise OSError(message)
+        header = json.loads(raw)
         self.metadata = header.pop("__metadata__", None) or {}
         self.header = header
-        self.header_digest = hashlib.sha256(self._map[8 : 8 + header_bytes]).hexdigest()
+        self.header_digest = hashlib.sha256(raw).hexdigest()
         self._data = 8 + header_bytes
-        self._on_read = on_read
 
     def close(self) -> None:
-        self._map.close()
         self._file.close()
 
     def fileno(self) -> int:
@@ -201,10 +203,12 @@ class Tensors:
             message = f"checkpoint is missing {name}"
             raise KeyError(message)
         start, end = info["data_offsets"]
-        raw = self._map[self._data + start : self._data + end]
-        if self._on_read is not None:
-            self._on_read(end - start)
-        return bytes(raw), info
+        nbytes = int(end) - int(start)
+        buf = bytearray(nbytes)
+        from inkling_2_mini.metal41.resident import pread_view
+
+        pread_view(self.fileno(), memoryview(buf), self._data + int(start), self._on_read)
+        return bytes(buf), info
 
     def vector(self, name: str, shape: tuple[int, ...]) -> np.ndarray:
         raw, info = self.raw(name)
@@ -214,6 +218,8 @@ class Tensors:
             raise ValueError(message)
         if info["dtype"] == "F32":
             return np.frombuffer(raw, dtype=np.float32).reshape(shape).copy()
+        if info["dtype"] == "F16":
+            return np.frombuffer(raw, dtype=np.float16).reshape(shape).astype(np.float32)
         if info["dtype"] == "BF16":
             return _bf16_f32(raw, shape)
         message = f"{name} dtype {info['dtype']} is not a float tensor"
@@ -239,7 +245,11 @@ class Tensors:
         return self._data + int(start), int(end) - int(start)
 
     def blob(self, offset: int, nbytes: int) -> bytes:
-        return self._map[int(offset) : int(offset) + int(nbytes)]
+        buf = bytearray(int(nbytes))
+        from inkling_2_mini.metal41.resident import pread_view
+
+        pread_view(self.fileno(), memoryview(buf), int(offset), self._on_read)
+        return bytes(buf)
 
 
 def checkpoint_file(root: Path) -> Path:
@@ -295,23 +305,31 @@ class Checkpoint:
     """The language tensors. Vision and the drafter stay on disk."""
 
     def __init__(
-        self, root: Path, session: Session, progress: Any = None, *, calibrated: bool = True
+        self,
+        root: Path,
+        session: Session,
+        progress: Any = None,
+        *,
+        calibrated: bool = True,
+        pack_root: Path | None = None,
     ) -> None:
         path = checkpoint_file(root)
         if not path.is_file():
             message = f"checkpoint is missing {path.name}"
             raise FileNotFoundError(message)
         self.root = root
+        self.pack_root = Path(pack_root or root)
         self.session = session
         self._progress = progress
         self._done = 0
         self._noted = 0
         self._tensors = Tensors(path, on_read=self._read)
-        self._pack = open_pack(root) if calibrated else None
-        self.dense_tag = self._pack.header_digest[:16] if self._pack is not None else "rtn"
+        del calibrated
+        self._pack = None
+        self.dense_tag = "half"
         from inkling_2_mini.metal41.resident import open_expert_pack
 
-        self.experts = open_expert_pack(root)
+        self.experts = open_expert_pack(self.pack_root, self.root)
         try:
             self._load()
         except Exception:
@@ -324,17 +342,11 @@ class Checkpoint:
 
     def _load(self) -> None:
         session = self.session
-        embed = self._matrix("model.llm.embed.weight", (VOCAB, HIDDEN))
-        self.embed = session.upload(embed.astype(np.float16))
-        del embed
+        self.embed = self._f16_rows("model.llm.embed.weight", VOCAB, HIDDEN, VOCAB).handle
         self.embed_norm = self._f32("model.llm.embed_norm.weight", (HIDDEN,))
         self.final_norm = self._f32("model.llm.norm.weight", (HIDDEN,))
-        self.unembed = self._dense(
-            "unembed",
-            UNPADDED_VOCAB,
-            HEAD_ROWS,
-            HIDDEN,
-            lambda: _pad_rows(head_matrix(self._tensors), HEAD_ROWS),
+        self.unembed = self._f16_rows(
+            "model.llm.unembed.weight", UNPADDED_VOCAB, HIDDEN, HEAD_ROWS
         )
         self.output_query = self._f32("model.llm.attn_res.output_query", (HIDDEN,))
         cross_q = self._vector_f32("model.llm.middle_cycle_cross_pass_queries", (24, HIDDEN))
@@ -403,9 +415,59 @@ class Checkpoint:
         handle = memory.allocate(int(nbytes), owner=self.session._owner, heap="resident")
         return self.session._keep(handle)
 
-    def _f16(self, name: str, shape: tuple[int, int], padded: int) -> Plane:
-        matrix = _pad_rows(self._matrix(name, shape), padded).astype(np.float16)
-        return Plane(self.session.upload(matrix), shape[0], padded, shape[1])
+    def _direct_f16(self, name: str, rows: int, inner: int) -> bool:
+        info = self._tensors.header.get(name)
+        if not isinstance(info, dict) or info.get("dtype") != "F16":
+            return False
+        shape = tuple(info.get("shape") or ())
+        return len(shape) == 2 and int(shape[0]) >= rows and int(shape[1]) == inner
+
+    def _f16_rows(self, name: str, rows: int, inner: int, padded: int) -> Plane:
+        """Pread a float16 matrix. A BF16 tensor is cast once, for an unrepacked file."""
+        if not self._direct_f16(name, rows, inner):
+            info = self._tensors.header[name]
+            matrix = self._matrix(name, tuple(info["shape"]))
+            return self._half(np.asarray(matrix)[:rows], rows, padded, inner)
+        info = self._tensors.header[name]
+        start = int(info["data_offsets"][0])
+        total = padded * inner * 2
+        handle = self._device(total) if padded == rows else self.session.zeros(total)
+        self._tensors.into(
+            handle,
+            self._tensors._data + start,
+            rows * inner * 2,
+            note=self._read,
+        )
+        return Plane(handle, rows, padded, inner)
+
+    def _attn(self, index: int) -> Plane:
+        """The fused plane. Each float16 member is pread at its row offset."""
+        attn = f"model.llm.layers.{index}.attn"
+        parts = (
+            (f"{attn}.wq_du.weight", Q_DIM, ROW_Q),
+            (f"{attn}.wr_du.weight", REL_DIM, ROW_REL),
+            (f"{attn}.gate_attn.weight", Q_DIM, ROW_GATE),
+            (f"{attn}.wk_dv.weight", KV_DIM, ROW_K),
+            (f"{attn}.wv_dv.weight", KV_DIM, ROW_V),
+        )
+        if not all(self._direct_f16(name, rows, HIDDEN) for name, rows, _row in parts):
+            return self._half(attn_matrix(self._tensors, index), ATTN_ROWS, ATTN_ROWS, HIDDEN)
+        handle = self._device(ATTN_ROWS * HIDDEN * 2)
+        for name, rows, row in parts:
+            info = self._tensors.header[name]
+            start = int(info["data_offsets"][0])
+            self._tensors.into(
+                handle,
+                self._tensors._data + start,
+                rows * HIDDEN * 2,
+                dest_off=row * HIDDEN * 2,
+                note=self._read,
+            )
+        return Plane(handle, ATTN_ROWS, ATTN_ROWS, HIDDEN)
+
+    def _half(self, matrix: np.ndarray, cols: int, padded: int, inner: int) -> Plane:
+        array = np.ascontiguousarray(_pad_rows(matrix, padded).astype(np.float16))
+        return Plane(self.session.upload(array), cols, padded, inner)
 
     def _span(self, name: str, shape: tuple[int, ...]) -> tuple[int, int]:
         return self._tensors.span(name, shape)
@@ -493,24 +555,16 @@ class Checkpoint:
         layer.core = CORE_START <= index < CORE_END
         stem = f"model.llm.layers.{index}"
         attn = f"{stem}.attn"
-        layer.attn = self._dense(
-            f"layers.{index}.attn",
-            ATTN_ROWS,
-            ATTN_ROWS,
-            HIDDEN,
-            lambda: attn_matrix(self._tensors, index),
-        )
-        layer.wo = self._dense(
-            f"layers.{index}.wo", HIDDEN, HIDDEN, Q_DIM, lambda: wo_matrix(self._tensors, index)
-        )
-        layer.sink = self._f16(f"{attn}.attn_sink_proj.weight", (24, HIDDEN), 64)
+        layer.attn = self._attn(index)
+        layer.wo = self._f16_rows(f"{attn}.wo_ud.weight", HIDDEN, Q_DIM, HIDDEN)
+        layer.sink = self._f16_rows(f"{attn}.attn_sink_proj.weight", 24, HIDDEN, 64)
         layer.q_scale = self._f32(f"{attn}.q_l2_clip.scale", (24, 128))
         layer.rel_scale = self._f32(f"{attn}.rel_l2_clip.scale", (24, 16))
         layer.rel_table = self._f32(f"{attn}.rel_logits_proj.proj", (16, 1024))
         layer.attn_conv = self._conv(f"{stem}.attn_sconv.weight", HIDDEN)
         layer.mlp_conv = self._conv(f"{stem}.mlp_sconv.weight", HIDDEN)
         layer.mlp_norm = self._f32(f"{stem}.mlp_norm.weight", (HIDDEN,))
-        layer.router = self._f16(f"{stem}.mlp.gate.weight", (128, HIDDEN), 128)
+        layer.router = self._f16_rows(f"{stem}.mlp.gate.weight", 128, HIDDEN, 128)
         layer.router_bias = self._f32(f"{stem}.mlp.gate.bias", (128,))
         if layer.full:
             norms = np.stack(
@@ -523,8 +577,8 @@ class Checkpoint:
             layer.norms = self.session.upload(np.ascontiguousarray(norms))
             layer.k_conv = self._f32(f"{attn}.k_sconv.static_w", (4, KV_DIM))
             layer.v_conv = self._f32(f"{attn}.v_sconv.static_w", (4, KV_DIM))
-            layer.k_proj = self._f16(f"{attn}.k_sconv.weight_proj", (32, HIDDEN), 64)
-            layer.v_proj = self._f16(f"{attn}.v_sconv.weight_proj", (32, HIDDEN), 64)
+            layer.k_proj = self._f16_rows(f"{attn}.k_sconv.weight_proj", 32, HIDDEN, 64)
+            layer.v_proj = self._f16_rows(f"{attn}.v_sconv.weight_proj", 32, HIDDEN, 64)
         else:
             layer.norms = self._f32(f"{stem}.attn_norm.weight", (HIDDEN,))
             layer.k_conv = self._conv(f"{attn}.k_sconv.weight", KV_DIM)

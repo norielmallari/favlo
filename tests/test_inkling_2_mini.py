@@ -25,6 +25,7 @@ from inkling_2_mini.metal41.gptq import (
     PACK_NAME,
     Capture,
     config_digest,
+    foem_fp4,
     gptq_fp4,
     write_pack,
 )
@@ -289,6 +290,24 @@ def test_gptq_lowers_the_output_error() -> None:
     found = weighted_error(matrix, *gptq_fp4(matrix, hessian), hessian)
     nearest = weighted_error(matrix, *_quantize_fp4(matrix), hessian)
     assert found < 0.7 * nearest
+
+
+def test_foem_beta_zero_matches_gptq_without_dead_columns() -> None:
+    rng = np.random.default_rng(5)
+    matrix = rng.standard_normal((64, 256)).astype(np.float32)
+    draw = rng.standard_normal((256, 48))
+    hessian = draw @ draw.T + np.eye(256)
+    assert np.array_equal(foem_fp4(matrix, hessian, beta=0.0)[0], gptq_fp4(matrix, hessian)[0])
+
+
+def test_foem_beta_moves_a_correlated_matrix() -> None:
+    rng = np.random.default_rng(6)
+    matrix = rng.standard_normal((48, 256)).astype(np.float32)
+    draw = rng.standard_normal((256, 32))
+    hessian = draw @ draw.T + np.eye(256) * 0.05
+    nearest = foem_fp4(matrix, hessian, beta=0.0)
+    moved = foem_fp4(matrix, hessian, beta=0.1)
+    assert not np.array_equal(nearest[0], moved[0])
 
 
 def test_capture_streams_and_round_trip(tmp_path: Path) -> None:
@@ -636,10 +655,10 @@ def test_repo_id_accepts_the_public_link() -> None:
     assert _repo_id("thinkingmachines/Inkling-2-Mini") == "thinkingmachines/Inkling-2-Mini"
 
 
-def test_download_skips_the_drafter_and_counts_a_short_file(tmp_path: Path) -> None:
+def test_download_keeps_the_drafter_file_and_counts_a_short_file(tmp_path: Path) -> None:
     assert keep("model-00001-of-00001.safetensors")
     assert keep("tiktoken/vocab.json")
-    assert not keep("mtp.safetensors")
+    assert keep("mtp.safetensors")
     assert not keep("README.md")
     assert not keep(".gitattributes")
     (tmp_path / "config.json").write_text("{}")
@@ -651,12 +670,14 @@ def test_download_skips_the_drafter_and_counts_a_short_file(tmp_path: Path) -> N
 
 
 def test_register_writes_the_recommended_card(tmp_path: Path) -> None:
-    folder = tmp_path / "models" / "Inkling-2-Mini"
+    folder = tmp_path / "models" / "Inkling-2-Mini-fp4-gptq-foem"
     folder.mkdir(parents=True)
     register_folder(folder, alias="inkling_2_mini", root=tmp_path)
     from favlo.registry import load_registry
 
-    row = load_registry(tmp_path)["models"]["Inkling-2-Mini"]
+    row = load_registry(tmp_path)["models"]["Inkling-2-Mini-fp4-gptq-foem"]
+    assert Path(row["source"]) == folder
+    assert Path(row["directory"]) == folder
     assert row["alias"] == "inkling_2_mini"
     assert row["kv_cache"] == "half"
     assert row["default_variant"] == "thinking"
@@ -667,6 +688,55 @@ def test_register_writes_the_recommended_card(tmp_path: Path) -> None:
     assert "reasoning_effort" not in row["variants"]["thinking"]
     assert row["variants"]["thinking"]["temperature"] == 1.0
     assert row["variants"]["instruct"]["top_k"] == 0
+
+
+def _shard(path: Path, tensors: dict[str, tuple[str, np.ndarray]]) -> None:
+    header: dict[str, object] = {}
+    blobs: list[bytes] = []
+    cursor = 0
+    for name, (dtype, array) in tensors.items():
+        raw = np.ascontiguousarray(array).tobytes()
+        header[name] = {
+            "dtype": dtype,
+            "shape": list(array.shape),
+            "data_offsets": [cursor, cursor + len(raw)],
+        }
+        blobs.append(raw)
+        cursor += len(raw)
+    payload = json.dumps(header, separators=(",", ":")).encode()
+    payload += b" " * (-len(payload) % 8)
+    path.write_bytes(len(payload).to_bytes(8, "little") + payload + b"".join(blobs))
+
+
+def test_repack_stores_language_as_float16_and_splits_vision(tmp_path: Path) -> None:
+    from inkling_2_mini.metal41.repack import repack
+    from inkling_2_mini.metal41.weights import Tensors
+
+    values = np.array([[1.0, -2.0], [0.5, 0.25]], np.float32)
+    bits = (values.view(np.uint32) >> 16).astype(np.uint16)
+    visual = np.array([3.0, -4.0], np.float32)
+    visual_bits = (visual.view(np.uint32) >> 16).astype(np.uint16)
+    _shard(
+        tmp_path / "model-00001-of-00001.safetensors",
+        {
+            "model.llm.embed.weight": ("BF16", bits),
+            "model.visual.proj.weight": ("BF16", visual_bits),
+        },
+    )
+    repack(tmp_path)
+    language = Tensors(tmp_path / "model-00001-of-00001.safetensors")
+    vision = Tensors(tmp_path / "vision.safetensors")
+    try:
+        assert "model.visual.proj.weight" not in language.header
+        assert language.header["model.llm.embed.weight"]["dtype"] == "F16"
+        assert vision.header["model.visual.proj.weight"]["dtype"] == "F16"
+        got = language.vector("model.llm.embed.weight", (2, 2))
+        assert np.allclose(got, values)
+    finally:
+        language.close()
+        vision.close()
+    marker = json.loads((tmp_path / "repack.json").read_text())
+    assert marker["format"] == "favlo-inkling-f16-1"
 
 
 def test_portable_import_leaves_the_device_unloaded() -> None:

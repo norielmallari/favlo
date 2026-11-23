@@ -79,7 +79,7 @@ def chat_encode(selection: Any, *, thinking: bool) -> Callable[[str], int]:
     from favlo.cli import ensure_pipelines_path
 
     ensure_pipelines_path()
-    module = importlib.import_module(f"{selection.pipeline}.{selection.runtime}.chat")
+    module = importlib.import_module(f"{selection.pipeline}.portable.chat")
     encode_chat = module.encode_chat
     root = Path(selection.path)
 

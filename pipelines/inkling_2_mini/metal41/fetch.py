@@ -1,7 +1,7 @@
 """Download the official Inkling 2 Mini checkpoint with plain HTTP.
 
 The listener does not import this module. ``setup`` does. The experts are
-already NVFP4 and MXFP8 in the file. ``setup`` does not download the drafter.
+already NVFP4 and MXFP8 in the file. ``mtp.safetensors`` stays its own file.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ REPO = "thinkingmachines/Inkling-2-Mini"
 _HOST = "https://huggingface.co"
 _CHUNK = 8 * 1024 * 1024
 _AGENT = "favlo"
-_SKIP = frozenset({".gitattributes", "README.md", "mtp.safetensors"})
+_SKIP = frozenset({".gitattributes", "README.md"})
 # The calibration input file ``calibrate`` writes beside the checkpoint.
 HESSIAN_BYTES = 2_243_711_948
 MARKER = "fetch_complete.json"
@@ -109,13 +109,33 @@ def list_files(host: str = _HOST, repo: str = REPO) -> list[File]:
     return files
 
 
+def _repacked(dest: Path) -> bool:
+    """The language shard was rewritten to float16 and no longer matches the hub size."""
+    marker = dest / "repack.json"
+    language = dest / "model-00001-of-00001.safetensors"
+    vision = dest / "vision.safetensors"
+    if not marker.is_file() or not language.is_file() or not vision.is_file():
+        return False
+    try:
+        record = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        record.get("format") == "favlo-inkling-f16-1"
+        and record.get("language") == language.stat().st_size
+    )
+
+
 def remaining_download(dest: Path, files: list[File]) -> int:
     """Bytes not yet on disk. A file longer than its listing counts as missing."""
     missing = 0
     marked = _marked(dest)
+    done = _repacked(dest)
     for item in files:
         path = dest / item.name
         have = path.stat().st_size if path.is_file() else 0
+        if done and item.name == "model-00001-of-00001.safetensors":
+            continue
         if have == item.size and _marked_ok(marked, item):
             continue
         if have > item.size:
@@ -125,11 +145,11 @@ def remaining_download(dest: Path, files: list[File]) -> int:
     return missing
 
 
-def remaining_expert(dest: Path) -> int:
-    """Expert-pack bytes not yet beside the checkpoint."""
+def remaining_expert(dest: Path, config_root: Path | None = None) -> int:
+    """Expert-pack bytes not yet in the additive folder."""
     from inkling_2_mini.metal41.resident import expert_pack_bytes, open_expert_pack
 
-    record = open_expert_pack(dest)
+    record = open_expert_pack(dest, config_root or dest)
     if record is not None:
         record.close()
         return 0
@@ -164,6 +184,7 @@ def download(
     marked = _marked(dest)
     digests = dict(marked)
     fetched: set[str] = set()
+    done = _repacked(dest)
     for item in files:
         path = dest / item.name
         if path.is_symlink():
@@ -172,6 +193,10 @@ def download(
         path.parent.mkdir(parents=True, exist_ok=True)
         have = path.stat().st_size if path.is_file() else 0
         label = Path(item.name).name
+        if done and item.name == "model-00001-of-00001.safetensors":
+            finished += item.size
+            on_progress(finished, total, label)
+            continue
         if have == item.size and (_marked_ok(marked, item) or item.sha256 is None):
             finished += item.size
             on_progress(finished, total, label)

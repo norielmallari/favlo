@@ -126,12 +126,54 @@ def encode_chat(
     chosen = effort if effort is not None else ("high" if thinking else "none")
     text = _chat_template(root).render(
         messages=_objects(messages),
-        tools=tools or None,
+        tools=_declared_tools(tools),
         reasoning_effort=template_effort(chosen),
     )
     if opening is None:
         opening = forced_text(thinking, None, plain=not tools)
     return list(load_tokenizer(root).encode(text + opening).ids)
+
+
+_SCHEMA_KEYS = ("type", "description", "enum", "properties", "required", "items")
+
+
+def _slim_schema(value: Any) -> Any:
+    """The declaration the checkpoint template was written for.
+
+    Extra JSON-schema fields such as ``title`` and ``additionalProperties``
+    make a required call come out as prose.
+    """
+    if isinstance(value, list):
+        return [_slim_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    kept: dict[str, Any] = {}
+    for key in _SCHEMA_KEYS:
+        if key not in value:
+            continue
+        item = value[key]
+        if key in ("properties", "items"):
+            kept[key] = _slim_schema(item)
+        else:
+            kept[key] = item
+    return kept
+
+
+def _declared_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    if not tools:
+        return None
+    declared: list[dict[str, Any]] = []
+    for tool in tools:
+        copied = dict(tool)
+        function = copied.get("function")
+        if isinstance(function, dict):
+            function = dict(function)
+            function["parameters"] = _slim_schema(function.get("parameters") or {})
+            copied["function"] = function
+        elif "parameters" in copied:
+            copied["parameters"] = _slim_schema(copied.get("parameters") or {})
+        declared.append(copied)
+    return declared
 
 
 def encode_text(root: Path, text: str) -> list[int]:

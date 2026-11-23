@@ -15,12 +15,15 @@ _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 # Threads per threadgroup for each kernel.
 KERNELS: dict[str, int] = {
     "matmul_f16_m64": 128,
+    "matmul_f16_band": 128,
     "matmul_fp4_m32": 128,
     "expert_fp4_tile": 128,
     "expert_fp8_tile": 128,
     "gemv_fp4": 32,
     "gemv_fp4_logits": 32,
     "gemv_fp4_conv_add": 32,
+    "gemv_f16_logits": 32,
+    "gemv_f16_conv_add": 32,
     "gemv_f16": 32,
     "gemv_attn": 32,
     "route_gemv": 32,
@@ -64,6 +67,8 @@ KERNELS: dict[str, int] = {
     "vision_attend": 32,
     "vision_merge": 256,
     "vision_scatter": 256,
+    "foem_block": 256,
+    "foem_tail": 256,
 }
 
 
