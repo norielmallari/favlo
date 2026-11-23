@@ -57,6 +57,17 @@ class Selection:
     parts: dict[str, Path] | None = None
 
 
+def device_budget_cap(root: Path | None = None) -> int | None:
+    """Byte cap from the root key ``device_budget``. Absent means the live free memory."""
+    raw = load_registry(root).get("device_budget")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        message = "device_budget must be a positive byte count"
+        raise ValueError(message)
+    return raw
+
+
 def load_registry(root: Path | None = None) -> dict[str, Any]:
     path = registry_path(root)
     if not path.is_file():

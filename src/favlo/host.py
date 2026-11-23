@@ -6,9 +6,13 @@ shipped and a device answers. The choice is made once per process.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 from collections.abc import Collection
+from pathlib import Path
+
+VRAM_HOLD_BYTES = 256 << 20
 
 _METAL: bool | None = None
 
@@ -78,6 +82,80 @@ def page_bytes() -> int:
     if sys.platform == "win32":
         return int(_system_info().dwPageSize)
     return int(os.sysconf("SC_PAGE_SIZE"))
+
+
+def cuda_home() -> Path | None:
+    """The NVIDIA CUDA Toolkit directory, usually ``CUDA\\v13.5``."""
+    override = os.environ.get("CUDA_PATH")
+    if override and Path(override).is_dir():
+        return Path(override)
+    root = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+    if not root.is_dir():
+        return None
+    versions = sorted((path for path in root.glob("v*") if path.is_dir()), reverse=True)
+    if not versions:
+        return None
+    return versions[0]
+
+
+def vram_snapshot() -> tuple[int, int] | None:
+    """``(free, total)`` from ``cudaMemGetInfo``. Both are read when this is called."""
+    lib = _cudart()
+    if lib is None or not hasattr(lib, "cudaMemGetInfo"):
+        return None
+    free = ctypes.c_size_t()
+    total = ctypes.c_size_t()
+    lib.cudaMemGetInfo.argtypes = [
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    lib.cudaMemGetInfo.restype = ctypes.c_int
+    if lib.cudaMemGetInfo(ctypes.byref(free), ctypes.byref(total)) != 0:
+        return None
+    if free.value < 1 or total.value < 1:
+        return None
+    return int(free.value), int(total.value)
+
+
+def _cudart() -> ctypes.WinDLL | None:
+    """The toolkit runtime library. ``None`` when that library is not installed."""
+    if sys.platform != "win32":
+        return None
+    home = cuda_home()
+    if home is None:
+        return None
+    found = sorted(home.glob("bin/**/cudart64_*.dll"))
+    if not found:
+        return None
+    try:
+        return ctypes.WinDLL(str(found[-1]))
+    except OSError:
+        return None
+
+
+def usable_bytes(free: int, cap: int | None) -> int:
+    """Free bytes the opening may use. ``cap`` lowers that. The hold-back stays."""
+    usable = free - VRAM_HOLD_BYTES
+    if usable < 1:
+        return 0
+    if cap is None:
+        return usable
+    return min(cap, usable)
+
+
+def device_budget() -> int | None:
+    """Bytes a CUDA opening may place on the device.
+
+    The count is the live free memory from the driver, minus the hold-back.
+    ``device_budget`` in the registry lowers that count. An omitted key does not.
+    """
+    snap = vram_snapshot()
+    if snap is None:
+        return None
+    free, _total = snap
+    from favlo.registry import device_budget_cap
+
+    return usable_bytes(free, device_budget_cap())
 
 
 def _windows_status() -> object:
