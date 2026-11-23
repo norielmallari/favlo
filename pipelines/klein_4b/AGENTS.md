@@ -1,6 +1,6 @@
 # This package
 
-The pipeline entry is `klein_4b.portable`. `metal41` is the Metal device that entry opens. Serve and `favlo --klein_4b` import `portable`. `open_runtime` selects `metal41` on this machine and opens the device from there.
+The pipeline entry is `klein_4b.portable`. That entry opens `metal41` on Apple Silicon and `cuda` on Windows. Serve and `favlo --klein_4b` import `portable`. `open_runtime` selects the device and opens it from there.
 
 This package is a media pipeline. It inherits `MediaPipeline`. Kind is `image`. `id_prefix` and `object_name` are set on the class. The smoke tool local name is `generate_image`. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder.
 

@@ -113,6 +113,8 @@ class Pipeline(MediaPipeline):
         from favlo.pipelines import bind_open_runtime
 
         chosen = select_device(_device_packages())
+        if chosen == "cuda":
+            return bind_open_runtime(_open_cuda, path, **kwargs)
         if chosen != "metal41":
             message = "this runtime cannot run here"
             raise RuntimeError(message)
@@ -167,6 +169,60 @@ class Pipeline(MediaPipeline):
                 result="image",
             )
         ]
+
+
+class _CudaRuntime:
+    """Portable request in, CUDA canvas out. The Metal runtime keeps ``edit``."""
+
+    def __init__(self, path: Path, owner: str | None) -> None:
+        from klein_4b.cuda.runtime import KleinRuntime
+
+        self._inner = KleinRuntime(path, owner)
+        self._request: Any = None
+
+    def ensure_open(self, request: EditRequest) -> None:
+        self._request = _cuda_request(request)
+        self._inner.ensure_open(self._request)
+
+    def edit(self, request: EditRequest, hold: Any, stop: Any, job: dict[str, Any] | None) -> Any:
+        if self._request is None:
+            self.ensure_open(request)
+        if self._inner.ops is None or self._inner.store is None:
+            message = "runtime is closed"
+            raise RuntimeError(message)
+        from klein_4b.cuda.generate import generate
+
+        return generate(
+            self._inner.ops,
+            self._inner.store,
+            self._request,
+            hold,
+            job if isinstance(job, dict) else {},
+            stop,
+        )
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def _open_cuda(path: Path, *, owner: str | None = None, **kwargs: Any) -> _CudaRuntime:
+    del kwargs
+    return _CudaRuntime(path, owner if isinstance(owner, str) else None)
+
+
+def _cuda_request(request: EditRequest) -> Any:
+    from klein_4b.cuda.pixels import read_still
+    from klein_4b.cuda.request import Request
+
+    images = tuple(read_still(item) for item in request.images)
+    width = request.width
+    height = request.height
+    if images and (width is None or height is None):
+        height, width = int(images[0].shape[0]), int(images[0].shape[1])
+    if width is None or height is None:
+        width = height = DEFAULT_SIDE
+    seed = 0 if request.seed is None else int(request.seed)
+    return Request(request.prompt, int(width), int(height), int(request.steps), seed, images)
 
 
 pipeline = Pipeline()

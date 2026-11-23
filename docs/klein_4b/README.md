@@ -6,7 +6,7 @@ The official checkpoint is [black-forest-labs/FLUX.2-klein-4B](https://huggingfa
 
 Those weights are under the Apache License, Version 2.0.
 
-`favlo serve` and `favlo --klein_4b` enter through `klein_4b.portable`. `metal41` is the Metal device that entry opens. Setup, quantize, and kernels go through that same entry.
+`favlo serve` and `favlo --klein_4b` enter through `klein_4b.portable`. That entry opens `metal41` on Apple Silicon and `cuda` on Windows. Setup, quantize, and kernels go through that same entry.
 
 Start `favlo serve`.
 
