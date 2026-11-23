@@ -20,7 +20,7 @@ Registration copies `VARIANTS` and `DEFAULT_VARIANT` from `sampling.py`. `genera
 
 ## Setup
 
-`setup` downloads `thinkingmachines/Inkling-2-Mini` into `Inkling-2-Mini-fp4-gptq-foem`, rewrites bf16 tensors as float16, splits vision into `vision.safetensors`, leaves `mtp.safetensors` as its own file, registers that folder, and runs `bake` when `experts-fp4.safetensors` is missing or does not match. The fused attention plane, the output projection, and the head are pread as float16. `--repo` accepts another repository with the same tensor names, as `org/name` or a `huggingface.co` link. There is no separate BF16 checkout to remove.
+`setup` downloads `thinkingmachines/Inkling-2-Mini` into `Inkling-2-Mini-fp4-gptq-foem`, rewrites bf16 tensors as float16, splits vision into `vision.safetensors`, leaves `mtp.safetensors` as its own file, registers that folder, and runs `bake` when `experts-fp4.safetensors` is missing or does not match. `bake` also writes `dense-fp8.safetensors` for the fused attention plane and the output projection. The head is pread as float16. `--repo` accepts another repository with the same tensor names, as `org/name` or a `huggingface.co` link. There is no separate BF16 checkout to remove.
 
 ## Memory
 
@@ -32,8 +32,8 @@ Load, prefill, and decode report through `favlo.console`. The load row stays ope
 
 ## Kernels
 
-`kernels` compiles the shader library and checks half `matmul2d`, the half GEMV, Metal fp4 `matmul2d`, the fp4 GEMV, NVFP4 dequant and its fp4 requant, the argmax and the Gumbel draw, and prefill and decode attention against a host reference. The hot path does not run a host GEMV. `bake` requantizes NVFP4 experts to Metal fp4 once and writes `experts-fp4.safetensors`. The open preads that file and the float16 planes in 8 MiB pieces. Without the expert pack, the open requantizes. The embedding, the fused attention plane, the output projection, and the head are float16. A single token uses the half GEMV for those planes. Prefill uses `matmul2d`. The token RMSNorm and the block mix each use one threadgroup of 256.
+`kernels` compiles the shader library and checks half `matmul2d`, the half GEMV, Metal fp4 `matmul2d`, the fp4 GEMV, Metal fp8 `matmul2d`, the fp8 output GEMV, NVFP4 dequant and its fp4 requant, the argmax and the Gumbel draw, and prefill and decode attention against a host reference. The hot path does not run a host GEMV. `bake` requantizes NVFP4 experts to Metal fp4 once and writes `experts-fp4.safetensors`. It also quantizes the fused attention plane and the output projection to E4M3 and writes `dense-fp8.safetensors`. The open preads those files and the float16 head in 8 MiB pieces. Without the expert pack, the open requantizes. Without the dense pack, the open quantizes attention and the output projection. The embedding and the head stay float16. A single token uses the fp8 GEMV for attention and the output projection. Prefill uses `matmul2d`. The token RMSNorm and the block mix each use one threadgroup of 256.
 
 ## Calibration
 
-`bake` requantizes NVFP4 experts to Metal fp4 and writes `experts-fp4.safetensors`. The fused attention plane, the output projection, and the head are half and are not part of that pack.
+`bake` requantizes NVFP4 experts to Metal fp4 and writes `experts-fp4.safetensors`. The fused attention plane and the output projection are E4M3 in `dense-fp8.safetensors`. The head stays half and is not part of either pack.

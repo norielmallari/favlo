@@ -93,6 +93,9 @@ def _bake(folder: Path | None = None) -> int:
 
     bake(root, log=note)
     ensure_pack(root, log=note)
+    from inkling_2_mini.metal41.weights import ensure_dense
+
+    ensure_dense(root, log=note)
     return 0
 
 
@@ -117,6 +120,7 @@ def _kernels() -> int:
         rng = np.random.default_rng(7)
         _check_f16(session, rng)
         _check_fp4(session, rng)
+        _check_fp8(session, rng)
         _check_nvfp4(session, rng)
         _check_argmax(session, rng)
         _check_attention(session, rng)
@@ -171,6 +175,51 @@ def _check_f16(session: Session, rng: np.random.Generator) -> None:
         (cols, 1, 1),
     )
     _close(session.download_f32(gemv, cols), expect[0], 1e-3, "half gemv")
+
+
+def _check_fp8(session: Session, rng: np.random.Generator) -> None:
+    from inkling_2_mini.metal41.weights import dequant_mxfp8, quantize_mxfp8
+
+    rows, cols, inner = 64, 128, 256
+    codes, scales = quantize_mxfp8(rng.standard_normal((cols, inner)).astype(np.float32))
+    weight = dequant_mxfp8(codes, scales)
+    activation = rng.standard_normal((rows, inner)).astype(np.float16)
+    expect = activation.astype(np.float32) @ weight.T
+    data = session.upload(codes)
+    scale = session.upload(scales)
+    dest = session.zeros(rows * cols * 4)
+    session.dispatch(
+        "matmul_fp8_m32",
+        [session.upload(activation), data, scale, dest],
+        [u32(rows), u32(cols), u32(inner), u32(cols)],
+        (cols // 128, rows // 32, 1),
+    )
+    _close(session.download_f32(dest, rows * cols).reshape(rows, cols), expect, 2e-2, "fp8 matmul")
+    one = activation[0].astype(np.float32)
+    gemv = session.zeros(cols * 4)
+    session.dispatch(
+        "gemv_fp8_conv_add",
+        [
+            session.upload(one),
+            data,
+            scale,
+            session.zeros(cols * 4 * 4),
+            session.zeros(cols * 3 * 4),
+            gemv,
+        ],
+        [u32(cols), u32(inner)],
+        (cols // 4, 1, 1),
+    )
+    _close(session.download_f32(gemv, cols), expect[0] / np.sqrt(5.0), 2e-2, "fp8 gemv")
+    from inkling_2_mini.metal41.gptq import foem_fp8, foem_fp8_device
+
+    matrix = rng.standard_normal((64, 128)).astype(np.float32)
+    gram = matrix.T @ matrix + np.eye(128, dtype=np.float32)
+    host_codes, host_scales = foem_fp8(matrix, gram, beta=0.1)
+    device_codes, device_scales = foem_fp8_device(session, matrix, gram, beta=0.1)
+    if not np.array_equal(host_codes, device_codes) or not np.array_equal(host_scales, device_scales):
+        message = "fp8 foem device does not match the host"
+        raise RuntimeError(message)
 
 
 def _check_fp4(session: Session, rng: np.random.Generator) -> None:

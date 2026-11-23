@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 
+from inkling_2_mini.metal41.codec import e4m3_to_float
 from inkling_2_mini.metal41.gptq import (
     PACK_FORMAT,
     PACK_NAME,
@@ -55,15 +56,25 @@ HEAD_ROWS = (UNPADDED_VOCAB + 63) // 64 * 64
 
 
 class Plane:
-    """A matrix stored [padded, inner]. ``scale`` is set for Metal fp4."""
+    """A matrix stored [padded, inner]. ``scale`` is set for a quantized plane."""
 
-    def __init__(self, handle: Any, cols: int, padded: int, inner: int, scale: Any = None) -> None:
+    def __init__(
+        self,
+        handle: Any,
+        cols: int,
+        padded: int,
+        inner: int,
+        scale: Any = None,
+        *,
+        fp8: bool = False,
+    ) -> None:
         self.handle = handle
         self.cols = int(cols)
         self.padded = int(padded)
         self.inner = int(inner)
         self.scale = scale
-        self.fp4 = scale is not None
+        self.fp8 = bool(fp8)
+        self.fp4 = scale is not None and not fp8
 
     def rows_at(self, row: int) -> tuple[tuple[Any, int], tuple[Any, int]]:
         """(data, offset) and (scale, offset) bindings that start at ``row``."""
@@ -135,6 +146,52 @@ class Layer:
 def _bf16_f32(raw: bytes, shape: tuple[int, ...]) -> np.ndarray:
     wide = np.frombuffer(raw, dtype=np.uint16).astype(np.uint32) << 16
     return wide.view(np.float32).reshape(shape).copy()
+
+
+_FP8_MAX = np.float64(448.0)
+_E4M3_TABLE = np.array([e4m3_to_float(i) for i in range(256)], dtype=np.float64)
+_E4M3_EDGE = (_E4M3_TABLE[:126] + _E4M3_TABLE[1:127]) * 0.5
+
+
+def _e8m0_fp8(amax: np.ndarray) -> np.ndarray:
+    """E8M0 whose E4M3 peak of 448 covers ``amax``. The power of two rounds up."""
+    ratio = np.maximum(amax.astype(np.float64) / _FP8_MAX, np.finfo(np.float64).tiny)
+    mantissa, exponent = np.frexp(ratio)
+    power = exponent.astype(np.int32) - (mantissa == 0.5).astype(np.int32)
+    power = np.where(amax <= 0.0, np.int32(-127), power)
+    return np.clip(power + 127, 0, 254).astype(np.uint8)
+
+
+def quantize_mxfp8(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """E4M3 codes and one E8M0 scale per 32 along K. Inner is a multiple of 128."""
+    values = np.asarray(matrix)
+    rows, inner = values.shape
+    if inner % 128:
+        message = f"inner dimension {inner} is not a multiple of 128"
+        raise ValueError(message)
+    codes = np.empty((rows, inner), dtype=np.uint8)
+    scales = np.empty((rows, inner // 32), dtype=np.uint8)
+    groups = inner // 32
+    for start in range(0, rows, 1024):
+        stop = min(start + 1024, rows)
+        tile = np.asarray(values[start:stop], dtype=np.float64)
+        blocks = tile.reshape(stop - start, groups, 32)
+        biased = _e8m0_fp8(np.max(np.abs(blocks), axis=-1))
+        factor = np.ldexp(np.ones(biased.shape, dtype=np.float64), biased.astype(np.int32) - 127)
+        scaled = blocks / factor[..., None]
+        choice = np.searchsorted(_E4M3_EDGE, np.abs(scaled), side="left").astype(np.uint8)
+        choice = np.minimum(choice, np.uint8(126))
+        signed = np.where(np.signbit(scaled), choice | np.uint8(0x80), choice)
+        codes[start:stop] = signed.reshape(stop - start, inner)
+        scales[start:stop] = biased
+    return codes, scales
+
+
+def dequant_mxfp8(codes: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    """Rebuild a matrix from ``quantize_mxfp8``."""
+    values = _E4M3_TABLE[codes].astype(np.float32)
+    factor = np.ldexp(np.ones(scales.shape, dtype=np.float32), scales.astype(np.int32) - 127)
+    return values * np.repeat(factor, 32, axis=1)
 
 
 def _quantize_fp4(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -256,6 +313,186 @@ def checkpoint_file(root: Path) -> Path:
     return Path(root) / "model-00001-of-00001.safetensors"
 
 
+DENSE_PACK = "dense-fp8.safetensors"
+DENSE_FORMAT = "favlo-dense-fp8-foem-1"
+
+
+def dense_catalog() -> list[tuple[str, tuple[int, int]]]:
+    """Attention and output-projection planes, one pair per layer."""
+    entries: list[tuple[str, tuple[int, int]]] = []
+    for index in range(LAYERS):
+        entries.append((f"layers.{index}.attn.data", (ATTN_ROWS, HIDDEN)))
+        entries.append((f"layers.{index}.attn.scale", (ATTN_ROWS, HIDDEN // 32)))
+        entries.append((f"layers.{index}.wo.data", (HIDDEN, Q_DIM)))
+        entries.append((f"layers.{index}.wo.scale", (HIDDEN, Q_DIM // 32)))
+    return entries
+
+
+def open_dense_pack(root: Path) -> Any:
+    """The fp8 attention pack, when the file matches this layout."""
+    from inkling_2_mini.metal41.resident import ExpertFile
+
+    path = Path(root) / DENSE_PACK
+    if not path.is_file():
+        return None
+    try:
+        record = ExpertFile(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    names = {name for name, _shape in dense_catalog()}
+    if record.metadata.get("format") != DENSE_FORMAT or names - set(record.header):
+        record.close()
+        return None
+    return record
+
+
+def ensure_dense(root: Path, log: Any = None) -> None:
+    """Quantize attention and the output projection once. The open preads the file."""
+    ready = open_dense_pack(root)
+    if ready is not None:
+        ready.close()
+        if log is not None:
+            log("dense fp8 pack is current")
+        return
+    source = Tensors(checkpoint_file(root))
+    try:
+        grams = Path(root) / "dense-fp4-inputs.npz"
+        if grams.is_file():
+            _write_dense_foem(root, source, grams, log)
+        else:
+            _write_dense_nearest(root, source, log)
+    finally:
+        source.close()
+
+
+def _write_pair(sink: Any, name: str, codes: np.ndarray, scales: np.ndarray) -> None:
+    sink.write_view(f"{name}.data", memoryview(np.ascontiguousarray(codes).ravel()))
+    sink.write_view(f"{name}.scale", memoryview(np.ascontiguousarray(scales).ravel()))
+
+
+def _write_dense_nearest(root: Path, source: Tensors, log: Any) -> None:
+    from inkling_2_mini.metal41.resident import Sink
+
+    sink = Sink(Path(root) / DENSE_PACK, dense_catalog(), {"format": DENSE_FORMAT})
+    try:
+        for index in range(LAYERS):
+            if log is not None:
+                log(f"quantizing layer {index} attention and output projection")
+            codes, scales = _fused_fp8(source, index)
+            _write_pair(sink, f"layers.{index}.attn", codes, scales)
+            weight = source.vector(f"model.llm.layers.{index}.attn.wo_ud.weight", (HIDDEN, Q_DIM))
+            _write_pair(sink, f"layers.{index}.wo", *quantize_mxfp8(weight))
+        sink.close()
+    except Exception:
+        sink.abort()
+        raise
+
+
+def _calibration_gram(held: Any, layer: int, stream: str) -> np.ndarray:
+    names = ("shared", stream) if stream in ("q", "k", "v") else (stream,)
+    parts = [np.array(held[f"{layer}:{name}"], dtype=np.float64) for name in names if f"{layer}:{name}" in held.files]
+    if not parts:
+        message = f"no calibration inputs for layer {layer} {stream}"
+        raise KeyError(message)
+    total = parts[0]
+    for part in parts[1:]:
+        total += part
+    return total
+
+
+def _keep_fp8(
+    matrix: np.ndarray,
+    nearest: tuple[np.ndarray, np.ndarray],
+    foem: tuple[np.ndarray, np.ndarray],
+    hessian: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    step = max(1, matrix.shape[0] // 256)
+    rows = slice(0, matrix.shape[0], step)
+    weight = np.asarray(matrix[rows], dtype=np.float64)
+    hessian = np.asarray(hessian, dtype=np.float64)
+    denom = float(np.sum((weight @ hessian) * weight))
+
+    def score(pair: tuple[np.ndarray, np.ndarray]) -> float:
+        error = weight - dequant_mxfp8(pair[0][rows], pair[1][rows]).astype(np.float64)
+        if denom <= 0.0:
+            return float(np.mean(error * error))
+        return float(np.sum((error @ hessian) * error) / denom)
+
+    if score(foem) <= score(nearest):
+        return foem[0], foem[1], "foem"
+    return nearest[0], nearest[1], "nearest"
+
+
+def _write_dense_foem(root: Path, source: Tensors, grams: Path, log: Any) -> None:
+    """Error-compensating E4M3, kept only when it beats nearest on the saved grams."""
+    from favlo.memory import memory
+    from inkling_2_mini.metal41.gptq import BETA, foem_fp8_device
+    from inkling_2_mini.metal41.resident import Sink
+    from inkling_2_mini.metal41.session import Session
+
+    owner = "inkling_2_mini:dense"
+    session = Session(owner)
+    sink = Sink(Path(root) / DENSE_PACK, dense_catalog(), {"format": DENSE_FORMAT})
+    try:
+        with np.load(grams) as held:
+            for index in range(LAYERS):
+                bands_c = []
+                bands_s = []
+                attn = f"model.llm.layers.{index}.attn"
+                parts = (
+                    ("q", f"{attn}.wq_du.weight", Q_DIM),
+                    ("q", f"{attn}.wr_du.weight", REL_DIM),
+                    ("q", f"{attn}.gate_attn.weight", Q_DIM),
+                    ("k", f"{attn}.wk_dv.weight", KV_DIM),
+                    ("v", f"{attn}.wv_dv.weight", KV_DIM),
+                )
+                for stream, name, rows in parts:
+                    matrix = source.vector(name, (rows, HIDDEN))
+                    hessian = _calibration_gram(held, index, stream)
+                    nearest = quantize_mxfp8(matrix)
+                    foem = foem_fp8_device(session, matrix, hessian, beta=BETA)
+                    codes, scales, kept = _keep_fp8(matrix, nearest, foem, hessian)
+                    if log is not None:
+                        log(f"layer {index} {name.rsplit('.', 2)[-2]} kept {kept}")
+                    bands_c.append(codes)
+                    bands_s.append(scales)
+                _write_pair(sink, f"layers.{index}.attn", np.concatenate(bands_c), np.concatenate(bands_s))
+                weight = source.vector(f"{attn}.wo_ud.weight", (HIDDEN, Q_DIM))
+                hessian = _calibration_gram(held, index, "wo")
+                nearest = quantize_mxfp8(weight)
+                foem = foem_fp8_device(session, weight, hessian, beta=BETA)
+                codes, scales, kept = _keep_fp8(weight, nearest, foem, hessian)
+                if log is not None:
+                    log(f"layer {index} wo kept {kept}")
+                _write_pair(sink, f"layers.{index}.wo", codes, scales)
+        sink.close()
+    except Exception:
+        sink.abort()
+        raise
+    finally:
+        session.close()
+        memory.sweep(owner)
+
+
+def _fused_fp8(tensors: Tensors, index: int) -> tuple[np.ndarray, np.ndarray]:
+    """E4M3 rows of ``[wq; wr; gate; wk; wv]`` and their E8M0 scales."""
+    attn = f"model.llm.layers.{index}.attn"
+    parts = (
+        (f"{attn}.wq_du.weight", Q_DIM),
+        (f"{attn}.wr_du.weight", REL_DIM),
+        (f"{attn}.gate_attn.weight", Q_DIM),
+        (f"{attn}.wk_dv.weight", KV_DIM),
+        (f"{attn}.wv_dv.weight", KV_DIM),
+    )
+    codes = []
+    scales = []
+    for name, rows in parts:
+        packed, scale = quantize_mxfp8(tensors.vector(name, (rows, HIDDEN)))
+        codes.append(packed)
+        scales.append(scale)
+    return np.concatenate(codes), np.concatenate(scales)
+
+
 def attn_matrix(tensors: Tensors, index: int) -> np.ndarray:
     """The fused ``[wq; wr; gate; wk; wv]`` rows of one layer."""
     attn = f"model.llm.layers.{index}.attn"
@@ -326,10 +563,12 @@ class Checkpoint:
         self._tensors = Tensors(path, on_read=self._read)
         del calibrated
         self._pack = None
-        self.dense_tag = "half"
+        self.dense_tag = "fp8"
         from inkling_2_mini.metal41.resident import open_expert_pack
 
         self.experts = open_expert_pack(self.pack_root, self.root)
+        ensure_dense(self.pack_root)
+        self._dense = open_dense_pack(self.pack_root)
         try:
             self._load()
         except Exception:
@@ -339,6 +578,10 @@ class Checkpoint:
             if self._pack is not None:
                 self._pack.close()
                 self._pack = None
+            dense = getattr(self, "_dense", None)
+            if dense is not None:
+                dense.close()
+                self._dense = None
 
     def _load(self) -> None:
         session = self.session
@@ -439,6 +682,20 @@ class Checkpoint:
             note=self._read,
         )
         return Plane(handle, rows, padded, inner)
+
+    def _fp8_plane(self, name: str, rows: int, inner: int) -> Plane:
+        """Pread one baked E4M3 plane and its E8M0 scales."""
+        pack = self._dense
+        if pack is None:
+            message = f"dense fp8 pack is missing {name}"
+            raise FileNotFoundError(message)
+        data_off, data_n = pack.span(f"{name}.data", (rows, inner))
+        scale_off, scale_n = pack.span(f"{name}.scale", (rows, inner // 32))
+        data = self._device(data_n)
+        scale = self._device(scale_n)
+        pack.pread(data, data_off, data_n, note=self._read)
+        pack.pread(scale, scale_off, scale_n, note=self._read)
+        return Plane(data, rows, rows, inner, scale=scale, fp8=True)
 
     def _attn(self, index: int) -> Plane:
         """The fused plane. Each float16 member is pread at its row offset."""
@@ -555,8 +812,8 @@ class Checkpoint:
         layer.core = CORE_START <= index < CORE_END
         stem = f"model.llm.layers.{index}"
         attn = f"{stem}.attn"
-        layer.attn = self._attn(index)
-        layer.wo = self._f16_rows(f"{attn}.wo_ud.weight", HIDDEN, Q_DIM, HIDDEN)
+        layer.attn = self._fp8_plane(f"layers.{index}.attn", ATTN_ROWS, HIDDEN)
+        layer.wo = self._fp8_plane(f"layers.{index}.wo", HIDDEN, Q_DIM)
         layer.sink = self._f16_rows(f"{attn}.attn_sink_proj.weight", 24, HIDDEN, 64)
         layer.q_scale = self._f32(f"{attn}.q_l2_clip.scale", (24, 128))
         layer.rel_scale = self._f32(f"{attn}.rel_l2_clip.scale", (24, 16))

@@ -218,11 +218,16 @@ class InklingRuntime:
 
         total = 0
         checkpoint = self.root / "model-00001-of-00001.safetensors"
+        from inkling_2_mini.metal41.weights import DENSE_PACK
+
         experts = getattr(self, "packs", self.root) / EXPERT_PACK
+        dense = getattr(self, "packs", self.root) / DENSE_PACK
         if checkpoint.is_file():
             total += checkpoint.stat().st_size
         if experts.is_file():
             total += experts.stat().st_size
+        if dense.is_file():
+            total += dense.stat().st_size
         total += self._footprint(CONTEXTS[0], CHUNK)
         return max(total, 1)
 
@@ -462,6 +467,35 @@ class InklingRuntime:
             (plane.padded // 64, padded // 64, 1),
         )
 
+    def _matmul_fp8(self, activation: Any, plane: Plane, dest: Any, padded: int) -> None:
+        self.session.dispatch(
+            "matmul_fp8_m32",
+            [activation, plane.handle, plane.scale, dest],
+            [u32(padded), u32(plane.padded), u32(plane.inner), u32(plane.padded)],
+            (plane.padded // 128, padded // 32, 1),
+        )
+
+    def _matmul_fp8_band(
+        self,
+        plane: Plane,
+        row: int,
+        cols: int,
+        dest: Any,
+        padded: int,
+        stride: int,
+    ) -> None:
+        self.session.dispatch(
+            "matmul_fp8_m32",
+            [
+                self.half,
+                (plane.handle, row * plane.inner),
+                (plane.scale, row * (plane.inner // 32)),
+                (dest, row * 4),
+            ],
+            [u32(padded), u32(cols), u32(plane.inner), u32(stride)],
+            (cols // 128, padded // 32, 1),
+        )
+
     def _matmul_f16_band(
         self,
         plane: Plane,
@@ -612,6 +646,7 @@ class InklingRuntime:
                     k_in,
                     v_in,
                     plane.handle,
+                    plane.scale,
                     layer.sink.handle,
                     layer.k_proj.handle if layer.full else layer.sink.handle,
                     layer.v_proj.handle if layer.full else layer.sink.handle,
@@ -632,18 +667,18 @@ class InklingRuntime:
                     self.capture.add(layer.index, "shared", self._gather(q_in, tokens, HIDDEN))
             padded = self._cast(q_in, tokens, HIDDEN)
             if distinct:
-                self._matmul_f16_band(plane, 0, Q_ROWS, self.proj, padded, ATTN_ROWS)
+                self._matmul_fp8_band(plane, 0, Q_ROWS, self.proj, padded, ATTN_ROWS)
             else:
-                self._matmul_f16(self.half, plane, self.proj, padded)
+                self._matmul_fp8(self.half, plane, self.proj, padded)
             self._matmul_f16(self.half, layer.sink, self.sink, padded)
             if distinct:
                 self._cast(k_in, tokens, HIDDEN)
-                self._matmul_f16_band(plane, ROW_K, KV_DIM, self.proj, padded, ATTN_ROWS)
+                self._matmul_fp8_band(plane, ROW_K, KV_DIM, self.proj, padded, ATTN_ROWS)
             if layer.full:
                 self._matmul_f16(self.half, layer.k_proj, self.k_taps, padded)
             if distinct:
                 self._cast(v_in, tokens, HIDDEN)
-                self._matmul_f16_band(plane, ROW_V, KV_DIM, self.proj, padded, ATTN_ROWS)
+                self._matmul_fp8_band(plane, ROW_V, KV_DIM, self.proj, padded, ATTN_ROWS)
             if layer.full:
                 self._matmul_f16(self.half, layer.v_proj, self.v_taps, padded)
         local = 0 if layer.full else cache_slots(layer.index, self.context)
@@ -716,8 +751,8 @@ class InklingRuntime:
                 (1, 8, -(-keys // span)),
             )
             self.session.dispatch(
-                "gemv_f16_conv_add",
-                [self.attn_out, layer.wo.handle, layer.attn_conv, attn_state, dest],
+                "gemv_fp8_conv_add",
+                [self.attn_out, layer.wo.handle, layer.wo.scale, layer.attn_conv, attn_state, dest],
                 [u32(HIDDEN), u32(Q_DIM)],
                 (HIDDEN // 4, 1, 1),
             )
@@ -749,7 +784,7 @@ class InklingRuntime:
         if self.capture is not None:
             self.capture.add(layer.index, "wo", self._gather(self.attn_out, tokens, Q_DIM))
         padded = self._cast(self.attn_out, tokens, Q_DIM)
-        self._matmul_f16(self.half, layer.wo, self.wo_out, padded)
+        self._matmul_fp8(self.half, layer.wo, self.wo_out, padded)
         self._conv_add(self.wo_out, layer.attn_conv, attn_state, dest, tokens)
 
     def _conv_add(self, source: Any, weight: Any, state: Any, dest: Any, tokens: int) -> None:

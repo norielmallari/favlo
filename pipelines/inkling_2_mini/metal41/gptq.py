@@ -28,11 +28,35 @@ from typing import Any
 
 import numpy as np
 
+from inkling_2_mini.metal41.codec import e4m3_to_float
+
 PACK_NAME = "dense-fp4.safetensors"
 PACK_FORMAT = "favlo-fp4-gptq-foem-1"
 BETA = 0.1
 _GRID = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
 _EDGE = np.array([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0], dtype=np.float32)
+
+
+_E4M3_POS = np.array([e4m3_to_float(i) for i in range(127)], dtype=np.float64)
+_E4M3_EDGE = (_E4M3_POS[:-1] + _E4M3_POS[1:]) * 0.5
+
+
+def e8m0_fp8(amax: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Biased E8M0 exponent and scale whose fp8 peak of 448 covers ``amax``."""
+    ratio = np.maximum(amax.astype(np.float64) / 448.0, np.finfo(np.float64).tiny)
+    mantissa, exponent = np.frexp(ratio)
+    power = exponent.astype(np.int32) - (mantissa == 0.5).astype(np.int32)
+    power = np.where(amax <= 0.0, np.int32(-127), power)
+    biased = np.clip(power + 127, 0, 254).astype(np.uint8)
+    scale = np.ldexp(np.ones(amax.shape, dtype=np.float32), biased.astype(np.int32) - 127)
+    return biased, scale
+
+
+def e4m3(scaled: np.ndarray) -> np.ndarray:
+    """Nearest E4M3 byte. 0x7F and 0xFF stay unused."""
+    choice = np.searchsorted(_E4M3_EDGE, np.abs(scaled), side="left").astype(np.uint8)
+    choice = np.minimum(choice, np.uint8(126))
+    return np.where(np.signbit(scaled), choice | np.uint8(0x80), choice)
 
 
 def e8m0(amax: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -377,6 +401,158 @@ def foem_fp4_device(
     return packed, scales_out
 
 
+def foem_fp8(
+    matrix: np.ndarray,
+    hessian: np.ndarray,
+    *,
+    beta: float = BETA,
+    damp: float = 0.01,
+    block: int = 128,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Host E4M3 FOEM. The bake uses ``foem_fp8_device`` on the full planes."""
+    weight = np.ascontiguousarray(matrix, dtype=np.float32)
+    rows, inner = weight.shape
+    if inner % block or block % 32 or hessian.shape != (inner, inner):
+        message = f"inner {inner} block {block} does not match the Gram {hessian.shape}"
+        raise ValueError(message)
+    upper, dead = _inverse_factor_stable(hessian, damp)
+    codes = np.empty((rows, inner), dtype=np.uint8)
+    scales = np.empty((rows, inner // 32), dtype=np.uint8)
+    work = np.array(weight, dtype=np.float32)
+    original = np.array(work, dtype=np.float32)
+    work[:, dead] = 0.0
+    for b0 in range(0, inner, block):
+        b1 = b0 + block
+        part = work[:, b0:b1]
+        orig = original[:, b0:b1]
+        errors = np.zeros((rows, block), dtype=np.float32)
+        factor = upper[b0:b1, b0:b1]
+        scale = np.ones(rows, dtype=np.float32)
+        for i in range(block):
+            column = b0 + i
+            if dead[column]:
+                codes[:, column] = 0
+                if column % 32 == 0:
+                    scales[:, column // 32] = 0
+                continue
+            if column % 32 == 0:
+                amax = np.max(np.abs(part[:, i : i + 32]), axis=1)
+                biased, scale = e8m0_fp8(amax)
+                scales[:, column // 32] = biased
+            code = e4m3(part[:, i] / scale)
+            codes[:, column] = code
+            grid = _E4M3_POS[code & np.uint8(0x7F)].astype(np.float32) * scale
+            restored = np.where(code & np.uint8(0x80), -grid, grid).astype(np.float32)
+            diagonal = float(factor[i, i])
+            if diagonal == 0.0:
+                message = f"column {column} has a zero inverse diagonal"
+                raise RuntimeError(message)
+            drift = part[:, i] - orig[:, i]
+            error = (part[:, i] - restored - np.float32(beta) * drift) / np.float32(diagonal)
+            errors[:, i] = error
+            if i + 1 < block:
+                coeff = np.array(factor[i, i + 1 :], dtype=np.float32, copy=True)
+                coeff[dead[column + 1 : b1]] = 0.0
+                part[:, i + 1 :] -= error[:, None] * coeff
+                if not dead[column + 1]:
+                    nxt = i + 1
+                    part[:, nxt] -= np.float32(beta) * (part[:, nxt] - orig[:, nxt])
+        if b1 < inner:
+            coeff = np.array(upper[b0:b1, b1:], dtype=np.float32, copy=True)
+            coeff[:, dead[b1:]] = 0.0
+            work[:, b1:] -= errors @ coeff
+            if not dead[b1]:
+                work[:, b1] -= np.float32(beta) * (work[:, b1] - original[:, b1])
+        if not np.isfinite(work).all():
+            message = "FOEM update left a non-finite weight"
+            raise RuntimeError(message)
+    return codes, scales
+
+
+def foem_fp8_device(
+    session: Any,
+    matrix: np.ndarray,
+    hessian: np.ndarray,
+    *,
+    beta: float = BETA,
+    damp: float = 0.01,
+    block: int = 128,
+    chunk: int = 4096,
+) -> tuple[np.ndarray, np.ndarray]:
+    """E4M3 codes with the FOEM column update. ``beta`` 0 is GPTQ."""
+    from inkling_2_mini.metal41.session import f32, u32
+
+    weight = np.ascontiguousarray(matrix, dtype=np.float32)
+    rows, inner = weight.shape
+    if inner % block or block % 32 or hessian.shape != (inner, inner):
+        message = f"inner {inner} block {block} does not match the Gram {hessian.shape}"
+        raise ValueError(message)
+    upper, dead = _inverse_factor_stable(hessian, damp)
+    dead_bytes = np.ascontiguousarray(dead, dtype=np.uint8)
+    codes_out = np.empty((rows, inner), dtype=np.uint8)
+    scales_out = np.empty((rows, inner // 32), dtype=np.uint8)
+    threads = 256
+    for start in range(0, rows, chunk):
+        stop = min(start + chunk, rows)
+        count = stop - start
+        work = np.array(weight[start:stop], dtype=np.float32)
+        original = np.array(work, dtype=np.float32)
+        work[:, dead] = 0.0
+        work_buf = session.upload(work)
+        original_buf = session.upload(original)
+        code_buf = session.zeros(count * inner)
+        scale_buf = session.zeros(count * (inner // 32))
+        error_buf = session.zeros(count * block * 4)
+        flag = session.zeros(4)
+        session.begin()
+        for b0 in range(0, inner, block):
+            b1 = b0 + block
+            factor = np.ascontiguousarray(upper[b0:b1, b0:b1])
+            session.dispatch(
+                "foem_block_fp8",
+                [
+                    work_buf,
+                    original_buf,
+                    session.upload(factor),
+                    session.upload(dead_bytes[b0:b1]),
+                    code_buf,
+                    scale_buf,
+                    error_buf,
+                    flag,
+                ],
+                [u32(count), u32(inner), u32(b0), u32(block), f32(beta)],
+                ((count + threads - 1) // threads, 1, 1),
+            )
+            if b1 < inner:
+                tail = inner - b1
+                coeff = np.array(upper[b0:b1, b1:], dtype=np.float32, copy=True)
+                coeff[:, dead[b1:]] = 0.0
+                pull = 0 if dead[b1] else 1
+                session.dispatch(
+                    "foem_tail",
+                    [
+                        work_buf,
+                        original_buf,
+                        error_buf,
+                        session.upload(np.ascontiguousarray(coeff)),
+                        flag,
+                    ],
+                    [u32(count), u32(inner), u32(b1), u32(block), u32(tail), u32(pull), f32(beta)],
+                    ((count * tail + threads - 1) // threads, 1, 1),
+                )
+        session.end()
+        if int(np.frombuffer(session.download(flag, 4), dtype=np.uint32)[0]) != 0:
+            message = "FOEM update left a non-finite weight"
+            raise RuntimeError(message)
+        codes_out[start:stop] = np.frombuffer(
+            session.download(code_buf, count * inner), dtype=np.uint8
+        ).reshape(count, inner)
+        scales_out[start:stop] = np.frombuffer(
+            session.download(scale_buf, count * (inner // 32)), dtype=np.uint8
+        ).reshape(count, inner // 32)
+    return codes_out, scales_out
+
+
 def foem_device_matches(session: Any) -> None:
     """The device pack agrees with ``foem_fp4`` on one small Gram."""
     rng = np.random.default_rng(11)
@@ -427,8 +603,11 @@ __all__ = [
     "e2m1",
     "e8m0",
     "foem_device_matches",
+    "e4m3",
+    "e8m0_fp8",
     "foem_fp4",
     "foem_fp4_device",
+    "foem_fp8_device",
     "gptq_fp4",
     "pack_nibbles",
     "write_pack",

@@ -739,6 +739,19 @@ def test_repack_stores_language_as_float16_and_splits_vision(tmp_path: Path) -> 
     assert marker["format"] == "favlo-inkling-f16-1"
 
 
+def test_mxfp8_scale_covers_the_block_peak() -> None:
+    from inkling_2_mini.metal41.weights import dequant_mxfp8, quantize_mxfp8
+
+    matrix = np.random.default_rng(0).standard_normal((64, 256)).astype(np.float32)
+    matrix[0, 0] = 1000.0
+    codes, scales = quantize_mxfp8(matrix)
+    factor = np.ldexp(np.ones(scales.shape, np.float64), scales.astype(np.int32) - 127)
+    peak = np.max(np.abs(matrix.reshape(64, 8, 32)), axis=-1)
+    assert np.all(peak <= factor * 448.0 + 1e-6)
+    rebuilt = dequant_mxfp8(codes, scales)
+    assert float(np.max(np.abs(rebuilt - matrix)) / np.max(np.abs(matrix))) < 0.03
+
+
 def test_portable_import_leaves_the_device_unloaded() -> None:
     import sys
 

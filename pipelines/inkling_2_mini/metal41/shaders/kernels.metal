@@ -167,6 +167,36 @@ kernel void matmul_fp4_m32(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// Scaled fp8 on the 32x128 tile. Output rows are out_stride floats apart.
+kernel void matmul_fp8_m32(
+    device half* activation [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& cols [[buffer(5)]],
+    constant uint& inner [[buffer(6)]],
+    constant uint& out_stride [[buffer(7)]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        activation, dextents<int, 2>(int(inner), int(rows)), array<int, 2>{1, int(inner)});
+    tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
+        weights,
+        dextents<int, 2>(int(inner), int(cols)),
+        array<int, 2>{1, int(inner)},
+        scales_plane(scales));
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination, dextents<int, 2>(int(cols), int(rows)), array<int, 2>{1, int(out_stride)});
+    constexpr auto desc = matmul2d_descriptor(
+        32, 128, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 32);
+    auto tile_right = right.slice(0, int(tgid.x) * 128);
+    auto tile_out = out.slice(int(tgid.x) * 128, int(tgid.y) * 32);
+    op.run(tile_left, tile_right, tile_out);
+}
+
 // One 32-row tile of one expert. jobs holds (slot, tile). Empty jobs return.
 kernel void expert_fp4_tile(
     device half* pack [[buffer(0)]],
@@ -484,6 +514,30 @@ kernel void gemv_fp4_conv_add(
     }
 }
 
+// Output projection in fp8, its short convolution, and the add into the block sum.
+kernel void gemv_fp8_conv_add(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device const float* conv_w [[buffer(3)]],
+    device float* state [[buffer(4)]],
+    device float* sum [[buffer(5)]],
+    constant uint& cols [[buffer(6)]],
+    constant uint& inner [[buffer(7)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group * 4u;
+    if (row0 >= cols) {
+        return;
+    }
+    float4 acc = simd_sum4(fp8_part4(activation, weights, scales, row0, inner >> 4u, inner, inner >> 5u, lane));
+    if (lane < 4u) {
+        uint c = row0 + lane;
+        sum[c] += conv_step(acc[lane], conv_w, state, c, cols);
+    }
+}
+
 // Output projection in half, its short convolution, and the add into the block sum.
 kernel void gemv_f16_conv_add(
     device const float* activation [[buffer(0)]],
@@ -510,7 +564,7 @@ kernel void gemv_f16_conv_add(
 constant uint ATTN_ROW_K = 6528u;
 constant uint ATTN_ROW_V = 7552u;
 
-// Every attention input of one layer in one dispatch. The fused half plane
+// Every attention input of one layer in one dispatch. The fused fp8 plane
 // [q; rel; gate; k; v] reads q_in, k_in, and v_in by row band. Then half rows:
 // the sink (6 groups, q_in), and on full layers the key taps (8 groups, k_in)
 // and value taps (8 groups, v_in). Outputs follow the fused rows in order.
@@ -518,13 +572,14 @@ kernel void gemv_attn(
     device const float* q_in [[buffer(0)]],
     device const float* k_in [[buffer(1)]],
     device const float* v_in [[buffer(2)]],
-    device const half* weights [[buffer(3)]],
-    device const half* sink_w [[buffer(4)]],
-    device const half* k_tap_w [[buffer(5)]],
-    device const half* v_tap_w [[buffer(6)]],
-    device float* destination [[buffer(7)]],
-    constant uint& attn_rows [[buffer(8)]],
-    constant uint& inner [[buffer(9)]],
+    device const uchar* weights [[buffer(3)]],
+    device const uchar* scales [[buffer(4)]],
+    device const half* sink_w [[buffer(5)]],
+    device const half* k_tap_w [[buffer(6)]],
+    device const half* v_tap_w [[buffer(7)]],
+    device float* destination [[buffer(8)]],
+    constant uint& attn_rows [[buffer(9)]],
+    constant uint& inner [[buffer(10)]],
     uint lane [[thread_index_in_simdgroup]],
     uint group [[threadgroup_position_in_grid]])
 {
@@ -532,7 +587,7 @@ kernel void gemv_attn(
     float4 acc;
     if (row0 < attn_rows) {
         device const float* act = row0 < ATTN_ROW_K ? q_in : (row0 < ATTN_ROW_V ? k_in : v_in);
-        acc = f16_part4(act, weights, row0, inner, lane);
+        acc = fp8_part4(act, weights, scales, row0, inner >> 4u, inner, inner >> 5u, lane);
     } else {
         uint local = row0 - attn_rows;
         if (local < 24u) {
@@ -2607,6 +2662,31 @@ static uchar foem_nibble(float scaled) {
     return uchar(min(choice, 7u) | sign);
 }
 
+static uchar foem_e4m3(float scaled) {
+    float mag = fabs(scaled);
+    uint choice = 0u;
+    for (uint code = 0u; code < 126u; ++code) {
+        float edge = (E4M3_TABLE[code] + E4M3_TABLE[code + 1u]) * 0.5f;
+        choice += edge < mag ? 1u : 0u;
+    }
+    uint sign = signbit(scaled) ? 0x80u : 0u;
+    return uchar(min(choice, 126u) | sign);
+}
+
+static void foem_scale_fp8(float amax, thread uchar& biased, thread float& scale) {
+    biased = 0u;
+    scale = 1.0f;
+    if (amax <= 0.0f) {
+        return;
+    }
+    int exponent = 0;
+    float mantissa = frexp(max(amax / 448.0f, 1.1754944e-38f), exponent);
+    int power = exponent - (mantissa == 0.5f ? 1 : 0);
+    int code = clamp(power + 127, 0, 254);
+    biased = uchar(code);
+    scale = ldexp(1.0f, code - 127);
+}
+
 static void foem_scale(float amax, thread uchar& biased, thread float& scale) {
     biased = 0u;
     scale = 1.0f;
@@ -2668,6 +2748,70 @@ kernel void foem_block(
         codes[i] = code;
         float grid = FOEM_GRID[code & 7u];
         float restored = (code & 8u) ? -grid * scale : grid * scale;
+        float diagonal = factor[(ulong)i * width + i];
+        float drift = line[i] - orig[i];
+        float error = ((line[i] - restored) - beta * drift) / diagonal;
+        residual[i] = error;
+        if (!isfinite(error)) {
+            *flag = 1u;
+        }
+        for (uint j = i + 1u; j < width; ++j) {
+            if (!dead[j]) {
+                line[j] -= error * factor[(ulong)i * width + j];
+            }
+        }
+        if (i + 1u < width && !dead[i + 1u]) {
+            line[i + 1u] -= beta * (line[i + 1u] - orig[i + 1u]);
+        }
+    }
+}
+
+kernel void foem_block_fp8(
+    device float* work [[buffer(0)]],
+    device const float* original [[buffer(1)]],
+    device const float* factor [[buffer(2)]],
+    device const uchar* dead [[buffer(3)]],
+    device uchar* codes_out [[buffer(4)]],
+    device uchar* scales [[buffer(5)]],
+    device float* errors [[buffer(6)]],
+    device uint* flag [[buffer(7)]],
+    constant uint& rows [[buffer(8)]],
+    constant uint& stride [[buffer(9)]],
+    constant uint& column0 [[buffer(10)]],
+    constant uint& width [[buffer(11)]],
+    constant float& beta [[buffer(12)]],
+    uint row [[thread_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    device float* line = work + (ulong)row * stride + column0;
+    device const float* orig = original + (ulong)row * stride + column0;
+    device uchar* codes = codes_out + (ulong)row * stride + column0;
+    device float* residual = errors + (ulong)row * width;
+    float scale = 1.0f;
+    for (uint i = 0u; i < width; ++i) {
+        uint column = column0 + i;
+        if (dead[i]) {
+            codes[i] = 0u;
+            residual[i] = 0.0f;
+            if (column % 32u == 0u) {
+                scales[(ulong)row * (stride / 32u) + column / 32u] = 0u;
+            }
+            continue;
+        }
+        if (column % 32u == 0u) {
+            float amax = 0.0f;
+            for (uint k = 0u; k < 32u; ++k) {
+                amax = max(amax, fabs(line[i + k]));
+            }
+            uchar biased = 0u;
+            foem_scale_fp8(amax, biased, scale);
+            scales[(ulong)row * (stride / 32u) + column / 32u] = biased;
+        }
+        uchar code = foem_e4m3(line[i] / scale);
+        codes[i] = code;
+        float restored = E4M3_TABLE[code] * scale;
         float diagonal = factor[(ulong)i * width + i];
         float drift = line[i] - orig[i];
         float error = ((line[i] - restored) - beta * drift) / diagonal;
