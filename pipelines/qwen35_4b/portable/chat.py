@@ -43,6 +43,20 @@ def _device_packages() -> frozenset[str]:
     )
 
 
+def _chosen_device() -> str:
+    from favlo.host import select_device
+
+    return select_device(_device_packages())
+
+
+def _device_vision() -> Any:
+    if _chosen_device() == "cuda":
+        from qwen35_4b.cuda import vision as module
+    else:
+        from qwen35_4b.metal41 import vision as module
+    return module
+
+
 _THINK_END = "</think>"
 _TOOL_MARK = "<tool_call>"
 _TOOL = re.compile(
@@ -470,9 +484,7 @@ class Pipeline(LanguagePipeline):
         runtime._halted = False
 
     def on_finish(self, runtime: Any, selection: Any, *, complete: bool) -> None:
-        from qwen35_4b.metal41.vision import release_vision  # device release after the turn
-
-        release_vision(runtime)
+        _device_vision().release_vision(runtime)
         super().on_finish(runtime, selection, complete=complete)
 
     def client_closed(self, exc: OSError) -> bool:
@@ -493,20 +505,23 @@ class Pipeline(LanguagePipeline):
 
 
     def main(self, argv: Sequence[str]) -> int:
-        from qwen35_4b.metal41.commands import main as cli_main
-
+        if _chosen_device() == "cuda":
+            from qwen35_4b.cuda.commands import main as cli_main
+        else:
+            from qwen35_4b.metal41.commands import main as cli_main
         return int(cli_main(argv))
 
     def open_runtime(self, path: Path, **kwargs: Any) -> Any:
-        from favlo.host import select_device
         from favlo.pipelines import bind_open_runtime
 
-        chosen = select_device(_device_packages())
-        if chosen != "metal41":
+        chosen = _chosen_device()
+        if chosen == "cuda":
+            from qwen35_4b.cuda.runtime import open_runtime as open_device
+        elif chosen == "metal41":
+            from qwen35_4b.metal41.runtime import open_device
+        else:
             message = "this runtime cannot run here"
             raise RuntimeError(message)
-        from qwen35_4b.metal41.runtime import open_device
-
         return bind_open_runtime(open_device, path, **kwargs)
 
 pipeline = Pipeline()
@@ -675,9 +690,7 @@ def _respond(
             else user_turn_cut(runtime.root, messages, tools or None, thinking)
         )
         text_prompt = prompt
-        from qwen35_4b.metal41.vision import prepare_prompt
-
-        prompt = prepare_prompt(runtime, messages, prompt)
+        prompt = _device_vision().prepare_prompt(runtime, messages, prompt)
         runtime._stable_cut = _expanded_cut(runtime, text_prompt, text_cut)
         _prefix_run(runtime, prepared)
     except (RequestError, RuntimeError, TemplateError, OSError, ValueError) as exc:

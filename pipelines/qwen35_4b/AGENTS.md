@@ -1,6 +1,6 @@
 # This package
 
-The pipeline entry is `qwen35_4b.portable`. `metal41` is the Metal device that entry opens. Serve, the CLI, and the carrot smoke import `portable`. They do not construct the device runtime.
+The pipeline entry is `qwen35_4b.portable`. `metal41` is the Metal device that entry opens on Apple Silicon. `cuda` is the device that entry opens on Windows. Serve, the CLI, and the carrot smoke import `portable`. They do not construct the device runtime.
 
 This package is a language pipeline. It inherits `LanguagePipeline`. The class is the disconnect shell around one response. It does not encode a prompt, sample a token, or parse a tool call. The README under `docs/` whose folder name matches this package is a summary. The as-built detail is `ARCHITECTURE.md` in that same folder. Read that file before editing kernels.
 

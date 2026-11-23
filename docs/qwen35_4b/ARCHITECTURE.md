@@ -5,7 +5,8 @@ As-built detail for the `qwen35_4b` language pipeline. [README.md](README.md) is
 - `handle_responses` is a `LanguagePipeline`.
 - The listener translates a Chat Completions body into that request.
 - Clients reach this pipeline through `favlo serve` once the record is registered.
-- The packed directory is `models/Qwen3.5-4B-fp8`.
+- Apple Silicon loads `pipelines/qwen35_4b/metal41/`. Windows loads `pipelines/qwen35_4b/cuda/`.
+- The packed directory on Apple Silicon is `models/Qwen3.5-4B-fp8`. On Windows it is `models/Qwen3.5-4B-int8`.
 
 ## Registry
 
@@ -115,7 +116,7 @@ Dense hybrid text backbone: 24 Gated DeltaNet layers and 8 full-attention layers
 - Only the last chunk runs the head.
 - Decode stays token-by-token.
 - Kernel ceilings are [ceilings.md](ceilings.md).
-- Measured remainders for int8 prefill, the isolated dispatch sum, the harness rates, the page needle, the vision coding agent, the text coding agent, and the cold synthetic prompts are [research/int8-prefill.md](research/int8-prefill.md), [research/kernel-ceilings.md](research/kernel-ceilings.md), [research/recorded-forward.md](research/recorded-forward.md), [research/needle-page.md](research/needle-page.md), [research/coding-agent.md](research/coding-agent.md), [research/coding-agent-mtp.md](research/coding-agent-mtp.md), [research/coding-text.md](research/coding-text.md), and [research/synthetic-prompt.md](research/synthetic-prompt.md).
+- Measured remainders for int8 prefill, the isolated dispatch sum, the harness rates, the page needle, the vision coding agent, the text coding agent, and the cold synthetic prompts are [research/int8-prefill.md](research/int8-prefill.md), [research/kernel-ceilings.md](research/kernel-ceilings.md), [research/recorded-forward.md](research/recorded-forward.md), [research/needle-page.md](research/needle-page.md), [research/coding-agent.md](research/coding-agent.md), [research/coding-vision-cuda.md](research/coding-vision-cuda.md), [research/coding-agent-mtp.md](research/coding-agent-mtp.md), [research/coding-text.md](research/coding-text.md), and [research/synthetic-prompt.md](research/synthetic-prompt.md).
 
 The vision tower is packed beside the language weights and runs for a still image.
 
