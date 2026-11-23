@@ -225,6 +225,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - The page needle on `half` keys and values is a measurement in [research/needle-page.md](research/needle-page.md).
 - The coding agent on that plane, with the horse still, is a measurement in [research/coding-agent.md](research/coding-agent.md).
 - The coding agent on `half` keys and values, with the horse still, is a measurement in [research/coding-agent-half.md](research/coding-agent-half.md).
+- The text coding agent on the Windows int4 pack, with int8 keys and values, is a measurement in [research/coding-text-cuda.md](research/coding-text-cuda.md).
 - The synthetic prompt on that plane, a cold 512-token prompt and a cold 10000-token prompt, is a measurement in [research/synthetic-prompt.md](research/synthetic-prompt.md).
 - The synthetic prompt on `half` keys and values, at 512, 1024, 4096, and 10000 tokens, is a measurement in [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md).
 

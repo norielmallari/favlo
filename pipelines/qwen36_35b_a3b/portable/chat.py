@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import threading
 from collections.abc import Sequence
 from pathlib import Path
@@ -46,6 +47,12 @@ def _device_packages() -> frozenset[str]:
     return frozenset(
         name for name in ("metal41", "cuda") if (root / name / "__init__.py").is_file()
     )
+
+
+def _chosen_device() -> str:
+    from favlo.host import select_device
+
+    return select_device(_device_packages())
 
 
 def _sampling(
@@ -177,15 +184,23 @@ def load_tokenizer(root: Path) -> Tokenizer:
         return found
 
 
+_GENERATION = re.compile(r"\{%-?\s*(?:end)?generation\s*-?%\}")
+
+
 def _chat_template(root: Path) -> Any:
-    """The checkpoint Jinja template, compiled once for this process."""
+    """The checkpoint Jinja template, compiled once for this process.
+
+    ``generation`` is a tokenizer extension this Environment does not load.
+    Stripping those tags leaves the same text the template would emit.
+    """
     key = str(root)
     with _LOAD_LOCK:
         found = _TEMPLATES.get(key)
         if found is None:
             env = Environment()
             env.globals["raise_exception"] = _raise
-            found = env.from_string((root / "chat_template.jinja").read_text())
+            source = _GENERATION.sub("", (root / "chat_template.jinja").read_text(encoding="utf-8"))
+            found = env.from_string(source)
             _TEMPLATES[key] = found
         return found
 
@@ -475,7 +490,10 @@ class Pipeline(LanguagePipeline):
 
 
     def main(self, argv: Sequence[str]) -> int:
-        from qwen36_35b_a3b.metal41.commands import main as cli_main
+        if _chosen_device() == "cuda":
+            from qwen36_35b_a3b.cuda.commands import main as cli_main
+        else:
+            from qwen36_35b_a3b.metal41.commands import main as cli_main
 
         return int(cli_main(argv))
 
@@ -484,11 +502,13 @@ class Pipeline(LanguagePipeline):
         from favlo.pipelines import bind_open_runtime
 
         chosen = select_device(_device_packages())
-        if chosen != "metal41":
+        if chosen == "cuda":
+            from qwen36_35b_a3b.cuda.runtime import open_runtime as open_device
+        elif chosen == "metal41":
+            from qwen36_35b_a3b.metal41.runtime import open_device
+        else:
             message = "this runtime cannot run here"
             raise RuntimeError(message)
-        from qwen36_35b_a3b.metal41.runtime import open_device
-
         return bind_open_runtime(open_device, path, **kwargs)
 
 pipeline = Pipeline()
@@ -875,7 +895,7 @@ def _stream(
     state: dict[str, Any] | None = None,
     search: dict[str, Any] | None = None,
 ) -> None:
-    from qwen36_35b_a3b.metal41.forward import RequestClosed
+    from qwen36_35b_a3b.portable.closed import RequestClosed
 
     decode = getattr(runtime, "decode", None)
     if not callable(decode):

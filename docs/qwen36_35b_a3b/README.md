@@ -5,7 +5,8 @@ Summary for the `qwen36_35b_a3b` language pipeline. Kernels, the packed record, 
 - `handle_responses` is a `LanguagePipeline` served through `favlo serve`.
 - After a record is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
 - `kernels`, `quantize`, `mtp-fp8`, `bf16`, `complete`, and `models` require `favlo --qwen36_35b_a3b`, which loads `qwen36_35b_a3b.portable`.
-- `portable` is the serve entry. `metal41` is the Metal device that entry opens.
+- `portable` is the serve entry. On Apple Silicon it opens `metal41`. On Windows it opens `cuda`.
+- The packed record on Apple Silicon is `models/Qwen3.6-35B-A3B-fp8-e20`. On Windows the registered record is `models/Qwen3.6-35B-A3B-int4`, with int8 keys and values.
 
 - The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B).
 - Those weights are under the Apache License, Version 2.0.
@@ -193,6 +194,7 @@ uv run favlo --qwen36_35b_a3b delete qwen36_35b_a3b
 - [research/coding-agent.md](research/coding-agent.md) — coding agent with vision on `fp8_e4m3`
 - [research/coding-agent-half.md](research/coding-agent-half.md) — coding agent with vision on `half`
 - [research/coding-text.md](research/coding-text.md) — text coding agent on `half`
+- [research/coding-text-cuda.md](research/coding-text-cuda.md) — text coding agent on the int4 pack with int8 keys and values
 - [research/synthetic-prompt.md](research/synthetic-prompt.md) — cold 512- and 10000-token prompts
 - [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md) — cold 512-, 1024-, 4096-, and 10000-token prompts on `half`
 - [research/fp16-peak-restore.md](research/fp16-peak-restore.md) — float16 peak-restore bound
