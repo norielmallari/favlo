@@ -50,6 +50,7 @@ def test_a_reply_keeps_markup_and_reasoning_out() -> None:
 def test_every_text_effort_is_a_reasoning_check() -> None:
     assert TEXT_EFFORTS == ("none", "minimal", "low", "medium", "high", "xhigh", "max")
     assert reasoning_level_problems("oats", "", stored="", effort="none") == []
+    assert reasoning_level_problems("oats", "", stored="", effort="minimal") == []
     missing = reasoning_level_problems("oats", "", stored="", effort="max")
     assert any("no reasoning" in item for item in missing)
 

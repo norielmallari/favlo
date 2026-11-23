@@ -101,8 +101,12 @@ def reasoning_problems(text: str, reasoning: str, *, stored: str) -> list[str]:
 def reasoning_level_problems(
     text: str, reasoning: str, *, stored: str, effort: str
 ) -> list[str]:
-    """Problems for one text effort. ``none`` may omit the trace."""
-    if effort == "none":
+    """Problems for one text effort. ``none`` and ``minimal`` may omit the trace.
+
+    ``none`` is the OpenAI off switch. ``minimal`` is the Gemini off switch.
+    A trace that is present must be stored and must stay off the reply.
+    """
+    if effort in {"none", "minimal"}:
         problems: list[str] = []
         if not text:
             problems.append("the turn returned no reply")
