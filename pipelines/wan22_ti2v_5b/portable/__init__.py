@@ -1,4 +1,4 @@
-"""Wan2.2 TI2V-5B serve entry. The Metal device opens from ``open_runtime``."""
+"""Wan2.2 TI2V-5B serve entry. ``open_runtime`` opens Metal or CUDA."""
 
 from __future__ import annotations
 
@@ -76,6 +76,12 @@ class Pipeline(BulkMediaPipeline):
         }
 
     def generate(self, runtime, request, hold, job, stop, call: MediaCall):
+        from favlo.host import select_device
+
+        if select_device(_device_packages()) == "cuda":
+            from wan22_ti2v_5b.cuda.runtime import pipeline as cuda_pipeline
+
+            return cuda_pipeline.generate(runtime, request, hold, job, stop, call)
         from wan22_ti2v_5b.metal41.clip import ClipHold
 
         kept = hold if isinstance(hold, ClipHold) else None
@@ -104,7 +110,12 @@ class Pipeline(BulkMediaPipeline):
         return None
 
     def main(self, argv: Sequence[str]) -> int:
-        from wan22_ti2v_5b.metal41.commands import main as cli_main
+        from favlo.host import select_device
+
+        if select_device(_device_packages()) == "cuda":
+            from wan22_ti2v_5b.cuda.commands import main as cli_main
+        else:
+            from wan22_ti2v_5b.metal41.commands import main as cli_main
 
         return int(cli_main(argv))
 
@@ -113,6 +124,10 @@ class Pipeline(BulkMediaPipeline):
         from favlo.pipelines import bind_open_runtime
 
         chosen = select_device(_device_packages())
+        if chosen == "cuda":
+            from wan22_ti2v_5b.cuda.runtime import pipeline as cuda_pipeline
+
+            return cuda_pipeline.open_runtime(path, **kwargs)
         if chosen != "metal41":
             message = "this runtime cannot run here"
             raise RuntimeError(message)

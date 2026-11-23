@@ -6,7 +6,7 @@ The weights are the 5B transformer from [Wan-AI/Wan2.2-TI2V-5B](https://huggingf
 
 The packed record is `models/Wan2.2-TI2V-5B-int8`.
 
-`wan22_ti2v_5b.portable` is the serve entry. `favlo --wan22_ti2v_5b` and `favlo serve` import that package. `metal41` is the Metal device the entry opens.
+`wan22_ti2v_5b.portable` is the serve entry. `favlo --wan22_ti2v_5b` and `favlo serve` import that package. That entry opens `metal41` on Apple Silicon and `cuda` on Windows. The CUDA generate path raises until the int4 DiT forward is packed.
 
 With `favlo serve` listening, `favlo media --pipeline wan22_ti2v_5b` posts a clip job.
 
