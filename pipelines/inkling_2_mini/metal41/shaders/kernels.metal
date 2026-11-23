@@ -2865,5 +2865,206 @@ kernel void foem_tail(
         *flag = 1u;
     }
 }
+
+// Several experts share one grid. Rows of one expert stay on one thread.
+kernel void foem_block_batch(
+    device float* work [[buffer(0)]],
+    device const float* original [[buffer(1)]],
+    device const float* factor [[buffer(2)]],
+    device const uchar* dead [[buffer(3)]],
+    device uchar* nibbles [[buffer(4)]],
+    device uchar* scales [[buffer(5)]],
+    device float* errors [[buffer(6)]],
+    device uint* flag [[buffer(7)]],
+    constant uint& rows [[buffer(8)]],
+    constant uint& stride [[buffer(9)]],
+    constant uint& column0 [[buffer(10)]],
+    constant uint& width [[buffer(11)]],
+    constant float& beta [[buffer(12)]],
+    constant uint& experts [[buffer(13)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (rows == 0u || tid >= experts * rows) {
+        return;
+    }
+    uint expert = tid / rows;
+    uint row = tid - expert * rows;
+    ulong flat = (ulong)expert * rows + row;
+    device float* line = work + flat * stride + column0;
+    device const float* orig = original + flat * stride + column0;
+    device uchar* codes = nibbles + flat * stride + column0;
+    device float* residual = errors + flat * width;
+    device const float* block = factor + (ulong)expert * width * width;
+    device const uchar* gone = dead + (ulong)expert * width;
+    float scale = 1.0f;
+    for (uint i = 0u; i < width; ++i) {
+        uint column = column0 + i;
+        if (gone[i]) {
+            codes[i] = 0u;
+            residual[i] = 0.0f;
+            if (column % 32u == 0u) {
+                scales[flat * (stride / 32u) + column / 32u] = 0u;
+            }
+            continue;
+        }
+        if (column % 32u == 0u) {
+            float amax = 0.0f;
+            for (uint k = 0u; k < 32u; ++k) {
+                amax = max(amax, fabs(line[i + k]));
+            }
+            uchar biased = 0u;
+            foem_scale(amax, biased, scale);
+            scales[flat * (stride / 32u) + column / 32u] = biased;
+        }
+        uchar code = foem_nibble(line[i] / scale);
+        codes[i] = code;
+        float grid = FOEM_GRID[code & 7u];
+        float restored = (code & 8u) ? -grid * scale : grid * scale;
+        float diagonal = block[(ulong)i * width + i];
+        float drift = line[i] - orig[i];
+        float error = ((line[i] - restored) - beta * drift) / diagonal;
+        residual[i] = error;
+        if (!isfinite(error)) {
+            *flag = 1u;
+        }
+        for (uint j = i + 1u; j < width; ++j) {
+            if (!gone[j]) {
+                line[j] -= error * block[(ulong)i * width + j];
+            }
+        }
+        if (i + 1u < width && !gone[i + 1u]) {
+            line[i + 1u] -= beta * (line[i + 1u] - orig[i + 1u]);
+        }
+    }
+}
+
+kernel void foem_tail_batch(
+    device float* work [[buffer(0)]],
+    device const float* original [[buffer(1)]],
+    device const float* errors [[buffer(2)]],
+    device const float* coeff [[buffer(3)]],
+    device const uint* pull [[buffer(4)]],
+    device uint* flag [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& stride [[buffer(7)]],
+    constant uint& column0 [[buffer(8)]],
+    constant uint& width [[buffer(9)]],
+    constant uint& tail [[buffer(10)]],
+    constant float& beta [[buffer(11)]],
+    constant uint& experts [[buffer(12)]],
+    uint tid [[thread_position_in_grid]])
+{
+    uint span = rows * tail;
+    if (span == 0u || tid >= experts * span) {
+        return;
+    }
+    uint expert = tid / span;
+    uint local = tid - expert * span;
+    uint col = local % tail;
+    uint row = local / tail;
+    ulong flat = (ulong)expert * rows + row;
+    float acc = 0.0f;
+    device const float* residual = errors + flat * width;
+    device const float* row_coeff = coeff + ((ulong)expert * width) * tail;
+    for (uint k = 0u; k < width; ++k) {
+        acc += residual[k] * row_coeff[(ulong)k * tail + col];
+    }
+    device float* value = work + flat * stride + column0 + col;
+    *value -= acc;
+    if (col == 0u && pull[expert] != 0u) {
+        device const float* source = original + flat * stride + column0;
+        *value -= beta * (*value - *source);
+    }
+    if (!isfinite(*value)) {
+        *flag = 1u;
+    }
+}
+
+// Grouped rows to [width, max_pad] with the reduction contiguous. Pad rows are zero.
+// One threadgroup walks one expert's routed rows, so the grid is not the token cap.
+kernel void gram_transpose_wave(
+    device const half* pack [[buffer(0)]],
+    device half* transposed [[buffer(1)]],
+    device const uint* slot_n [[buffer(2)]],
+    device const uint* row_base [[buffer(3)]],
+    device const uint* info [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    constant uint& stride [[buffer(6)]],
+    constant uint& max_pad [[buffer(7)]],
+    constant uint& wave_base [[buffer(8)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint slot = wave_base + tgid.y;
+    if (slot >= info[0]) {
+        return;
+    }
+    uint n = slot_n[slot];
+    uint pad = (n + 63u) & ~63u;
+    uint col = tgid.x * 64u + tid;
+    if (pad == 0u || col >= width) {
+        return;
+    }
+    device half* dest = transposed + ((ulong)tgid.y * width + col) * max_pad;
+    ulong base = (ulong)row_base[slot] * stride + col;
+    uint token = 0u;
+    for (; token < n; ++token) {
+        dest[token] = pack[base + (ulong)token * stride];
+    }
+    for (; token < pad; ++token) {
+        dest[token] = half(0.0f);
+    }
+}
+
+// X^T X for one wave. The transposed buffer is the gram_transpose_wave output.
+kernel void gram_xtx_wave(
+    device half* transposed [[buffer(0)]],
+    device const uint* expert_of [[buffer(1)]],
+    device const uint* slot_n [[buffer(2)]],
+    device const uint* info [[buffer(3)]],
+    device float* scratch [[buffer(4)]],
+    device float* gram [[buffer(5)]],
+    constant uint& width [[buffer(6)]],
+    constant uint& max_pad [[buffer(7)]],
+    constant uint& wave_base [[buffer(8)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]])
+{
+    uint slot = wave_base + tgid.z;
+    if (slot >= info[0]) {
+        return;
+    }
+    uint n = slot_n[slot];
+    uint pad = (n + 63u) & ~63u;
+    if (pad == 0u) {
+        return;
+    }
+    device half* rows = transposed + (ulong)tgid.z * width * max_pad;
+    int kn = int(pad);
+    int wide = int(width);
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        rows, dextents<int, 2>(kn, wide), array<int, 2>{1, int(max_pad)});
+    tensor<device half, dextents<int, 2>, tensor_inline> right(
+        rows, dextents<int, 2>(kn, wide), array<int, 2>{1, int(max_pad)});
+    device float* matrix = scratch + (ulong)tgid.z * width * width;
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        matrix, dextents<int, 2>(wide, wide), array<int, 2>{1, wide});
+    constexpr auto desc = matmul2d_descriptor(
+        64, 64, static_cast<int>(dynamic_extent), false, true, false);
+    matmul2d<desc, execution_simdgroups<4>> op;
+    auto tile_left = left.slice(0, int(tgid.y) * 64);
+    auto tile_right = right.slice(0, int(tgid.x) * 64);
+    auto tile_out = out.slice(int(tgid.x) * 64, int(tgid.y) * 64);
+    op.run(tile_left, tile_right, tile_out);
+    threadgroup_barrier(mem_flags::mem_device);
+    device float* acc = gram + (ulong)expert_of[slot] * width * width;
+    for (uint i = tid; i < 4096u; i += 128u) {
+        uint local_row = i >> 6u;
+        uint local_col = i & 63u;
+        uint row = tgid.y * 64u + local_row;
+        uint col = tgid.x * 64u + local_col;
+        acc[(ulong)row * width + col] += matrix[(ulong)row * width + col];
+    }
+}
 #pragma clang fp contract(on)
 

@@ -359,6 +359,38 @@ def test_capture_resume_keeps_the_matching_source(tmp_path: Path) -> None:
     assert _load_round(partial, "other") == {}
 
 
+def test_nvfp4_matrix_matches_one_row() -> None:
+    from inkling_2_mini.metal41.codec import dequant_nvfp4_matrix, nvfp4_row
+
+    packed = np.arange(16, dtype=np.uint8).reshape(2, 8)
+    scales = np.array([[3], [9]], dtype=np.uint8)
+    found = dequant_nvfp4_matrix(packed, scales, 0.25)
+    expect = np.stack([nvfp4_row(packed[row], scales[row], 0.25) for row in range(2)])
+    assert found.shape == (2, 16)
+    assert np.allclose(found, expect)
+
+
+def test_expert_grams_keep_only_routed_rows() -> None:
+    from inkling_2_mini.metal41.calibration import ExpertGrams
+    from inkling_2_mini.metal41.layout import EXPERTS, HIDDEN, INTERMEDIATE, stored_k
+
+    grams = ExpertGrams(0)
+    hidden = np.zeros((3, HIDDEN), dtype=np.float32)
+    hidden[1] = 1.0
+    ids = np.full((3, 8), 127, dtype=np.uint32)
+    ids[1, 0] = 4
+    grams.add_up(hidden, ids)
+    assert np.allclose(grams.up[4], np.ones((HIDDEN, HIDDEN), dtype=np.float32))
+    assert float(np.sum(grams.up[3])) == 0.0
+    width = stored_k(INTERMEDIATE)
+    gated = np.zeros((4, width), dtype=np.float32)
+    gated[1, 0] = 2.0
+    grams.add_down(gated, np.array([4], dtype=np.uint32), np.array([1]), np.array([1]))
+    assert grams.down[4, 0, 0] == 4.0
+    assert float(np.sum(grams.down[4, 1:, 1:])) == 0.0
+    assert grams.down.shape[0] == EXPERTS
+
+
 def test_expert_catalog_pads_the_down_projection() -> None:
     specs = {(spec.layer, spec.proj, spec.kind): spec for spec in catalog()}
     assert len(specs) == LAYERS * 4
@@ -555,7 +587,7 @@ def test_calibration_rows_skip_a_short_dialog_and_an_email() -> None:
         {"role": "assistant", "content": "A sort orders items. " * 40},
     ]
     assert _accept(long) is not None
-    assert [name for name, _count in _QUOTAS] == ["agent", "code", "tool", "chat"]
+    assert [name for name, _count in _QUOTAS] == ["swe", "code", "tool", "chat"]
     assert sum(count for _name, count in _QUOTAS) == 128
     missed = _agent_dialog(
         {

@@ -1,10 +1,9 @@
 """Load the safetensors checkpoint. Experts stay packed in the file.
 
-The fused attention plane, the attention output projection, and the head are
-half, cast from the checkpoint bf16. The attention inputs of a layer are one
-fused plane, ``[wq; wr; gate; wk; wv]``, so a layer whose three streams agree
-runs one GEMV. The router, the sink, the dynamic conv taps, and the message
-gates stay half. The head keeps the unpadded vocabulary rows.
+The fused attention plane and the output projection are nearest E4M3, one
+E8M0 scale per 32 along K, from the checkpoint bf16. The head stays half.
+The router, the sink, the dynamic convolution taps, and the message gates
+stay half. The head keeps the unpadded vocabulary rows.
 """
 
 from __future__ import annotations
@@ -314,7 +313,7 @@ def checkpoint_file(root: Path) -> Path:
 
 
 DENSE_PACK = "dense-fp8.safetensors"
-DENSE_FORMAT = "favlo-dense-fp8-foem-1"
+DENSE_FORMAT = "favlo-dense-fp8-nearest-1"
 
 
 def dense_catalog() -> list[tuple[str, tuple[int, int]]]:
@@ -356,11 +355,7 @@ def ensure_dense(root: Path, log: Any = None) -> None:
         return
     source = Tensors(checkpoint_file(root))
     try:
-        grams = Path(root) / "dense-fp4-inputs.npz"
-        if grams.is_file():
-            _write_dense_foem(root, source, grams, log)
-        else:
-            _write_dense_nearest(root, source, log)
+        _write_dense_nearest(root, source, log)
     finally:
         source.close()
 
@@ -386,92 +381,6 @@ def _write_dense_nearest(root: Path, source: Tensors, log: Any) -> None:
     except Exception:
         sink.abort()
         raise
-
-
-def _calibration_gram(held: Any, layer: int, stream: str) -> np.ndarray:
-    names = ("shared", stream) if stream in ("q", "k", "v") else (stream,)
-    parts = [np.array(held[f"{layer}:{name}"], dtype=np.float64) for name in names if f"{layer}:{name}" in held.files]
-    if not parts:
-        message = f"no calibration inputs for layer {layer} {stream}"
-        raise KeyError(message)
-    total = parts[0]
-    for part in parts[1:]:
-        total += part
-    return total
-
-
-def _keep_fp8(
-    matrix: np.ndarray,
-    nearest: tuple[np.ndarray, np.ndarray],
-    foem: tuple[np.ndarray, np.ndarray],
-    hessian: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, str]:
-    step = max(1, matrix.shape[0] // 256)
-    rows = slice(0, matrix.shape[0], step)
-    weight = np.asarray(matrix[rows], dtype=np.float64)
-    hessian = np.asarray(hessian, dtype=np.float64)
-    denom = float(np.sum((weight @ hessian) * weight))
-
-    def score(pair: tuple[np.ndarray, np.ndarray]) -> float:
-        error = weight - dequant_mxfp8(pair[0][rows], pair[1][rows]).astype(np.float64)
-        if denom <= 0.0:
-            return float(np.mean(error * error))
-        return float(np.sum((error @ hessian) * error) / denom)
-
-    if score(foem) <= score(nearest):
-        return foem[0], foem[1], "foem"
-    return nearest[0], nearest[1], "nearest"
-
-
-def _write_dense_foem(root: Path, source: Tensors, grams: Path, log: Any) -> None:
-    """Error-compensating E4M3, kept only when it beats nearest on the saved grams."""
-    from favlo.memory import memory
-    from inkling_2_mini.metal41.gptq import BETA, foem_fp8_device
-    from inkling_2_mini.metal41.resident import Sink
-    from inkling_2_mini.metal41.session import Session
-
-    owner = "inkling_2_mini:dense"
-    session = Session(owner)
-    sink = Sink(Path(root) / DENSE_PACK, dense_catalog(), {"format": DENSE_FORMAT})
-    try:
-        with np.load(grams) as held:
-            for index in range(LAYERS):
-                bands_c = []
-                bands_s = []
-                attn = f"model.llm.layers.{index}.attn"
-                parts = (
-                    ("q", f"{attn}.wq_du.weight", Q_DIM),
-                    ("q", f"{attn}.wr_du.weight", REL_DIM),
-                    ("q", f"{attn}.gate_attn.weight", Q_DIM),
-                    ("k", f"{attn}.wk_dv.weight", KV_DIM),
-                    ("v", f"{attn}.wv_dv.weight", KV_DIM),
-                )
-                for stream, name, rows in parts:
-                    matrix = source.vector(name, (rows, HIDDEN))
-                    hessian = _calibration_gram(held, index, stream)
-                    nearest = quantize_mxfp8(matrix)
-                    foem = foem_fp8_device(session, matrix, hessian, beta=BETA)
-                    codes, scales, kept = _keep_fp8(matrix, nearest, foem, hessian)
-                    if log is not None:
-                        log(f"layer {index} {name.rsplit('.', 2)[-2]} kept {kept}")
-                    bands_c.append(codes)
-                    bands_s.append(scales)
-                _write_pair(sink, f"layers.{index}.attn", np.concatenate(bands_c), np.concatenate(bands_s))
-                weight = source.vector(f"{attn}.wo_ud.weight", (HIDDEN, Q_DIM))
-                hessian = _calibration_gram(held, index, "wo")
-                nearest = quantize_mxfp8(weight)
-                foem = foem_fp8_device(session, weight, hessian, beta=BETA)
-                codes, scales, kept = _keep_fp8(weight, nearest, foem, hessian)
-                if log is not None:
-                    log(f"layer {index} wo kept {kept}")
-                _write_pair(sink, f"layers.{index}.wo", codes, scales)
-        sink.close()
-    except Exception:
-        sink.abort()
-        raise
-    finally:
-        session.close()
-        memory.sweep(owner)
 
 
 def _fused_fp8(tensors: Tensors, index: int) -> tuple[np.ndarray, np.ndarray]:
@@ -563,7 +472,7 @@ class Checkpoint:
         self._tensors = Tensors(path, on_read=self._read)
         del calibrated
         self._pack = None
-        self.dense_tag = "fp8"
+        self.dense_tag = "fp8-nearest"
         from inkling_2_mini.metal41.resident import open_expert_pack
 
         self.experts = open_expert_pack(self.pack_root, self.root)

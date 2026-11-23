@@ -58,7 +58,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     complete.add_argument("--limit", type=int, default=64)
     sub.add_parser("models", help="list registered checkpoints")
     calibrate = sub.add_parser(
-        "calibrate", help="round the dense fp4 planes with GPTQ from calibration inputs"
+        "calibrate", help="round NVFP4 experts with GPTQ-FOEM from calibration inputs"
     )
     calibrate.add_argument("--limit", type=int, default=2048)
     calibrate.add_argument(

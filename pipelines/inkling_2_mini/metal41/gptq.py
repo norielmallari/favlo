@@ -401,6 +401,110 @@ def foem_fp4_device(
     return packed, scales_out
 
 
+class FoemWave:
+    """Device buffers for one multi-expert FOEM grid. The command buffer owns them."""
+
+    def __init__(
+        self, nibble: Any, scale: Any, flag: Any, count: int, rows: int, inner: int
+    ) -> None:
+        self.nibble = nibble
+        self.scale = scale
+        self.flag = flag
+        self.count = int(count)
+        self.rows = int(rows)
+        self.inner = int(inner)
+
+
+def foem_fp4_encode(
+    session: Any,
+    work: np.ndarray,
+    original: np.ndarray,
+    uppers: np.ndarray,
+    deads: np.ndarray,
+    *,
+    beta: float = BETA,
+    block: int = 128,
+) -> FoemWave:
+    """Encode one wave of experts into the open command buffer.
+
+    ``work`` and ``original`` are ``[experts, rows, inner]``. Dead columns of
+    ``work`` are already zero. The host commits the buffer.
+    """
+    from inkling_2_mini.metal41.session import f32, u32
+
+    if not session.recording:
+        message = "FOEM wave needs an open command buffer"
+        raise RuntimeError(message)
+    count, rows, inner = work.shape
+    if original.shape != work.shape or uppers.shape != (count, inner, inner):
+        message = f"FOEM wave shapes {work.shape} {uppers.shape} do not match"
+        raise ValueError(message)
+    if deads.shape != (count, inner) or inner % block or block % 32:
+        message = f"FOEM wave inner {inner} block {block} does not match {deads.shape}"
+        raise ValueError(message)
+    threads = 256
+    work_buf = session.upload(np.ascontiguousarray(work, dtype=np.float32))
+    original_buf = session.upload(np.ascontiguousarray(original, dtype=np.float32))
+    nibble_buf = session.zeros(count * rows * inner)
+    scale_buf = session.zeros(count * rows * (inner // 32))
+    error_buf = session.zeros(count * rows * block * 4)
+    flag = session.zeros(4)
+    for b0 in range(0, inner, block):
+        b1 = b0 + block
+        factor = np.ascontiguousarray(uppers[:, b0:b1, b0:b1])
+        dead_b = np.ascontiguousarray(deads[:, b0:b1])
+        session.dispatch(
+            "foem_block_batch",
+            [
+                work_buf,
+                original_buf,
+                session.upload(factor),
+                session.upload(dead_b),
+                nibble_buf,
+                scale_buf,
+                error_buf,
+                flag,
+            ],
+            [u32(rows), u32(inner), u32(b0), u32(block), f32(beta), u32(count)],
+            (max((count * rows + threads - 1) // threads, 1), 1, 1),
+            (threads, 1, 1),
+        )
+        if b1 < inner:
+            tail = inner - b1
+            coeff = np.array(uppers[:, b0:b1, b1:], dtype=np.float32, copy=True)
+            alive = ~deads[:, b1:].astype(bool)
+            coeff *= alive[:, None, :]
+            pulls = np.where(deads[:, b1] == 0, np.uint32(1), np.uint32(0))
+            session.dispatch(
+                "foem_tail_batch",
+                [
+                    work_buf,
+                    original_buf,
+                    error_buf,
+                    session.upload(np.ascontiguousarray(coeff)),
+                    session.upload(np.ascontiguousarray(pulls)),
+                    flag,
+                ],
+                [u32(rows), u32(inner), u32(b1), u32(block), u32(tail), f32(beta), u32(count)],
+                (max((count * rows * tail + threads - 1) // threads, 1), 1, 1),
+                (threads, 1, 1),
+            )
+    return FoemWave(nibble_buf, scale_buf, flag, count, rows, inner)
+
+
+def foem_fp4_read(session: Any, wave: FoemWave) -> tuple[np.ndarray, np.ndarray]:
+    """Download one finished wave. The command that wrote it has completed."""
+    if int(np.frombuffer(session.download(wave.flag, 4), dtype=np.uint32)[0]) != 0:
+        message = "FOEM update left a non-finite weight"
+        raise RuntimeError(message)
+    count, rows, inner = wave.count, wave.rows, wave.inner
+    nibbles = np.frombuffer(session.download(wave.nibble, count * rows * inner), dtype=np.uint8)
+    scales = np.frombuffer(
+        session.download(wave.scale, count * rows * (inner // 32)), dtype=np.uint8
+    )
+    return nibbles.reshape(count, rows, inner), scales.reshape(count, rows, inner // 32)
+
+
 def foem_fp8(
     matrix: np.ndarray,
     hessian: np.ndarray,

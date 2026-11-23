@@ -1,10 +1,11 @@
 """Expert planes baked for a sequential SSD read.
 
-Layers 0–19 are NVFP4 in the checkpoint. ``bake`` runs the same requant the
-open used to run, once, and stores the Metal fp4 the kernels read. Layers
-20–23 are copied as stored MXFP8. The open then reads ``experts-fp4.safetensors``
-straight into device buffers, in 8 MiB pieces. The dense GPTQ pack is read
-the same way.
+Layers 0–19 are NVFP4 in the checkpoint. ``bake`` nearest-rounds them to the
+Metal fp4 the kernels read when the pack is missing. ``calibrate`` writes
+that pack with GPTQ-FOEM instead. Layers 20–23 are copied as stored MXFP8.
+The open then reads ``experts-fp4.safetensors`` straight into device buffers,
+in 8 MiB pieces. Attention and the output projection are read from
+``dense-fp8.safetensors`` the same way.
 """
 
 from __future__ import annotations

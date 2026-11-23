@@ -74,6 +74,42 @@ def _max_jobs(tokens: int) -> int:
     return (tokens * TOP_K + 31) // 32 + EXPERTS
 
 
+def dispatch_gram_wave(
+    session: Session,
+    pack: Any,
+    expert_of: Any,
+    slot_n: Any,
+    row_base: Any,
+    info: Any,
+    transposed: Any,
+    scratch: Any,
+    gram: Any,
+    width: int,
+    stride: int,
+    max_pad: int,
+    wave_base: int,
+    wave: int,
+) -> None:
+    """Add one wave of grouped half rows into their Grams with ``matmul2d``."""
+    if width % 64 or max_pad % 64:
+        message = f"gram width {width} pad {max_pad} is not aligned"
+        raise ValueError(message)
+    session.dispatch(
+        "gram_transpose_wave",
+        [pack, transposed, slot_n, row_base, info],
+        [u32(width), u32(stride), u32(max_pad), u32(wave_base)],
+        (width // 64, wave, 1),
+        (64, 1, 1),
+    )
+    session.dispatch(
+        "gram_xtx_wave",
+        [transposed, expert_of, slot_n, info, scratch, gram],
+        [u32(width), u32(max_pad), u32(wave_base)],
+        (width // 64, width // 64, wave),
+        (128, 1, 1),
+    )
+
+
 class InklingRuntime:
     """One open checkpoint. ``generate`` prefills then decodes a token list."""
 
@@ -92,6 +128,10 @@ class InklingRuntime:
         self.root = Path(path)
         self.packs = self.root
         self.capture: Any = None
+        self.expert_grams: dict[int, Any] | None = None
+        self._gram_half: Any = None
+        self._gram_out: Any = None
+        self._gram_wave = 0
         self.console = console
         self._owner = owner or f"inkling_2_mini:{id(self)}"
         self.kv_cache = "half"
@@ -963,6 +1003,7 @@ class InklingRuntime:
             [u32(HIDDEN), u32(tokens), u32(1 if accumulate else 0)],
             (tokens, 1, 1),
         )
+        self._accumulate_expert_grams(layer)
 
     # ------------------------------------------------------------------
     # Blocks
@@ -1091,6 +1132,66 @@ class InklingRuntime:
         self.session.begin()
         handle, offset = source if isinstance(source, tuple) else (source, 0)
         return self.session.download_f32(handle, tokens * width, offset).reshape(tokens, width)
+
+    def _gram_scratch(self) -> tuple[int, int]:
+        wave = int(self._gram_wave)
+        if wave < 1:
+            message = "expert wave is not set"
+            raise RuntimeError(message)
+        pad = (int(self.rows) + 63) & ~63
+        if self._gram_out is None:
+            self._gram_half = self.session.zeros(wave * HIDDEN * pad * 2)
+            self._gram_out = self.session.zeros(wave * HIDDEN * HIDDEN * 4)
+        return wave, pad
+
+    def _accumulate_expert_grams(self, layer: Any) -> None:
+        """Add this visit's packed half rows into the resident Gram.
+
+        Slot sizes stay on the device. The wave shares the forward command buffer,
+        so the host does not wait between the layer and its Gram.
+        """
+        resident = self.expert_grams
+        if not resident:
+            return
+        held = resident.get(layer.index)
+        if held is None or not layer.nvfp4:
+            return
+        wave, pad = self._gram_scratch()
+        planes = (
+            (self.pack, HIDDEN, held.up_buf),
+            (self.gated, int(layer.w2.inner), held.down_buf),
+        )
+        for source, width, dest in planes:
+            for base in range(0, EXPERTS, wave):
+                dispatch_gram_wave(
+                    self.session,
+                    source,
+                    self.expert_of,
+                    self.slot_n,
+                    self.row_base,
+                    self.info,
+                    self._gram_half,
+                    self._gram_out,
+                    dest,
+                    width,
+                    width,
+                    pad,
+                    base,
+                    min(wave, EXPERTS - base),
+                )
+
+    def capture_experts(self, tokens: list[int], grams: dict[int, Any]) -> None:
+        """Prefill ``tokens`` and add each resident layer's expert inputs."""
+        self.reset()
+        self.expert_grams = grams
+        try:
+            self._prefill([int(item) for item in tokens], 0, 0.0, False)
+            for item in grams.values():
+                item.tokens += len(tokens)
+                item.done += 1
+        finally:
+            self.expert_grams = None
+            self.reset()
 
     def capture_prefill(self, tokens: list[int], capture: Any) -> None:
         """Prefill ``tokens`` from position 0 and add each dense plane input to ``capture``."""

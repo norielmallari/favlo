@@ -39,3 +39,23 @@ def nvfp4_row(packed: np.ndarray, scales: np.ndarray, global_scale: float) -> np
         code = E2M1[nibble & 7] * sign
         out[index] = code * e4m3_to_float(int(scales[index // 16])) * float(global_scale)
     return out
+
+
+_E4M3 = np.array([e4m3_to_float(i) for i in range(256)], dtype=np.float32)
+_MAGNITUDE = np.array(E2M1, dtype=np.float32)
+
+
+def dequant_nvfp4_matrix(packed: np.ndarray, scales: np.ndarray, global_scale: float) -> np.ndarray:
+    """Dequant one expert. ``packed`` is ``[rows, K/2]``, ``scales`` is ``[rows, K/16]``."""
+    rows, half = packed.shape
+    width = half * 2
+    if scales.shape != (rows, width // 16):
+        message = f"scales {scales.shape} do not cover {(rows, width)}"
+        raise ValueError(message)
+    nibbles = np.empty((rows, width), dtype=np.uint8)
+    nibbles[:, 0::2] = packed & np.uint8(0x0F)
+    nibbles[:, 1::2] = packed >> np.uint8(4)
+    sign = np.where(nibbles >= np.uint8(8), np.float32(-1.0), np.float32(1.0))
+    magnitude = _MAGNITUDE[nibbles & np.uint8(7)]
+    block = np.repeat(_E4M3[scales], 16, axis=1)
+    return magnitude * sign * block * np.float32(global_scale)

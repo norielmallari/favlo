@@ -72,6 +72,10 @@ KERNELS: dict[str, int] = {
     "foem_block": 256,
     "foem_block_fp8": 256,
     "foem_tail": 256,
+    "foem_block_batch": 256,
+    "foem_tail_batch": 256,
+    "gram_transpose_wave": 64,
+    "gram_xtx_wave": 128,
 }
 
 

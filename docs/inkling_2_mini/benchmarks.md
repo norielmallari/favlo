@@ -18,18 +18,18 @@ As-built harness scores for this pipeline. The process contract is
 
 ## Intelligence smoke
 
-The smoke is the first 30 rows of each set, in file order. This smoke is `Inkling-2-Mini` with the GPTQ dense fp4 pack and `half` keys and values.
+The smoke is the first 30 rows of each set, in file order. This smoke is nearest E4M3 attention and output projections, a float16 head, GPTQ-FOEM Metal fp4 experts in layers 0–19, MXFP8 experts in layers 20–23, and `half` keys and values.
 
 <!-- smoke-ifeval -->
-- ifeval: n=30  prompt strict 0.867  prompt loose 0.833  instruction strict 0.911  instruction loose 0.889
+- ifeval: n=30  prompt strict 0.833  prompt loose 0.800  instruction strict 0.889  instruction loose 0.867
 <!-- /smoke-ifeval -->
 
 <!-- smoke-gsm8k -->
-- gsm8k: n=30  24/30  0.800
+- gsm8k: n=30  26/30  0.867
 <!-- /smoke-gsm8k -->
 
 <!-- smoke-humaneval -->
-- humaneval: n=30  29/30  0.967
+- humaneval: n=30  30/30  1.000
 <!-- /smoke-humaneval -->
 
 <!-- smoke-mtp-on-ifeval -->

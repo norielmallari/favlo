@@ -20,7 +20,7 @@ Registration copies `VARIANTS` and `DEFAULT_VARIANT` from `sampling.py`. `genera
 
 ## Setup
 
-`setup` downloads `thinkingmachines/Inkling-2-Mini` into `Inkling-2-Mini-fp4-gptq-foem`, rewrites bf16 tensors as float16, splits vision into `vision.safetensors`, leaves `mtp.safetensors` as its own file, registers that folder, and runs `bake` when `experts-fp4.safetensors` is missing or does not match. `bake` also writes `dense-fp8.safetensors` for the fused attention plane and the output projection. The head is pread as float16. `--repo` accepts another repository with the same tensor names, as `org/name` or a `huggingface.co` link. There is no separate BF16 checkout to remove.
+`setup` downloads `thinkingmachines/Inkling-2-Mini` into `Inkling-2-Mini-fp4-gptq-foem`, rewrites bf16 tensors as float16, splits vision into `vision.safetensors`, leaves `mtp.safetensors` as its own file, registers that folder, and runs `bake` when `experts-fp4.safetensors` is missing or does not match. `bake` writes a nearest NVFP4 remap and nearest E4M3 for the fused attention plane and the output projection. `calibrate` replaces layers 0–19 with GPTQ-FOEM and leaves layers 20–23 as MXFP8. The head is pread as float16. `--repo` accepts another repository with the same tensor names, as `org/name` or a `huggingface.co` link. There is no separate BF16 checkout to remove.
 
 ## Memory
 

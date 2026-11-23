@@ -12,6 +12,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [prefix.md](prefix.md) | SSD prefix store |
 | [harness.md](harness.md) | File agent, coding agent, and worktree agent |
 | [coding-primitives.md](coding-primitives.md) | Tool contract for the coding harness |
+| [calibration/calibration.md](calibration/calibration.md) | GPTQ and FOEM calibration set |
 | [synthetic-matmul2d.md](synthetic-matmul2d.md) | Synthetic `matmul2d` dtype rates |
 | [synthetic-decode.md](synthetic-decode.md) | Synthetic one-token GEMV and `matmul2d` rates |
 | [ai-assistance/README.md](ai-assistance/README.md) | AI-assisted features on `favlo serve` |
@@ -39,9 +40,13 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [inkling_2_mini/research/coding-vision-half.md](inkling_2_mini/research/coding-vision-half.md) | Inkling 2 Mini vision coding agent on the GPTQ dense fp4 pack with half keys and values |
 | [inkling_2_mini/research/file-agent-half.md](inkling_2_mini/research/file-agent-half.md) | Inkling 2 Mini file agent on the GPTQ dense fp4 pack with half keys and values |
 | [inkling_2_mini/research/synthetic-prompt-fp8.md](inkling_2_mini/research/synthetic-prompt-fp8.md) | Inkling 2 Mini cold 512, 1024, 4096, and 10000-token prompts on the FOEM fp8 attention pack with half keys and values |
+| [inkling_2_mini/research/synthetic-prompt-fp8-nearest.md](inkling_2_mini/research/synthetic-prompt-fp8-nearest.md) | Inkling 2 Mini cold 512, 1024, 4096, and 10000-token prompts on nearest fp8 attention with GPTQ-FOEM experts and half keys and values |
 | [inkling_2_mini/research/coding-text-fp8.md](inkling_2_mini/research/coding-text-fp8.md) | Inkling 2 Mini text coding agent on the FOEM fp8 attention pack with half keys and values |
+| [inkling_2_mini/research/coding-text-fp8-nearest.md](inkling_2_mini/research/coding-text-fp8-nearest.md) | Inkling 2 Mini text coding agent on nearest fp8 attention with GPTQ-FOEM experts and half keys and values |
 | [inkling_2_mini/research/file-agent-fp8.md](inkling_2_mini/research/file-agent-fp8.md) | Inkling 2 Mini file agent on the FOEM fp8 attention pack with half keys and values |
+| [inkling_2_mini/research/file-agent-fp8-nearest.md](inkling_2_mini/research/file-agent-fp8-nearest.md) | Inkling 2 Mini file agent on nearest fp8 attention with GPTQ-FOEM experts and half keys and values |
 | [inkling_2_mini/research/intelligence-smoke.md](inkling_2_mini/research/intelligence-smoke.md) | Inkling 2 Mini first 30 rows of IFEval, GSM8K, and HumanEval |
+| [inkling_2_mini/research/intelligence-smoke-fp8-nearest.md](inkling_2_mini/research/intelligence-smoke-fp8-nearest.md) | Inkling 2 Mini first 30 rows of IFEval, GSM8K, and HumanEval on nearest fp8 attention with GPTQ-FOEM experts |
 | [inkling_2_mini/benchmarks.md](inkling_2_mini/benchmarks.md) | Inkling 2 Mini harness scores against `serve` |
 | [qwen36_35b_a3b/research/fp16-peak-restore.md](qwen36_35b_a3b/research/fp16-peak-restore.md) | Qwen3.6-35B-A3B float16 peak-restore bound |
 | [qwen36_35b_a3b/research/kernel-ceilings.md](qwen36_35b_a3b/research/kernel-ceilings.md) | Qwen3.6-35B-A3B isolated dispatch sum |
