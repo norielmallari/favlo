@@ -199,6 +199,36 @@ decode 1.00 tok/s (2 tok in 1.00s)
     assert "prompt tokens 29" not in kept_repeat
     assert "vision merged 180" in kept_repeat
     assert vision_problems(kept_repeat) == []
+    cached_between = """\
+vision patches 256
+vision merged 180
+prompt tokens 100
+cache miss
+prefill 1.00 tok/s (100 tok in 1.00s)
+decode 1.00 tok/s (4 tok in 1.00s)
+prefix load 104 tokens
+prompt tokens 140
+vision cached 180
+cache hit 104
+prefill 1.00 tok/s (36 tok in 1.00s)
+decode 1.00 tok/s (2 tok in 1.00s)
+prompt tokens 160
+vision cached 180
+cache hit 142
+prefill 1.00 tok/s (18 tok in 1.00s)
+decode 1.00 tok/s (2 tok in 1.00s)
+prompt tokens 180
+vision cached 180
+vision cache 180
+cache hit 162
+prefill 1.00 tok/s (18 tok in 1.00s)
+decode 1.00 tok/s (2 tok in 1.00s)
+"""
+    kept_cached = ledger_log(cached_between)
+    assert "prompt tokens 100" in kept_cached
+    assert "prefix load 104" in kept_cached
+    assert prefix_problems(parse_requests(kept_cached)) == []
+    assert vision_problems(kept_cached) == []
     shrunk = """\
 prompt tokens 40
 vision cached 180

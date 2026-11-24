@@ -181,10 +181,11 @@ def _still_span(blocks: list[tuple[int, list[str]]]) -> tuple[int, int]:
     if end is None or still is None:
         return 0, len(blocks) - 1
     start = end
+    # ``vision cached`` means the still is already inside a loaded prefix.
+    # A later tool turn logs that on every request, and it is not a new tower.
     markers = (
         f"vision merged {still}",
         f"vision cache {still}",
-        f"vision cached {still}",
         f"vision patches {still}",
     )
     for index in range(end):
