@@ -10,9 +10,23 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RECORD = ROOT / "models" / "Wan2.2-I2V-A14B-int8"
 NOTE = ROOT / "docs" / "wan22_i2v" / "smoke.json"
 OUT = ROOT / "artifacts" / "wan22_i2v-smoke.mp4"
+_PIPELINE = "wan22_i2v"
+
+
+def _installed_record() -> Path | None:
+    from favlo.registry import choose_complete
+
+    try:
+        path, _selection = choose_complete(
+            model=None, record=None, pipeline=_PIPELINE
+        )
+    except LookupError:
+        return None
+    if not (path / "manifest.json").is_file():
+        return None
+    return path
 
 
 def test_kernels() -> None:
@@ -26,7 +40,8 @@ def test_kernels() -> None:
     reason="set WAN22_SMOKE=1 to generate",
 )
 def test_shortest_320p_video() -> None:
-    if not (RECORD / "manifest.json").is_file():
+    record = _installed_record()
+    if record is None:
         pytest.fail("packed record is not present")
     from harness.video_mp4 import write_mp4
     from wan22_i2v.metal41.runtime import Runtime
@@ -38,7 +53,7 @@ def test_shortest_320p_video() -> None:
     height = int(note["height"])
     image = np.full((height, width, 3), 255, dtype=np.uint8)
     image[80:200, 200:360] = (220, 30, 30)
-    runtime = Runtime(RECORD)
+    runtime = Runtime(record)
     try:
         avi, timing = runtime.generate(
             str(note["prompt"]),

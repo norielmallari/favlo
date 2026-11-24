@@ -10,14 +10,19 @@ CARROT_PROMPT = (
     "After collecting, they have 21 carrots. How many carrots did they collect?"
 )
 
-_FOLDER = "Qwen3.5-4B-fp8"
+_PIPELINE = "qwen35_4b"
 
 
 def installed_record() -> Path | None:
-    """The packed folder when its manifest says the record is complete."""
-    from favlo.registry import models_dir
+    """The registry default packed folder when its manifest says complete."""
+    from favlo.registry import choose_complete
 
-    path = models_dir() / _FOLDER
+    try:
+        path, _selection = choose_complete(
+            model=None, record=None, pipeline=_PIPELINE
+        )
+    except LookupError:
+        return None
     manifest = path / "manifest.json"
     if not manifest.is_file():
         return None

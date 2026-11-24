@@ -9,17 +9,32 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from favlo.registry import choose_complete
 from voxcpm2.metal41.runtime import open_device
 from voxcpm2.portable.audio import encode_wav
 
-_CHECKOUT = Path("models/openbmb/VoxCPM2")
+_PIPELINE = "voxcpm2"
+
+
+def _installed_record() -> Path | None:
+    try:
+        path, _selection = choose_complete(
+            model=None, record=None, pipeline=_PIPELINE
+        )
+    except LookupError:
+        return None
+    if not (path / "manifest.json").is_file():
+        return None
+    if not (path / "weights.bin").is_file() and not (path / "model.safetensors").is_file():
+        return None
+    return path
 
 
 def test_basic_line_writes_a_48k_wav(tmp_path: Path) -> None:
-    weights = _CHECKOUT / "model.safetensors"
-    if not weights.is_file():
-        pytest.skip("checkout missing")
-    runtime = open_device(_CHECKOUT, owner="voxcpm2:smoke")
+    record = _installed_record()
+    if record is None:
+        pytest.skip("voxcpm2 registry default is not installed")
+    runtime = open_device(record, owner="voxcpm2:smoke")
     try:
         samples = runtime.speak(
             "Hello.",

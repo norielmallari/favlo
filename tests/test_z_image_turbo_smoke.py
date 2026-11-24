@@ -10,11 +10,25 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RECORD = ROOT / "models" / "Z-Image-Turbo-fp4"
 NOTE = ROOT / "docs" / "z_image_turbo" / "smoke.json"
 PROMPT = "a red cube on a white table"
 SEED = 0
 SIZES = ((512, 512), (1024, 1024))
+_PIPELINE = "z_image_turbo"
+
+
+def _installed_record() -> Path | None:
+    from favlo.registry import choose_complete
+
+    try:
+        path, _selection = choose_complete(
+            model=None, record=None, pipeline=_PIPELINE
+        )
+    except LookupError:
+        return None
+    if not (path / "manifest.json").is_file():
+        return None
+    return path
 
 
 def test_kernels() -> None:
@@ -28,11 +42,12 @@ def test_kernels() -> None:
     reason="set ZIMAGE_SMOKE=1 to generate",
 )
 def test_generate_matches_the_recorded_latent() -> None:
-    if not (RECORD / "manifest.json").is_file():
+    record = _installed_record()
+    if record is None:
         pytest.skip("packed record is not present")
     from z_image_turbo.metal41.runtime import Runtime
 
-    runtime = Runtime(RECORD)
+    runtime = Runtime(record)
     digests: dict[tuple[int, int], str] = {}
     try:
         for width, height in SIZES:

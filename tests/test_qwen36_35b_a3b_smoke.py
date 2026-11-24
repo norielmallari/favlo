@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from favlo.registry import choose_complete
 from qwen36_35b_a3b.metal41.commands import CARROT_PROMPT
 from qwen36_35b_a3b.metal41.forward import Qwen36Runtime
 from qwen36_35b_a3b.portable.chat import (
@@ -27,17 +28,7 @@ from qwen36_35b_a3b.portable.chat import (
 from qwen36_35b_a3b.portable.sampling import VARIANTS
 from qwen36_35b_a3b.portable.tools import split_thinking
 
-
-def _installed_record() -> Path:
-    """The packed folder this machine can smoke. e30 is the current record."""
-    for name in ("Qwen3.6-35B-A3B-fp8-e30", "Qwen3.6-35B-A3B-fp8-e20"):
-        path = Path("models") / name
-        if (path / "manifest.json").is_file():
-            return path
-    return Path("models/Qwen3.6-35B-A3B-fp8-e20")
-
-
-_ROOT = _installed_record()
+_PIPELINE = "qwen36_35b_a3b"
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768
 # The test forces the close so the carrot reply is in the scored text.
@@ -46,6 +37,19 @@ _ANSWER = re.compile(
     r"(?:\*\*|__)?(?:6|six)(?:\*\*|__)?(?:\s+\w+){0,3}\s+carrots?\b",
     re.IGNORECASE,
 )
+
+
+def _installed_record() -> Path | None:
+    """The registry default packed folder for this pipeline."""
+    try:
+        path, _selection = choose_complete(
+            model=None, record=None, pipeline=_PIPELINE
+        )
+    except LookupError:
+        return None
+    if not (path / "manifest.json").is_file():
+        return None
+    return path
 
 
 def _template(root: Path) -> str:
@@ -61,9 +65,10 @@ def _template(root: Path) -> str:
 
 @pytest.fixture(scope="module")
 def carrot_runtime():
-    if not (_ROOT / "manifest.json").is_file():
+    root = _installed_record()
+    if root is None:
         pytest.skip("quantized record is not installed")
-    runtime = Qwen36Runtime(_ROOT)
+    runtime = Qwen36Runtime(root)
     try:
         yield runtime
     finally:
@@ -165,7 +170,7 @@ def test_carrot_instruct_recommended(carrot_runtime: Qwen36Runtime) -> None:
 
 
 def test_carrot_thinking_recommended(carrot_runtime: Qwen36Runtime) -> None:
-    if "enable_thinking" not in _template(_ROOT):
+    if "enable_thinking" not in _template(carrot_runtime.root):
         pytest.skip("template does not open a think block")
     card = VARIANTS["thinking"]
     misses: list[str] = []

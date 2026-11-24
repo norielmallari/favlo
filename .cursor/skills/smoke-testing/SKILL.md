@@ -56,6 +56,8 @@ The model field is the pipeline name. A `:instruct` or `:thinking` id pins that 
 
 In-process, this package only. The reply collects 6 carrots. Temperature 0 is used only for greedy decode.
 
+The packed folder comes from the registry: the row marked `pipeline_default` for that pipeline, else the first registered folder. Do not hardcode a `models/` name in the smoke file.
+
 Run the carrot file that imports only this package: `tests/test_<pipeline>_smoke.py`. A memory-capped variant of that file stays skipped until its skip is removed.
 
 The file covers, in order: greedy decode, the instruct card, the thinking card at the template default effort, then one case for each reasoning effort that template names (`low`, `medium`, `xhigh` when the template names them).

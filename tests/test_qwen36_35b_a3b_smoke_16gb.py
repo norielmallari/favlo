@@ -38,11 +38,12 @@ pytestmark = pytest.mark.skip(reason="16GiB carrot smoke is paused")
 
 @pytest.fixture(scope="module")
 def carrot_runtime():
-    if not (_CASES._ROOT / "manifest.json").is_file():
+    root = _CASES._installed_record()
+    if root is None:
         pytest.skip("quantized record is not installed")
     memory.set_max_memory(_CAP)
     try:
-        runtime = Qwen36Runtime(_CASES._ROOT)
+        runtime = Qwen36Runtime(root)
         if runtime.max_memory != memory.budget() or runtime.max_memory > _BYTES:
             message = f"memory cap is {runtime.max_memory}, not at most {_BYTES}"
             raise AssertionError(message)

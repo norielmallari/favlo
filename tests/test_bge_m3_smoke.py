@@ -11,12 +11,19 @@ from bge_m3.metal41.runtime import Runtime
 from bge_m3.metal41.text import HIDDEN
 
 
-def _record() -> Path | None:
-    from favlo.cli import repo_root
+_PIPELINE = "bge_m3"
 
-    path = repo_root() / "models" / "bge-m3-int8"
-    manifest = path / "manifest.json"
-    if not manifest.is_file():
+
+def _record() -> Path | None:
+    from favlo.registry import choose_complete
+
+    try:
+        path, _selection = choose_complete(
+            model=None, record=None, pipeline=_PIPELINE
+        )
+    except LookupError:
+        return None
+    if not (path / "manifest.json").is_file():
         return None
     return path
 
@@ -24,7 +31,7 @@ def _record() -> Path | None:
 def test_packed_program_returns_a_unit_dense_vector() -> None:
     path = _record()
     if path is None:
-        pytest.skip("models/bge-m3-int8 is not packed")
+        pytest.skip("bge_m3 registry default is not packed")
     runtime = Runtime(path)
     try:
         result = runtime.embed("A stone bridge under a clear sky.")
@@ -39,7 +46,7 @@ def test_packed_program_returns_a_unit_dense_vector() -> None:
 def test_an_input_past_the_packed_window_is_an_error() -> None:
     path = _record()
     if path is None:
-        pytest.skip("models/bge-m3-int8 is not packed")
+        pytest.skip("bge_m3 registry default is not packed")
     runtime = Runtime(path)
     try:
         text = "word " * 8000

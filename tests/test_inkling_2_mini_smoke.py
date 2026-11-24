@@ -13,12 +13,13 @@ from typing import Any
 import numpy as np
 import pytest
 
-from favlo.registry import resolve
+from favlo.registry import choose_complete, load_registry
 from inkling_2_mini.portable import open_runtime
 from inkling_2_mini.portable.chat import STOP, decode_text, encode_chat
 from inkling_2_mini.portable.record import CARROT_PROMPT
 from inkling_2_mini.portable.sampling import EFFORT_ORDER
 
+_PIPELINE = "inkling_2_mini"
 _ANSWER = re.compile(
     r"(?:\*\*|__)?(?:6|six)(?:\*\*|__)?(?:\s+\w+){0,3}\s+carrots?\b",
     re.IGNORECASE,
@@ -27,18 +28,19 @@ _ANSWER = re.compile(
 
 @pytest.fixture(scope="module")
 def carrot_runtime():
-    from favlo.registry import load_registry
-
     try:
-        selection = resolve("inkling_2_mini")
+        path, selection = choose_complete(
+            model=None, record=None, pipeline=_PIPELINE
+        )
     except LookupError:
         pytest.skip("Inkling checkpoint is not installed")
+    assert selection is not None
     row = load_registry()["models"][selection.folder]
-    source = Path(str(row.get("source") or selection.path))
+    source = Path(str(row.get("source") or path))
     marker = "model-00001-of-00001.safetensors"
-    if not (source / marker).is_file() and not (selection.path / marker).is_file():
+    if not (source / marker).is_file() and not (path / marker).is_file():
         pytest.skip("Inkling checkpoint is not installed")
-    runtime = open_runtime(selection.path)
+    runtime = open_runtime(path)
     try:
         yield runtime
     finally:

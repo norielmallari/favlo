@@ -11,12 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from favlo.registry import choose_complete
 from gemma4_26b_a4b.metal41.commands import CARROT_PROMPT
 from gemma4_26b_a4b.metal41.forward import Gemma4Runtime
 from gemma4_26b_a4b.portable.chat import decode_text, encode_chat, reply_text
 from gemma4_26b_a4b.portable.sampling import VARIANTS
 
-_ROOT = Path("models/gemma-4-26B-A4B-it-fp8-e20")
+_PIPELINE = "gemma4_26b_a4b"
 _INSTRUCT_TOKENS = 384
 _THINK_TOKENS = 768
 _ANSWER = re.compile(
@@ -25,11 +26,24 @@ _ANSWER = re.compile(
 )
 
 
+def _installed_record() -> Path | None:
+    try:
+        path, _selection = choose_complete(
+            model=None, record=None, pipeline=_PIPELINE
+        )
+    except LookupError:
+        return None
+    if not (path / "manifest.json").is_file():
+        return None
+    return path
+
+
 @pytest.fixture(scope="module")
 def carrot_runtime():
-    if not (_ROOT / "manifest.json").is_file():
+    root = _installed_record()
+    if root is None:
         pytest.skip("quantized record is not installed")
-    runtime = Gemma4Runtime(_ROOT, owner="gemma4_26b_a4b:smoke")
+    runtime = Gemma4Runtime(root, owner="gemma4_26b_a4b:smoke")
     try:
         yield runtime
     finally:
