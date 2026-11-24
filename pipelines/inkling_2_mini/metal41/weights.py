@@ -459,25 +459,33 @@ class Checkpoint:
         calibrated: bool = True,
         pack_root: Path | None = None,
     ) -> None:
-        path = checkpoint_file(root)
-        if not path.is_file():
-            message = f"checkpoint is missing {path.name}"
-            raise FileNotFoundError(message)
+        from inkling_2_mini.metal41.record import open_language, ready
+
         self.root = root
         self.pack_root = Path(pack_root or root)
         self.session = session
         self._progress = progress
         self._done = 0
         self._noted = 0
-        self._tensors = Tensors(path, on_read=self._read)
         del calibrated
         self._pack = None
         self.dense_tag = "fp8-nearest"
-        from inkling_2_mini.metal41.resident import open_expert_pack
+        self._shared_dense = False
+        if ready(root):
+            self._tensors, self.experts = open_language(root, on_read=self._read)
+            self._dense = self._tensors
+            self._shared_dense = True
+        else:
+            path = checkpoint_file(root)
+            if not path.is_file():
+                message = f"checkpoint is missing {path.name}"
+                raise FileNotFoundError(message)
+            self._tensors = Tensors(path, on_read=self._read)
+            from inkling_2_mini.metal41.resident import open_expert_pack
 
-        self.experts = open_expert_pack(self.pack_root, self.root)
-        ensure_dense(self.pack_root)
-        self._dense = open_dense_pack(self.pack_root)
+            self.experts = open_expert_pack(self.pack_root, self.root)
+            ensure_dense(self.pack_root)
+            self._dense = open_dense_pack(self.pack_root)
         try:
             self._load()
         except Exception:
@@ -488,7 +496,7 @@ class Checkpoint:
                 self._pack.close()
                 self._pack = None
             dense = getattr(self, "_dense", None)
-            if dense is not None:
+            if dense is not None and not self._shared_dense:
                 dense.close()
                 self._dense = None
 

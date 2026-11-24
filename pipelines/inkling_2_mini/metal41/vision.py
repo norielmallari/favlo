@@ -3,10 +3,10 @@
 A still is padded to a 40-pixel grid. Each language token is four 20-pixel
 patches. The tower is a 23-layer pre-norm encoder with axial RoPE, then a
 two-layer projector. Rank-2 weights are E4M3 with one float scale per 32
-along K. The open reads ``vision-fp8.safetensors`` in 8 MiB pieces and
-releases it after the rows are written. A later request with the same bytes
-reads ``~/.favlo/vision-cache/inkling_2_mini``. An image already in the
-prefix is not encoded again.
+along K. The open reads ``vision.bin`` in 8 MiB pieces and releases it after
+the rows are written. A later request with the same bytes reads
+``~/.favlo/vision-cache/inkling_2_mini``. An image already in the prefix is
+not encoded again.
 """
 
 from __future__ import annotations
@@ -224,11 +224,11 @@ def bind_vision(runtime: Any, tokens: list[int], hit: int, dropped: int) -> None
     try:
         for start, count, blob in pending:
             if start + count <= hit:
-                _status(runtime, f"vision cached {count}")
+                _vision_line(runtime, "cached", count)
                 continue
             found = _cached_rows(runtime.root, blob, count)
             if found is None:
-                _status(runtime, f"vision patches {count}")
+                _vision_line(runtime, "patches", count)
                 if tower is None:
                     tower = Tower(runtime.root, runtime.session, getattr(runtime, "packs", None))
                 found = tower.encode_blob(blob)
@@ -236,9 +236,9 @@ def bind_vision(runtime: Any, tokens: list[int], hit: int, dropped: int) -> None
                     message = "vision rows do not match the image"
                     raise RuntimeError(message)
                 store_cache(_cache_file(runtime.root, blob), {"rows": found})
-                _status(runtime, f"vision merged {count}")
+                _vision_line(runtime, "merged", count)
             else:
-                _status(runtime, f"vision cache {count}")
+                _vision_line(runtime, "cache", count)
             base = sum(int(item.shape[0]) for item in rows)
             rows.append(found)
             for offset in range(count):
@@ -270,9 +270,12 @@ class Tower:
     """One vision pack on the device. ``close`` releases it."""
 
     def __init__(self, root: Path, session: Any, pack_root: Path | None = None) -> None:
+        from inkling_2_mini.metal41.record import ready
+
         self.root = Path(root)
         self.pack_root = Path(pack_root or root)
-        ensure_pack(self.root, self.pack_root)
+        if not ready(self.pack_root):
+            ensure_pack(self.root, self.pack_root)
         self.session = session
         self.owner = f"inkling-vision:{id(self)}"
         self.pack = None
@@ -299,15 +302,25 @@ class Tower:
         return self._encode(rgb, rows, cols)
 
     def _load(self) -> None:
-        path = self.pack_root / PACK_NAME
-        tensors = Tensors(path)
+        from inkling_2_mini.metal41.record import open_vision
+
+        store = open_vision(self.pack_root)
+        if store is not None:
+            path = store.path
+            tensors: Any = store
+            data_off = 0
+        else:
+            path = self.pack_root / PACK_NAME
+            tensors = Tensors(path)
+            data_off = tensors._data
         try:
-            if tensors.metadata.get("format") != PACK_FORMAT:
-                message = "vision pack format does not match"
-                raise RuntimeError(message)
-            if tensors.metadata.get("config") != config_digest(self.root):
-                message = "vision pack does not match config.json"
-                raise RuntimeError(message)
+            if store is None:
+                if tensors.metadata.get("format") != PACK_FORMAT:
+                    message = "vision pack format does not match"
+                    raise RuntimeError(message)
+                if tensors.metadata.get("config") != config_digest(self.root):
+                    message = "vision pack does not match config.json"
+                    raise RuntimeError(message)
             for name, info in tensors.header.items():
                 start, _end = info["data_offsets"]
                 self.spans[name] = (int(start), tuple(int(v) for v in info["shape"]))
@@ -319,14 +332,16 @@ class Tower:
             code = np.frombuffer(codes, np.uint8).reshape(code_info["shape"]).copy()
             scale = _scale_array(scales, tuple(scale_info["shape"]))
             self.position = dequant_fp8(code, scale)
-            data_off = tensors._data
             nbytes = path.stat().st_size - data_off
             self.pack = memory.allocate(nbytes, owner=self.owner)
-            fd = os.open(path, os.O_RDONLY)
-            try:
-                pread_handle(fd, self.pack, data_off, nbytes)
-            finally:
-                os.close(fd)
+            if store is None:
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    pread_handle(fd, self.pack, data_off, nbytes)
+                finally:
+                    os.close(fd)
+            else:
+                pread_handle(tensors.fileno(), self.pack, data_off, nbytes)
         finally:
             tensors.close()
 
@@ -533,6 +548,15 @@ class Tower:
         for handle in self._scratch:
             memory.release(handle)
         self._scratch.clear()
+
+
+def _vision_line(runtime: Any, kind: str, count: int) -> None:
+    """Queue one vision line behind the prompt note. A direct write lands too early."""
+    note = getattr(runtime, "_note", None)
+    if callable(note):
+        note("vision", kind=kind, count=count)
+        return
+    _status(runtime, f"vision {kind} {count}")
 
 
 def _status(runtime: Any, text: str) -> None:

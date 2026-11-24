@@ -109,6 +109,16 @@ def list_files(host: str = _HOST, repo: str = REPO) -> list[File]:
     return files
 
 
+def _weight_file(name: str) -> bool:
+    return Path(name).name.endswith(".safetensors")
+
+
+def _record_ready(dest: Path) -> bool:
+    from inkling_2_mini.metal41.record import ready
+
+    return ready(dest)
+
+
 def _repacked(dest: Path) -> bool:
     """The language shard was rewritten to float16 and no longer matches the hub size."""
     marker = dest / "repack.json"
@@ -131,9 +141,12 @@ def remaining_download(dest: Path, files: list[File]) -> int:
     missing = 0
     marked = _marked(dest)
     done = _repacked(dest)
+    sealed = _record_ready(dest)
     for item in files:
         path = dest / item.name
         have = path.stat().st_size if path.is_file() else 0
+        if sealed and _weight_file(item.name):
+            continue
         if done and item.name == "model-00001-of-00001.safetensors":
             continue
         if have == item.size and _marked_ok(marked, item):
@@ -149,6 +162,8 @@ def remaining_expert(dest: Path, config_root: Path | None = None) -> int:
     """Expert-pack bytes not yet in the additive folder."""
     from inkling_2_mini.metal41.resident import expert_pack_bytes, open_expert_pack
 
+    if _record_ready(dest):
+        return 0
     record = open_expert_pack(dest, config_root or dest)
     if record is not None:
         record.close()
@@ -185,6 +200,7 @@ def download(
     digests = dict(marked)
     fetched: set[str] = set()
     done = _repacked(dest)
+    sealed = _record_ready(dest)
     for item in files:
         path = dest / item.name
         if path.is_symlink():
@@ -193,7 +209,9 @@ def download(
         path.parent.mkdir(parents=True, exist_ok=True)
         have = path.stat().st_size if path.is_file() else 0
         label = Path(item.name).name
-        if done and item.name == "model-00001-of-00001.safetensors":
+        if (sealed and _weight_file(item.name)) or (
+            done and item.name == "model-00001-of-00001.safetensors"
+        ):
             finished += item.size
             on_progress(finished, total, label)
             continue

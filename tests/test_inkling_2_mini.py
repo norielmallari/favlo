@@ -20,6 +20,7 @@ from inkling_2_mini.metal41.calibration import (
 from inkling_2_mini.metal41.codec import e4m3_to_float, nvfp4_row
 from inkling_2_mini.metal41.commands import _repo_id, register_folder
 from inkling_2_mini.metal41.fetch import File, keep, remaining_download, shortfall
+from inkling_2_mini.metal41.forward import piece_length
 from inkling_2_mini.metal41.gptq import (
     PACK_FORMAT,
     PACK_NAME,
@@ -150,6 +151,15 @@ class _Runtime:
             slots = cache_slots(layer, context) * ROW_BYTES
             self.k_cache.append(bytearray(slots))
             self.v_cache.append(bytearray(slots))
+
+
+def test_a_user_marker_ends_the_prefill_piece() -> None:
+    marker = 7
+    prompt = [1, 1, marker, 2, 2, marker, 3]
+    assert piece_length(prompt, 0, 7, 8, marker) == 3
+    assert piece_length(prompt, 3, 4, 8, marker) == 3
+    assert piece_length(prompt, 0, 2, 8, marker) == 2
+    assert piece_length(prompt, 6, 1, 8, marker) == 1
 
 
 def test_prefix_keeps_the_window_tail_of_local_visits(monkeypatch, tmp_path) -> None:
@@ -769,6 +779,117 @@ def test_repack_stores_language_as_float16_and_splits_vision(tmp_path: Path) -> 
         vision.close()
     marker = json.loads((tmp_path / "repack.json").read_text())
     assert marker["format"] == "favlo-inkling-f16-1"
+
+
+def test_seal_writes_a_raw_record_and_drops_safetensors(tmp_path: Path) -> None:
+    from inkling_2_mini.metal41.fetch import remaining_download
+    from inkling_2_mini.metal41.record import (
+        RawFile,
+        open_language,
+        open_vision,
+        publish,
+        ready,
+        seal,
+    )
+
+    config = '{"hidden": 4}\n'
+    (tmp_path / "config.json").write_text(config)
+    embed = (np.array([[1.0, -2.0]], np.float32).view(np.uint32) >> 16).astype(np.uint16)
+    _shard(
+        tmp_path / "model-00001-of-00001.safetensors",
+        {
+            "model.llm.embed.weight": ("BF16", embed),
+            "model.llm.layers.0.attn.wq_du.weight": ("F16", np.array([1, 2], np.float16)),
+            "model.llm.layers.0.mlp.experts.w13_weight": ("U8", np.array([7, 7], np.uint8)),
+            "model.llm.norm.weight": ("F32", np.array([0.5, 1.5], np.float32)),
+        },
+    )
+    _shard(
+        tmp_path / "experts-fp4.safetensors",
+        {
+            "layers.0.w13.data": ("U8", np.array([1, 2, 3, 4], np.uint8).reshape(1, 2, 2)),
+            "layers.0.w13.scale": ("U8", np.array([9, 8], np.uint8)),
+        },
+    )
+    _shard(
+        tmp_path / "dense-fp8.safetensors",
+        {"layers.0.attn.data": ("U8", np.array([4, 5, 6, 7], np.uint8))},
+    )
+    _shard(
+        tmp_path / "vision-fp8.safetensors",
+        {"pos.code": ("U8", np.array([3, 1], np.uint8))},
+    )
+    _shard(
+        tmp_path / "mtp.safetensors",
+        {"mtp.block.weight": ("BF16", np.array([0x3F80], np.uint16))},
+    )
+    seal(tmp_path)
+    assert ready(tmp_path)
+    assert list(tmp_path.glob("*.safetensors")) == []
+    resident, experts = open_language(tmp_path)
+    vision = open_vision(tmp_path)
+    try:
+        assert "model.llm.layers.0.attn.wq_du.weight" not in resident.header
+        assert "model.llm.layers.0.mlp.experts.w13_weight" not in resident.header
+        assert np.allclose(resident.vector("model.llm.embed.weight", (1, 2)), [[1.0, -2.0]])
+        assert resident.vector("model.llm.norm.weight", (2,)).tolist() == [0.5, 1.5]
+        assert experts.span("layers.0.w13.data", (1, 2, 2)) == (0, 4)
+        assert experts.blob(0, 4) == b"\x01\x02\x03\x04"
+        assert experts.span("layers.0.w13.scale", (2,)) == (4, 2)
+        assert vision is not None
+        assert vision.blob(0, 2) == b"\x03\x01"
+    finally:
+        resident.close()
+        experts.close()
+        if vision is not None:
+            vision.close()
+    body = json.loads((tmp_path / "manifest.json").read_text())
+    drafter = RawFile(tmp_path / "mtp.bin", body["mtp"])
+    try:
+        assert drafter.header["mtp.block.weight"]["dtype"] == "F16"
+        assert np.allclose(drafter.vector("mtp.block.weight", (1,)), [1.0])
+    finally:
+        drafter.close()
+    files = [
+        File("model-00001-of-00001.safetensors", 99, "abc"),
+        File("config.json", len(config), None),
+    ]
+    assert remaining_download(tmp_path, files) == 0
+    (tmp_path / "model.safetensors.index.json").write_text("{}\n")
+    publish(tmp_path)
+    assert not (tmp_path / "model.safetensors.index.json").is_file()
+
+
+def test_a_cached_still_does_not_load_the_tower(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from favlo.console import format_note
+    from favlo.vision_cache import store_cache
+    from inkling_2_mini.metal41 import vision
+
+    blob = b"still"
+    rows = np.zeros((2, vision.TEXT), np.float16)
+    (tmp_path / "config.json").write_text("{}\n")
+    store_cache(vision._cache_file(tmp_path, blob), {"rows": rows})
+    notes: list[str] = []
+    runtime = SimpleNamespace(
+        root=tmp_path,
+        _owner="test",
+        _vision_plan=[(0, 2, blob)],
+        _note=lambda topic, **fields: notes.append(format_note(topic, **fields)),
+    )
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("tower")
+
+    monkeypatch.setattr(vision, "Tower", boom)
+    monkeypatch.setattr(vision.memory, "upload", lambda data, owner: data)
+    vision.bind_vision(runtime, [1, 2], 0, 0)
+    assert notes == ["vision cache 2"]
+    notes.clear()
+    vision.bind_vision(runtime, [1, 2], 2, 0)
+    assert notes == ["vision cached 2"]
+    assert runtime._vision_bank is None
 
 
 def test_mxfp8_scale_covers_the_block_peak() -> None:

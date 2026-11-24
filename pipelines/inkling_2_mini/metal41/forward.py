@@ -15,6 +15,7 @@ gates.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +111,18 @@ def dispatch_gram_wave(
     )
 
 
+def piece_length(prompt: Sequence[int], applied: int, room: int, rows: int, marker: int) -> int:
+    """Tokens to apply next. A user-message marker ends the piece when text still follows it."""
+    stop = min(room, rows)
+    if stop < 1:
+        return 0
+    end = min(applied + stop, len(prompt) - 1)
+    for index in range(applied, end):
+        if prompt[index] == marker:
+            return index + 1 - applied
+    return stop
+
+
 class InklingRuntime:
     """One open checkpoint. ``generate`` prefills then decodes a token list."""
 
@@ -151,8 +164,10 @@ class InklingRuntime:
         self.prefix = None
         self.atlas = None
         self._states: list[Any] = []
+        from inkling_2_mini.metal41.record import ready
+
         weight = self.root / "model-00001-of-00001.safetensors"
-        if not weight.is_file():
+        if not ready(self.root) and not weight.is_file():
             message = "Inkling checkpoint is not in the models folder"
             raise FileNotFoundError(message)
         self.max_memory = memory.budget()
@@ -253,21 +268,28 @@ class InklingRuntime:
         self._publish_load()
 
     def _opening_bytes(self) -> int:
-        """Checkpoint and expert pack plus the largest working set."""
+        """Resident record and expert record plus the largest working set."""
+        from inkling_2_mini.metal41.record import EXPERTS, RESIDENT, ready
         from inkling_2_mini.metal41.resident import EXPERT_PACK
 
         total = 0
-        checkpoint = self.root / "model-00001-of-00001.safetensors"
-        from inkling_2_mini.metal41.weights import DENSE_PACK
+        if ready(self.root):
+            for name in (RESIDENT, EXPERTS):
+                path = self.root / name
+                if path.is_file():
+                    total += path.stat().st_size
+        else:
+            checkpoint = self.root / "model-00001-of-00001.safetensors"
+            from inkling_2_mini.metal41.weights import DENSE_PACK
 
-        experts = getattr(self, "packs", self.root) / EXPERT_PACK
-        dense = getattr(self, "packs", self.root) / DENSE_PACK
-        if checkpoint.is_file():
-            total += checkpoint.stat().st_size
-        if experts.is_file():
-            total += experts.stat().st_size
-        if dense.is_file():
-            total += dense.stat().st_size
+            experts = getattr(self, "packs", self.root) / EXPERT_PACK
+            dense = getattr(self, "packs", self.root) / DENSE_PACK
+            if checkpoint.is_file():
+                total += checkpoint.stat().st_size
+            if experts.is_file():
+                total += experts.stat().st_size
+            if dense.is_file():
+                total += dense.stat().st_size
         total += self._footprint(CONTEXTS[0], CHUNK)
         return max(total, 1)
 
@@ -1079,8 +1101,8 @@ class InklingRuntime:
             [u32(tokens), u32(HIDDEN)],
             tokens * HIDDEN,
         )
-        self._scatter_vision(pos0, tokens)
         self._rmsnorm(self.scratch, self.weights.embed_norm, self.embed, tokens)
+        self._scatter_vision(pos0, tokens)
         self._block(range(0, 6), [self.embed], None, pos0, tokens, self.prelude, 0)
         prev: tuple[Any, Any] | None = None
         for pass_id in range(3):
@@ -1339,18 +1361,30 @@ class InklingRuntime:
     # ------------------------------------------------------------------
     # Generate
 
-    def _prefill(self, fresh: list[int], pos: int, temperature: float, device_pick: bool) -> None:
+    def _prefill(
+        self,
+        prompt: list[int],
+        fresh: list[int],
+        pos: int,
+        temperature: float,
+        device_pick: bool,
+    ) -> None:
         offset = 0
         last = 0
         while offset < len(fresh):
-            piece = fresh[offset : offset + self.rows]
+            applied = pos + offset
+            count = piece_length(
+                prompt, applied, len(fresh) - offset, self.rows, self._user_marker()
+            )
+            piece = fresh[offset : offset + count]
             memory.store(self.tokens, 0, np.asarray(piece, dtype=np.uint32).tobytes())
             self.session.begin()
             try:
-                self._run(len(piece), pos + offset, self.tokens)
+                self._run(len(piece), applied, self.tokens)
                 last = len(piece)
                 offset += last
                 self._note_prefill(offset)
+                self._store_user_boundary(prompt, applied + last)
                 if offset >= len(fresh):
                     self._head(last - 1)
                     if device_pick:
@@ -1359,6 +1393,28 @@ class InklingRuntime:
                 self.session.end()
             if self._stopped():
                 raise RequestClosed()
+
+    def _user_marker(self) -> int:
+        found = getattr(self, "_user_marker_id", None)
+        if isinstance(found, int):
+            return found
+        from inkling_2_mini.portable.chat import load_tokenizer
+
+        encoded = load_tokenizer(self.root).encode("<|message_user|>").ids
+        if len(encoded) != 1:
+            message = "the user message marker is not one token"
+            raise RuntimeError(message)
+        self._user_marker_id = encoded[0]
+        return encoded[0]
+
+    def _store_user_boundary(self, prompt: list[int], filled: int) -> None:
+        """Write the device state at a user-message marker so a later edit can resume there."""
+        if filled <= 0 or filled >= len(prompt) or prompt[filled - 1] != self._user_marker():
+            return
+        self._filled = filled
+        self._ids = list(prompt[:filled])
+        self.prefix.note(self._ids)
+        self._store_prefix()
 
     def generate(
         self,
@@ -1417,7 +1473,7 @@ class InklingRuntime:
             self._prefill_progress = prefill_row
             self._prefill_done = 0
             try:
-                self._prefill(fresh, pos, temperature, device_pick)
+                self._prefill(tokens, fresh, pos, temperature, device_pick)
             except RequestClosed:
                 self.prefix.tokens = []
                 self.prefix.dirty = False
@@ -1512,7 +1568,7 @@ class InklingRuntime:
             return
         self.session.launch(
             "vision_scatter",
-            [self.scratch, bank, slots],
+            [self.embed, bank, slots],
             [u32(pos0), u32(tokens), u32(HIDDEN)],
             tokens * HIDDEN,
         )

@@ -83,6 +83,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _bake(folder: Path | None = None) -> int:
+    from inkling_2_mini.metal41.record import publish, ready
     from inkling_2_mini.metal41.resident import bake
     from inkling_2_mini.metal41.vision import ensure_pack
 
@@ -91,11 +92,15 @@ def _bake(folder: Path | None = None) -> int:
     def note(line: str) -> None:
         print(line, flush=True)
 
+    if ready(root):
+        publish(root, log=note)
+        return 0
     bake(root, log=note)
     ensure_pack(root, log=note)
     from inkling_2_mini.metal41.weights import ensure_dense
 
     ensure_dense(root, log=note)
+    publish(root, log=note)
     return 0
 
 
@@ -594,9 +599,11 @@ def _setup(args: argparse.Namespace) -> int:
         try:
             files = list_files(repo=repo)
         except (OSError, RuntimeError, ValueError) as exc:
+            from inkling_2_mini.metal41.record import ready
+
             present = (folder / "config.json").is_file() and (
-                folder / "model-00001-of-00001.safetensors"
-            ).is_file()
+                ready(folder) or (folder / "model-00001-of-00001.safetensors").is_file()
+            )
             if not present:
                 raise
             files = []
@@ -625,23 +632,38 @@ def _setup(args: argparse.Namespace) -> int:
         if any(name.startswith("model-") and name.endswith(".safetensors") for name in fetched):
             from inkling_2_mini.metal41.calibration import HESSIANS_NAME
             from inkling_2_mini.metal41.gptq import PACK_NAME
+            from inkling_2_mini.metal41.record import EXPERTS, MANIFEST, MTP, RESIDENT, VISION
             from inkling_2_mini.metal41.resident import EXPERT_PACK
             from inkling_2_mini.metal41.vision import PACK_NAME as VISION_PACK
+            from inkling_2_mini.metal41.weights import DENSE_PACK
 
-            for stale in (PACK_NAME, HESSIANS_NAME, EXPERT_PACK, VISION_PACK):
+            for stale in (
+                PACK_NAME,
+                HESSIANS_NAME,
+                EXPERT_PACK,
+                VISION_PACK,
+                DENSE_PACK,
+                MANIFEST,
+                RESIDENT,
+                EXPERTS,
+                VISION,
+                MTP,
+            ):
                 (folder / stale).unlink(missing_ok=True)
             experts_ready = False
         from inkling_2_mini.metal41.repack import repack
 
         repack(folder, log=ui.log)
         register_folder(folder, alias="inkling_2_mini" if name == FOLDER else None)
-        if not experts_ready:
+        from inkling_2_mini.metal41.record import publish, ready
+
+        if ready(folder):
+            publish(folder, log=ui.log)
+        elif not experts_ready:
             ui.log("baking the expert fp4 planes")
             _bake(folder)
         else:
-            from inkling_2_mini.metal41.vision import ensure_pack
-
-            ensure_pack(folder, log=ui.log)
+            publish(folder, log=ui.log)
         ui.log(f"registered {folder.name}")
         return 0
     except (OSError, RuntimeError, ValueError) as exc:

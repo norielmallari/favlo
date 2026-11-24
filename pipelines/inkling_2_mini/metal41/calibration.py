@@ -937,9 +937,13 @@ def calibrate(
     folder: Path, *, limit: int = SEQUENCE_LENGTH, reuse: bool = False, log: Any = print
 ) -> Path:
     """Write Metal fp4 experts. Layers 0–19 are GPTQ-FOEM. Layers 20–23 are copied."""
+    from inkling_2_mini.metal41.record import MANIFEST, publish
     from inkling_2_mini.metal41.session import Session
 
     folder = Path(folder)
+    if not checkpoint_file(folder).is_file():
+        message = "calibrate reads the language shard"
+        raise FileNotFoundError(message)
     _drop_dense_fp4(folder)
     ensure_dense(folder, log=log)
     probe = Session("inkling_2_mini:gptq")
@@ -995,6 +999,8 @@ def calibrate(
         path = _assemble(folder, tensors, log)
     finally:
         tensors.close()
+    (folder / MANIFEST).unlink(missing_ok=True)
+    publish(folder, log=log)
     return path
 
 

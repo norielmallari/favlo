@@ -3,9 +3,8 @@
 Layers 0–19 are NVFP4 in the checkpoint. ``bake`` nearest-rounds them to the
 Metal fp4 the kernels read when the pack is missing. ``calibrate`` writes
 that pack with GPTQ-FOEM instead. Layers 20–23 are copied as stored MXFP8.
-The open then reads ``experts-fp4.safetensors`` straight into device buffers,
-in 8 MiB pieces. Attention and the output projection are read from
-``dense-fp8.safetensors`` the same way.
+``publish`` copies that payload into ``experts.bin``. The open preads
+``experts.bin`` and the attention planes in ``resident.bin`` in 8 MiB pieces.
 """
 
 from __future__ import annotations
@@ -335,11 +334,16 @@ def bake(
 ) -> None:
     """Requant NVFP4 experts once and write the pack the open reads."""
     from favlo.memory import memory
+    from inkling_2_mini.metal41.record import ready as record_ready
     from inkling_2_mini.metal41.session import Session
     from inkling_2_mini.metal41.weights import Tensors, checkpoint_file
 
     base = Path(root)
     pack = Path(dest or root)
+    if record_ready(pack):
+        if log is not None:
+            log("record is current")
+        return
     pack.mkdir(parents=True, exist_ok=True)
     ready = open_expert_pack(pack, base)
     if ready is not None:
