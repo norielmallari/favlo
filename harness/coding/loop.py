@@ -181,9 +181,14 @@ def _still_span(blocks: list[tuple[int, list[str]]]) -> tuple[int, int]:
     if end is None or still is None:
         return 0, len(blocks) - 1
     start = end
-    marker = f"vision merged {still}"
-    for index in range(end + 1):
-        if any(line == marker for line in blocks[index][1]):
+    markers = (
+        f"vision merged {still}",
+        f"vision cache {still}",
+        f"vision cached {still}",
+        f"vision patches {still}",
+    )
+    for index in range(end):
+        if any(line in markers for line in blocks[index][1]):
             start = index
     return start, end
 
@@ -212,16 +217,32 @@ def prefix_problems(
     return []
 
 
+def _resident(request: RequestRate) -> bool:
+    """True when this turn continued a prefix already on device."""
+    hit = request.prefix_hit
+    return (
+        request.prefix_load is None
+        and not request.missed
+        and isinstance(hit, int)
+        and 0 < hit <= request.prompt_tokens
+    )
+
+
 def coding_prefix_holds(
     requests: list[RequestRate], *, preserve_thinking: bool = False
 ) -> bool:
-    """True when the restart loaded from disk and later turns kept a cache hit."""
+    """True when the chain starts held and later turns keep a cache hit.
+
+    The vision span opens on the latest turn that already carried the still.
+    That turn may be a cold prompt, a disk load, or a resident hit. A later
+    disk load may rewind to an earlier boundary when thinking is dropped.
+    """
     from harness.file_session import _applied, _cold_start, _extends, _stored_load
 
     if not requests:
         return False
     first = requests[0]
-    if not (_cold_start(first) or _stored_load(first)):
+    if not (_cold_start(first) or _stored_load(first) or _resident(first)):
         return False
     for previous, current in zip(requests, requests[1:], strict=False):
         if current.missed or current.prefix_hit is None:

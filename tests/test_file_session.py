@@ -5,16 +5,19 @@ from pathlib import Path
 import pytest
 from harness.file_session import (
     RequestRate,
+    _open_agent,
+    boundary_reloaded,
     extensions_hold,
     log_since,
     model_stem,
     parse_requests,
     pipeline_log,
-    boundary_reloaded,
-    preserved_reloaded,
     prefix_was_hit,
+    preserved_reloaded,
     printed_requests,
     read_repository_file,
+    rewrite_note,
+    rewritten_loaded,
     source_files,
 )
 
@@ -225,6 +228,33 @@ def test_prefix_was_hit_requires_a_loaded_prefix() -> None:
     assert preserved_reloaded(previous, applied) is True
     assert preserved_reloaded(previous, suffix) is True
     assert preserved_reloaded(previous, short) is False
+    stored = RequestRate(50102, None, True, "", "", "", 292, "", ())
+    resumed = RequestRate(50278, 31136, False, "", "", "", 10, "", (), 31136)
+    full = RequestRate(50278, 50102, False, "", "", "", 10, "", (), 50102)
+    cold = RequestRate(50278, None, True, "", "", "", 10, "", ())
+    assert rewritten_loaded(stored, resumed) is True
+    assert rewritten_loaded(stored, full) is False
+    assert rewritten_loaded(stored, cold) is False
+    ladder = [
+        RequestRate(160, None, True, "", "", "", 13, "", ()),
+        RequestRate(70824, 173, False, "", "", "", 116, "", (), 173),
+    ]
+    shorter = RequestRate(70970, 46358, False, "", "", "", 13, "", (), 46358)
+    same = RequestRate(70970, 70824, False, "", "", "", 13, "", (), 70824)
+    assert rewrite_note(ladder, shorter) == ""
+    assert extensions_hold([*ladder, shorter]) is False
+    assert rewrite_note(ladder, same) == "prefix was not reloaded"
+
+
+def test_the_file_agent_replays_the_transcript() -> None:
+    _client, agent = _open_agent(
+        "http://127.0.0.1:8129/v1",
+        "inkling_2_mini",
+        None,
+        mtp=None,
+        mtp_depth=3,
+    )
+    assert agent.default_options["store"] is False
 
 
 def test_log_since_keeps_only_the_lines_after_the_mark() -> None:

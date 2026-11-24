@@ -5,7 +5,8 @@ The model id is the pipeline name. ``--thinking on`` is the default and sets
 Sampling stays on the selected model id. ``--mtp``
 sends the draft flag. Omitted, that flag is off. ``--mtp-depth`` is the draft
 length, three when omitted. ``--vision`` is off unless set. When it is set,
-the first chat is the horse still, and a later request must reuse the tower.
+the first chat is the horse still. A cached still is read from disk. A later
+request must reuse that result.
 After the ledger, that same still is sent again, and that request must extend the prefix.
 Each model call prints the reasoning and the reply as the tokens arrive, then
 the tool calls when that call ends. The framework runs the coding tools.
@@ -104,14 +105,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"missing {HORSE.as_posix()}", flush=True)
             return 1
         vision = HORSE.read_bytes()
-        # Drop a prior disk hit so this run's first tower logs ``vision patches``.
-        # The same bytes are written again before the restart load.
-        from favlo.logs import favlo_home
-
-        cache = favlo_home() / "vision-cache" / stem
-        if cache.is_dir():
-            for child in cache.glob("*.npz"):
-                child.unlink(missing_ok=True)
     server = Server(args.max_memory, pipeline=stem)
     try:
         from favlo.registry import resolve

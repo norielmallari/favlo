@@ -156,7 +156,8 @@ def test_the_vision_tower_runs_once() -> None:
     )
     assert vision_problems(held) == []
     assert vision_problems(held + "vision cache 16\n") == []
-    assert vision_problems("vision cache 16\n")
+    assert vision_problems("vision cache 16\n") == []
+    assert vision_problems("prompt tokens 1\n")
     twice = "vision patches 64\nvision patches 64\nvision cached 16\n"
     assert any("ran 2" in item for item in vision_problems(twice))
     early = "vision cache 16\nvision patches 64\n"

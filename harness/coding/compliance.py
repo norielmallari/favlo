@@ -45,7 +45,7 @@ TEXT_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 _MARKUP = ("<think>", "</think>", "<tool_call>", "</tool_call>")
 _INSTRUCTION = "The reply is the single word apple."
 _REPLY = "Name one fruit."
-_LENGTH = "Write a sentence of at least twelve words about a horse."
+_LENGTH = "Write the numbers from 1 to 40 as English words, separated by commas."
 _STOP = "Repeat exactly: alpha STOPWORD omega"
 _REASONING = "Reply with the word oats."
 _REASONING_TOKENS = 256
@@ -375,17 +375,18 @@ def image_turn_problems(text: str, counted: object, width: int, height: int) -> 
 
 
 def vision_problems(log: str) -> list[str]:
-    """The tower encodes the still once. A later request reuses that result.
+    """The tower encodes a still at most once. A cached still is not encoded again.
 
     ``vision cached`` is a copy already inside a loaded prefix. It may precede
     the tower that encodes a later copy of that still. A disk ``vision cache``
     line before the tower means the row file was read before the tower ran.
+    A log with only that disk hit did not run the tower.
     """
     lines = log.splitlines()
     tower = [index for index, line in enumerate(lines) if _TOWER.search(line)]
     reuse = [index for index, line in enumerate(lines) if line.startswith("vision cache")]
     problems: list[str] = []
-    if len(tower) != 1:
+    if len(tower) > 1:
         problems.append(f"the vision tower ran {len(tower)} times")
     if not reuse:
         problems.append("a later request did not reuse the vision tower")

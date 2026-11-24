@@ -64,6 +64,21 @@ prefill 1.00 tok/s (8 tok in 8.00s)
 decode 1.00 tok/s (1 tok in 1.00s)
 """
     assert prefix_problems(parse_requests(memory)) == ["prefix was not loaded from disk"]
+    resident = """\
+prompt tokens 3370
+cache hit 3311
+prefill 1.00 tok/s (59 tok in 1.00s)
+decode 1.00 tok/s (41 tok in 1.00s)
+prefix load 2228 tokens
+prompt tokens 3445
+cache hit 2228
+prefill 1.00 tok/s (1217 tok in 3.00s)
+decode 1.00 tok/s (195 tok in 12.00s)
+"""
+    assert prefix_problems(parse_requests(resident)) == []
+    assert prefix_problems(parse_requests(resident), preserve_thinking=True) == [
+        "prefix did not extend"
+    ]
     loaded = """\
 prompt tokens 10
 cache miss

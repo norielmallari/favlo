@@ -8,10 +8,15 @@ any pipeline package. The model id is the pipeline name under test.
 and opens the ``:thinking`` card. ``--preserve-thinking`` sends that bool.
 Omitted flags are off. ``--mtp on`` or ``--mtp off`` sends ``favlo:mtp``;
 omitted, the registry row decides. The first completion of each task is
-required to call ``read_file``. The harness reuses ``127.0.0.1:8129``. After
-the first task it unloads the resident model, so the next task loads the
-prefix from disk. Later tasks keep that listener. A request that does not
-extend the stored token ids stops the run. ``--evict`` reads one file under a
+required to call ``read_file``. The request sends ``store`` false, so the
+client keeps the transcript and replays it. The harness reuses
+``127.0.0.1:8129``. After the first task it unloads the resident model, so the
+next task loads the prefix from disk. Later tasks keep that listener. A
+request that does not extend the stored token ids stops the run. After the
+target, one earlier user message in that transcript is shortened and one more
+turn is sent. That turn must load a stored boundary shorter than the previous
+prompt. A cold prefill stops the run.
+``--evict`` reads one file under a
 1-byte scratch budget. With ``preserve_thinking`` off it sends that read again
 from a new agent. With the flag on it sends one more user message on the same
 session, because the pin is the tool turn's generation cut. Exit 0 means that
@@ -355,6 +360,22 @@ def boundary_reloaded(first: RequestRate, replay: RequestRate) -> bool:
     )
 
 
+def rewritten_loaded(previous: RequestRate, replay: RequestRate) -> bool:
+    """True when a shortened earlier user message still loaded a stored boundary.
+
+    The previous prompt is not a prefix of the rewrite. A hit of zero is a
+    cold prefill. A hit that reaches the previous prompt means the edit did
+    not change the stored prefix.
+    """
+    hit = replay.prefix_hit
+    return bool(
+        _stored_load(replay)
+        and hit is not None
+        and 0 < hit < previous.prompt_tokens
+        and hit < replay.prompt_tokens
+    )
+
+
 def preserved_reloaded(previous: RequestRate, replay: RequestRate) -> bool:
     """True when a later user message kept historical thinking and loaded that prefix.
 
@@ -402,6 +423,19 @@ def extensions_hold(requests: list[RequestRate]) -> bool:
         and prefix_so_far(requests)
         and any(request.prefix_load is not None for request in requests[1:])
     )
+
+
+def rewrite_note(ladder: list[RequestRate], replay: RequestRate) -> str:
+    """Empty when the ladder held and the rewrite loaded a shorter boundary.
+
+    The shortened user message is not a prefix of the previous prompt, so
+    that replay is not an extension of the ladder.
+    """
+    if not extensions_hold(ladder):
+        return "prefix was not loaded from disk"
+    if not rewritten_loaded(ladder[-1], replay):
+        return "prefix was not reloaded"
+    return ""
 
 
 def summed_rate(lines: list[str]) -> tuple[int, float] | None:
@@ -619,6 +653,9 @@ def _open_agent(
     # One tool call, then the framework asks for a reply with tools disabled.
     client.function_invocation_configuration["max_iterations"] = 1
     options: dict[str, object] = {
+        # False keeps the transcript on the session. The rewrite edits one
+        # user message there, and the next request sends that transcript.
+        "store": False,
         "tool_choice": {"mode": "required", "required_function_name": "read_file"},
         "reasoning": {"effort": "medium" if thinking else "none"},
         "max_tokens": REPLY_TOKENS,
@@ -717,6 +754,15 @@ async def run_file_agent(
             turn += 1
             if turn == 1 and index + 1 < len(files):
                 _restart(server, log)
+        if not evict and requests and requests[-1].prompt_tokens >= target:
+            ladder = list(requests)
+            _restart(server, log)
+            _shorten_earlier_user(session)
+            replay = await _replay_rewritten(agent, session, log, server, model, printer)
+            requests = [*ladder, replay]
+            print(format_request(len(requests), replay), flush=True)
+            note = rewrite_note(ladder, replay)
+            return RunResult(requests, True, note == "", note)
         if evict:
             if not requests or not prefix_so_far(requests):
                 note = "prefix did not extend\n" + _completions(log)
@@ -846,6 +892,61 @@ async def _replay_first(
     requests = _wait_requests(log, before, server, model=model)
     # The tool round's second call is the file analysis. The boundary load is
     # the first call, the same short read as the opening request.
+    return requests[before]
+
+
+def _shorten_earlier_user(session: object) -> None:
+    """Drop one character from an earlier user message. The marker before it stays."""
+    memory = getattr(session, "state", None)
+    history = memory.get("in_memory") if isinstance(memory, dict) else None
+    messages = history.get("messages") if isinstance(history, dict) else None
+    if not isinstance(messages, list):
+        message = "the session has no transcript"
+        raise RuntimeError(message)
+    users = [item for item in messages if getattr(item, "role", None) == "user"]
+    if not users:
+        message = "the session has no user message"
+        raise RuntimeError(message)
+    target = users[-2] if len(users) > 1 else users[0]
+    part = next(
+        (
+            item
+            for item in getattr(target, "contents", ())
+            if getattr(item, "type", None) == "text" and getattr(item, "text", "")
+        ),
+        None,
+    )
+    if part is None or len(part.text) < 2:
+        message = "the user message is too short to rewrite"
+        raise RuntimeError(message)
+    middle = len(part.text) // 2
+    part.text = part.text[:middle] + part.text[middle + 1 :]
+    extra = getattr(target, "additional_properties", None)
+    group = extra.get("_group") if isinstance(extra, dict) else None
+    if isinstance(group, dict):
+        group.pop("token_count", None)
+        group.pop("token_count_basis", None)
+
+
+async def _replay_rewritten(
+    agent: Agent,
+    session: object,
+    log: Log,
+    server: Server,
+    model: str,
+    printer: TurnPrinter,
+) -> RequestRate:
+    """One more turn after an earlier user message was shortened."""
+    print("replay rewritten user message", flush=True)
+    before = len(_model_requests(log, model))
+    stream = agent.run(
+        "Name one file you read.",
+        stream=True,
+        session=session,
+    )
+    async for update in stream:
+        printer.take(update)
+    requests = _wait_requests(log, before, server, model=model)
     return requests[before]
 
 
