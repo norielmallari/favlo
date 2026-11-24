@@ -209,7 +209,7 @@ The daemon records the resident pipeline process.
 - Each pipeline packs its own buffers into those regions and copies a matching file back.
 - A prompt that extends the live tokens keeps the device.
 - Any other prompt loads the longest stored prefix that pipeline accepts.
-- One model and one checkpoint stay within 32 GiB.
+- The whole `~/.favlo/prefix` tree stays within 32 GiB.
 - The note is [docs/prefix.md](docs/prefix.md).
 
 ## Development

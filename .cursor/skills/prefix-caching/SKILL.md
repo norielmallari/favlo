@@ -13,13 +13,13 @@ Another pipeline's adapter, region names, and pack functions are not a reference
 
 | Piece | Owner |
 |---|---|
-| Directory, header hash, page alignment, atomic replace, longest token prefix, copy-forward, 32 GiB budget | `favlo.prefix` |
+| Directory, header hash, page alignment, atomic replace, longest token prefix, copy-forward, global 32 GiB budget | `favlo.prefix` |
 | Which bytes are a region, and whether a header can continue a prompt | this pipeline's adapter |
 | When the live sequence is written or loaded | `PrefixSession`, or this pipeline's `align` when it has extra device policy |
 
 `longest()` reads every region into memory. The request path uses `matches()` and the adapter. A region name is unique inside one record. The store sorts names when it writes.
 
-The directory is `~/.favlo/prefix/<model>/<checkpoint>/<hash>.bin`. `<model>` is this pipeline's flag stem. The tag is the active key/value mode. The digest is `checkpoint_digest(root)`. Pass `budget=DEFAULT_BUDGET`. A file whose header does not parse is removed when the store opens. A file for another model, digest, or tag is ignored.
+The directory is `~/.favlo/prefix/<model>/<checkpoint>/<hash>.bin`. `<model>` is this pipeline's flag stem. The tag is the active key/value mode. The digest is `checkpoint_digest(root)`. Pass `budget=DEFAULT_BUDGET`. That budget caps every `.bin` under the store root (`~/.favlo/prefix`, or one scratch name), not one model alone. A file whose header does not parse is removed when the store opens. A file for another model, digest, or tag is ignored by lookup.
 
 ## Adapter
 

@@ -13,9 +13,10 @@ in the same directory and replaces the destination after the header hash is
 in place. A crash leaves the previous complete file. When the new token list
 extends a file already in the directory, a region whose stored bytes are a
 prefix of the new blob is copied forward and the new tail is written after
-it. The partition for one model and one checkpoint is kept to 32 GiB when a
-budget is set. Past that, the oldest files are deleted. The file just written
-stays, and so does the one file named in ``pinned``.
+it. The store root (``~/.favlo/prefix``, or one scratch name) is kept to
+32 GiB when a budget is set. Past that, the oldest files under that root are
+deleted, across every model and checkpoint. The file just written stays, and
+so does every file named in a ``pinned`` sidecar under the root.
 """
 
 from __future__ import annotations
@@ -122,7 +123,10 @@ class PrefixHeader:
 
 
 class PrefixStore:
-    """One model and one checkpoint. Lookup reads headers, then one file."""
+    """One model and one checkpoint. Lookup reads headers, then one file.
+
+    Eviction applies ``budget`` to every ``.bin`` under ``root``.
+    """
 
     def __init__(
         self,
@@ -144,6 +148,7 @@ class PrefixStore:
         self.digest = digest_bytes
         self.tag = tag
         self.budget = budget
+        self.root = directory
         self.directory = directory / model / digest_bytes.hex()
         self._clear_temps()
 
@@ -211,7 +216,7 @@ class PrefixStore:
         )
 
     def pin(self, path: Path) -> None:
-        """Keep ``path`` when a later save evicts older files in this partition.
+        """Keep ``path`` when a later save evicts older files under this root.
 
         The name is one line in ``pinned`` beside the ``.bin`` files, so a new
         process still protects it. A later pin replaces that name.
@@ -234,12 +239,14 @@ class PrefixStore:
     def _evict(self, keep: Path) -> None:
         if self.budget is None:
             return
-        pinned = self.pinned_path()
-        files = [path for path in self.directory.glob("*.bin") if path.is_file()]
+        if not self.root.is_dir():
+            return
+        pinned = _pinned_under(self.root)
+        files = [path for path in self.root.rglob("*.bin") if path.is_file()]
         files.sort(key=lambda path: path.stat().st_mtime)
         total = sum(path.stat().st_size for path in files)
         for path in files:
-            if total <= self.budget or path == keep or path == pinned:
+            if total <= self.budget or path == keep or path in pinned:
                 continue
             size = path.stat().st_size
             path.unlink(missing_ok=True)
@@ -331,22 +338,25 @@ def aim_session(
     budget: int | None,
     scratch: str | None,
 ) -> None:
-    """Point one live store at a scratch partition, or leave it on the home partition.
+    """Point one live store at a scratch forest, or leave it on the home forest.
 
     A scratch name keeps the run out of ``~/.favlo/prefix``. The budget is that
-    partition's byte cap. One byte keeps the file just written and the pinned
-    file. A later request with no scratch name returns the store to the home
-    partition.
+    forest's byte cap across every model and checkpoint under it. One byte keeps
+    the file just written and every pinned file. A later request with no scratch
+    name returns the store to the home forest.
     """
     store = session.store
-    home = default_prefix_dir() / store.model / store.digest.hex()
+    home_root = default_prefix_dir()
+    home = home_root / store.model / store.digest.hex()
     if scratch:
         if _SCRATCH_NAME.fullmatch(scratch) is None:
             message = "prefix scratch name is not allowed"
             raise ValueError(message)
-        dest = default_prefix_dir().parent / "prefix-scratch" / scratch / store.model / store.digest.hex()
+        forest = home_root.parent / "prefix-scratch" / scratch
+        dest = forest / store.model / store.digest.hex()
         cap = 1 if budget is None else budget
     elif getattr(store, "_scratch", False):
+        forest = home_root
         dest = home
         cap = DEFAULT_BUDGET if budget is None else budget
     elif budget is not None:
@@ -360,8 +370,29 @@ def aim_session(
         session.dirty = False
         session.loaded = False
         session.adapter.reset()
+    store.root = forest
     store._scratch = bool(scratch)
     store.budget = cap
+
+
+def _pinned_under(root: Path) -> set[Path]:
+    """Every ``pinned`` sidecar target under ``root`` that still exists."""
+    found: set[Path] = set()
+    if not root.is_dir():
+        return found
+    for sidecar in root.rglob("pinned"):
+        if not sidecar.is_file():
+            continue
+        try:
+            name = sidecar.read_text(encoding="ascii").strip()
+        except OSError:
+            continue
+        if not name or "/" in name or name.startswith("."):
+            continue
+        path = sidecar.parent / name
+        if path.is_file():
+            found.add(path)
+    return found
 
 
 def checkpoint_digest(root: Path) -> bytes:

@@ -106,7 +106,7 @@ Dense hybrid text backbone: 24 Gated DeltaNet layers and 8 full-attention layers
 - The next user message shares the user-turn file.
 - A simple follow-up shares the generation cut, including a still that sits inside it.
 - With the flag on, the user-turn cut is not written.
-- A request `favlo:prefix_scratch` stores that run under `~/.favlo/prefix-scratch/<name>`, and `favlo:prefix_budget` is that partition's byte cap.
+- A request `favlo:prefix_scratch` stores that run under `~/.favlo/prefix-scratch/<name>`, and `favlo:prefix_budget` is that forest's byte cap.
 
 - Prefill is a 1024-token Metal tile.
 - The FFN gate, up, and down planes and the GDN qkv, z, and out planes run int8: `restore_fp8_i8` collapses each fp8 weight row to int8 codes and one channel scale, `quantize_half_i8` does the same per activation row, `prefill_i8_n64` (`prefill_i8_m32` for down) is the int8×int8→int32 `matmul2d`, and `scale_i8_f32` rewrites the accumulators as floats (a 2012-token prompt prefilled at 1730 tok/s against 1520 tok/s on `matmul_fp8`, 2 November 2026).
