@@ -713,6 +713,58 @@ def test_vision_grid_and_expand() -> None:
     assert float(np.max(np.abs(back - matrix))) < 0.08 * peak + 1e-3
 
 
+def test_a_copied_image_sentinel_stays_text() -> None:
+    import pytest
+
+    from inkling_2_mini.metal41.vision import IMAGE_TOKEN
+    from inkling_2_mini.portable.chat import encode_chat, shield_image_sentinel
+
+    text = "see <|unused_200054|> in the file"
+    shielded = shield_image_sentinel(
+        [
+            {
+                "role": "tool",
+                "content": text,
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "read_file",
+                            "arguments": {"body": text},
+                        }
+                    }
+                ],
+            }
+        ]
+    )
+    assert "<|unused_200054|>" not in json.dumps(shielded)
+    assert "unused_200054" in shielded[0]["content"]
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,aaaa"}}
+    kept = shield_image_sentinel(
+        [{"role": "user", "content": [{"type": "text", "text": text}, image]}]
+    )
+    assert "<|unused_200054|>" not in kept[0]["content"][0]["text"]
+    assert kept[0]["content"][1] == image
+    root = Path(__file__).resolve().parents[1] / "models" / "Inkling-2-Mini-fp4-gptq-foem"
+    if not (root / "tokenizer.json").is_file():
+        pytest.skip("checkpoint tokenizer is not present")
+    copied = encode_chat(
+        root,
+        [{"role": "user", "content": text}],
+        [{"type": "function", "function": {"name": "read_file", "description": text, "parameters": {}}}],
+        False,
+        effort="none",
+    )
+    assert IMAGE_TOKEN not in copied
+    pictured = encode_chat(
+        root,
+        [{"role": "user", "content": [{"type": "text", "text": "look"}, image]}],
+        None,
+        False,
+        effort="none",
+    )
+    assert pictured.count(IMAGE_TOKEN) == 1
+
+
 def test_repo_id_accepts_the_public_link() -> None:
     assert _repo_id("https://huggingface.co/thinkingmachines/Inkling-2-Mini") == (
         "thinkingmachines/Inkling-2-Mini"

@@ -41,6 +41,9 @@ from inkling_2_mini.portable.sampling import (
 PIPELINE = "inkling_2_mini"
 EOS = 200006
 STOP = {EOS}
+_IMAGE_SENTINEL = "<|unused_200054|>"
+_IMAGE_TEXT = "<|\u200bunused_200054|>"
+_IMAGE_PARTS = frozenset({"image", "input_image", "image_url"})
 _LOAD_LOCK = threading.Lock()
 _TOKENIZERS: dict[str, Tokenizer] = {}
 _TEMPLATES: dict[str, Any] = {}
@@ -82,6 +85,26 @@ def _chat_template(root: Path) -> Any:
         return found
 
 
+def shield_image_sentinel(value: Any) -> Any:
+    """Keep a copied image sentinel as text.
+
+    The template emits ``<|unused_200054|>`` for an image part. The same spelling
+    inside a tool result or a message is text, and the tokenizer would otherwise
+    read it as an image token.
+    """
+    if isinstance(value, str):
+        if _IMAGE_SENTINEL not in value:
+            return value
+        return value.replace(_IMAGE_SENTINEL, _IMAGE_TEXT)
+    if isinstance(value, list):
+        return [shield_image_sentinel(item) for item in value]
+    if isinstance(value, dict):
+        if value.get("type") in _IMAGE_PARTS:
+            return value
+        return {key: shield_image_sentinel(item) for key, item in value.items()}
+    return value
+
+
 def _objects(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The template rejects a tool-call argument that is still a JSON string."""
     copied: list[dict[str, Any]] = []
@@ -103,7 +126,7 @@ def _objects(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     clone["function"] = function
                 shaped.append(clone)
             item["tool_calls"] = shaped
-        copied.append(item)
+        copied.append(shield_image_sentinel(item))
     return copied
 
 
@@ -126,7 +149,7 @@ def encode_chat(
     chosen = effort if effort is not None else ("high" if thinking else "none")
     text = _chat_template(root).render(
         messages=_objects(messages),
-        tools=_declared_tools(tools),
+        tools=shield_image_sentinel(_declared_tools(tools)),
         reasoning_effort=template_effort(chosen),
     )
     if opening is None:
