@@ -20,7 +20,7 @@ from inkling_2_mini.metal41.calibration import (
 from inkling_2_mini.metal41.codec import e4m3_to_float, nvfp4_row
 from inkling_2_mini.metal41.commands import _repo_id, register_folder
 from inkling_2_mini.metal41.fetch import File, keep, remaining_download, shortfall
-from inkling_2_mini.metal41.forward import piece_length
+from inkling_2_mini.metal41.forward import extend_past_template, piece_length
 from inkling_2_mini.metal41.gptq import (
     PACK_FORMAT,
     PACK_NAME,
@@ -45,6 +45,7 @@ from inkling_2_mini.metal41.prefix import (
     VISITS,
     InklingPrefix,
     cache_slots,
+    template_boundary,
     visit_rows,
 )
 from inkling_2_mini.metal41.resident import (
@@ -160,6 +161,28 @@ def test_a_user_marker_ends_the_prefill_piece() -> None:
     assert piece_length(prompt, 3, 4, 8, marker) == 3
     assert piece_length(prompt, 0, 2, 8, marker) == 2
     assert piece_length(prompt, 6, 1, 8, marker) == 1
+
+
+def test_a_template_boundary_is_only_the_first_marker() -> None:
+    marker = 7
+    assert template_boundary([1, 1, marker], marker)
+    assert not template_boundary([1, marker, 2, marker], marker)
+    assert not template_boundary([1, 2, 3], marker)
+
+
+def test_the_first_user_marker_stays_in_the_piece() -> None:
+    marker = 7
+    prompt = [1, 1, marker, 2, 2, marker, 3]
+    first = piece_length(prompt, 0, 7, 8, marker)
+    assert extend_past_template(prompt, 0, first, 7, 8, marker) == 6
+    second = piece_length(prompt, 3, 4, 8, marker)
+    assert extend_past_template(prompt, 3, second, 4, 8, marker) == 3
+    only = [1, marker, 4, 4]
+    opened = piece_length(only, 0, 4, 8, marker)
+    assert extend_past_template(only, 0, opened, 4, 8, marker) == 4
+    long = [1, marker, *range(20)]
+    started = piece_length(long, 0, 20, 8, marker)
+    assert extend_past_template(long, 0, started, 20, 8, marker) == 8
 
 
 def test_prefix_keeps_the_window_tail_of_local_visits(monkeypatch, tmp_path) -> None:

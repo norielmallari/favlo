@@ -12,6 +12,7 @@ file is never sampled.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from favlo.memory import memory
@@ -45,6 +46,11 @@ def cache_slots(layer: int, context: int) -> int:
     if layer in FULL_LAYERS:
         return context
     return min(WINDOW, context)
+
+
+def template_boundary(tokens: Sequence[int], marker: int) -> bool:
+    """True when ``tokens`` ends on the first user marker and no earlier one."""
+    return bool(tokens) and tokens[-1] == marker and marker not in tokens[:-1]
 
 
 def visit_rows(visit: int, count: int) -> tuple[int, int]:
@@ -150,7 +156,11 @@ class InklingPrefix:
 
     def accept(self, header: PrefixHeader, prompt: list[int]) -> bool:
         count = len(header.tokens)
-        return 0 < count < len(prompt) and count < self.runtime.context
+        if not (0 < count < len(prompt) and count < self.runtime.context):
+            return False
+        # The first user marker is only the chat template. Every one-turn
+        # prompt shares it, so reloading that file is not a resumed message.
+        return not template_boundary(header.tokens, self.runtime._user_marker())
 
 
 def open_prefix(runtime: Any) -> PrefixSession:

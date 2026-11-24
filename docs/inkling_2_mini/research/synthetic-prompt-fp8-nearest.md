@@ -63,3 +63,14 @@ Keys and values are `half`. The banner printed `kv half`, `mtp off`, and `thinki
 ## Corrections
 
 Later finds are appended here. The sections above stay as committed.
+
+24 November 2026. The same command, cold misses, nonce `92452b72`. A one-turn prompt no longer ends the prefill piece at the first user marker.
+
+| Prompt tokens | Prefill | Decode | End to end |
+|---:|---|---|---|
+| 512 | 1212.17 tok/s (512 tok in 0.42 s) | 50.66 tok/s (128 tok in 2.53 s) | 216.95 tok/s (640 tok in 2.95 s) |
+| 1024 | 1401.54 tok/s (1024 tok in 0.73 s) | 50.03 tok/s (128 tok in 2.56 s) | 350.15 tok/s (1152 tok in 3.29 s) |
+| 4096 | 1434.99 tok/s (4096 tok in 2.85 s) | 47.43 tok/s (128 tok in 2.70 s) | 761.08 tok/s (4224 tok in 5.55 s) |
+| 10000 | 1324.34 tok/s (10000 tok in 7.55 s) | 47.41 tok/s (128 tok in 2.70 s) | 988.10 tok/s (10128 tok in 10.25 s) |
+
+Search on 24 November 2026: "Inkling-2-Mini 1212.17 OR 1401.54 OR 1434.99 OR 1324.34 tok/s prefill M5 Pro 2026". The search did not find 1212.17, 1401.54, 1434.99, or 1324.34. The predecessors in the sections above are the overlaps that query returned.

@@ -123,6 +123,26 @@ def piece_length(prompt: Sequence[int], applied: int, room: int, rows: int, mark
     return stop
 
 
+def extend_past_template(
+    prompt: Sequence[int], applied: int, count: int, room: int, rows: int, marker: int
+) -> int:
+    """Keep the first user marker in this piece.
+
+    That marker is the chat template. Ending the piece there runs the forward
+    again and stores a prefix every later one-turn prompt shares. A later
+    marker still ends the piece.
+    """
+    end = applied + count
+    if count < 1 or end >= len(prompt) or prompt[end - 1] != marker:
+        return count
+    if marker in prompt[: end - 1]:
+        return count
+    room_left = min(room, rows) - count
+    if room_left < 1:
+        return count
+    return count + piece_length(prompt, end, room_left, rows, marker)
+
+
 class InklingRuntime:
     """One open checkpoint. ``generate`` prefills then decodes a token list."""
 
@@ -1373,8 +1393,15 @@ class InklingRuntime:
         last = 0
         while offset < len(fresh):
             applied = pos + offset
-            count = piece_length(
-                prompt, applied, len(fresh) - offset, self.rows, self._user_marker()
+            marker = self._user_marker()
+            room = len(fresh) - offset
+            count = extend_past_template(
+                prompt,
+                applied,
+                piece_length(prompt, applied, room, self.rows, marker),
+                room,
+                self.rows,
+                marker,
             )
             piece = fresh[offset : offset + count]
             memory.store(self.tokens, 0, np.asarray(piece, dtype=np.uint32).tobytes())

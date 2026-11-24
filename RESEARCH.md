@@ -15,7 +15,7 @@ The model cell is `<id>, MTP off`, or `<id>, MTP on, depth <n>`. Weights is the 
 | `qwen36_35b_a3b, MTP off` | fp8-e30-24h (resident fp8; 3072/10240 experts fp8, rest fp4) | `half` | 691.10 / 71.36 | 998.83 / 71.08 | 1337.47 / 69.31 | 1317.11 / 67.50 | 2026-11-15 | [docs/qwen36_35b_a3b/research/synthetic-prompt-half.md](docs/qwen36_35b_a3b/research/synthetic-prompt-half.md) |
 | `qwen38_27b, MTP off` | fp4-gptq-foem | `half` | 310.49 / 16.70 | 410.11 / 16.48 | 498.10 / 15.79 | 476.25 / 14.86 | 2026-11-23 | [docs/qwen38_27b/research/synthetic-prompt-fp4.md](docs/qwen38_27b/research/synthetic-prompt-fp4.md) |
 | `qwen38_27b, MTP on, depth 3` | fp8-e20 | `half` | 298.20 / 15.99 | 396.65 / 17.27 | 487.60 / 15.80 | 467.52 / 15.33 | 2026-11-19 | [docs/qwen38_27b/research/synthetic-prompt-mtp-half.md](docs/qwen38_27b/research/synthetic-prompt-mtp-half.md) |
-| `inkling_2_mini, MTP off` | fp8-nearest (attn and wo nearest E4M3; head half; experts in layers 0–19 GPTQ-FOEM fp4, 20–23 mxfp8) | `half` | 1188.57 / 50.72 | 1390.37 / 50.06 | 1425.40 / 48.87 | 1332.01 / 47.38 | 2026-11-23 | [docs/inkling_2_mini/research/synthetic-prompt-fp8-nearest.md](docs/inkling_2_mini/research/synthetic-prompt-fp8-nearest.md) |
+| `inkling_2_mini, MTP off` | fp8-nearest (attn and wo nearest E4M3; head half; experts in layers 0–19 GPTQ-FOEM fp4, 20–23 mxfp8) | `half` | 1212.17 / 50.66 | 1401.54 / 50.03 | 1434.99 / 47.43 | 1324.34 / 47.41 | 2026-11-24 | [docs/inkling_2_mini/research/synthetic-prompt-fp8-nearest.md](docs/inkling_2_mini/research/synthetic-prompt-fp8-nearest.md) |
 
 ## Historical
 
