@@ -804,6 +804,9 @@ def _run_once(
             elif drop_embed:
                 drop_runtime(state, args)
             if opened:
+                flush = getattr(getattr(args, "console_ui", None), "flush", None)
+                if callable(flush):
+                    flush()
                 _log(_request_edge("request closed", model))
             module = state.get("module")
             runtime = state.get("runtime")

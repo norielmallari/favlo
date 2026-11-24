@@ -227,6 +227,9 @@ def test_format_note_is_canonical() -> None:
     assert format_note("incoming", tokens=10) == "incoming tokens 10"
     assert format_note("output", tokens=2) == "output tokens 2"
     assert format_note("context", tokens=2048, atlas=10) == "context 2048 atlas 10 images"
+    assert format_note("vision", kind="patches", count=120) == "vision patches 120"
+    assert format_note("vision", kind="cache", count=120) == "vision cache 120"
+    assert format_note("vision", kind="cached", count=4) == "vision cached 4"
     with pytest.raises(ValueError, match="note"):
         format_note("warmup")
 
@@ -846,6 +849,17 @@ def test_json_ticks_while_a_phase_is_still_open() -> None:
             assert not progress.closed
         finally:
             ui.close()
+
+
+def test_flush_returns_after_the_note_is_written() -> None:
+    stream = io.StringIO()
+    ui = Console("json", pipeline="favlo", stream=stream, start_thread=True)
+    try:
+        ui.note("vision", kind="cache", count=120)
+        ui.flush()
+        assert "vision cache 120" in stream.getvalue()
+    finally:
+        ui.close()
 
 
 def test_json_host_emits_begin_before_ticks_and_end() -> None:

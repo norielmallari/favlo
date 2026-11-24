@@ -892,7 +892,12 @@ def _call(
     state = _child_state(message, control, message.get("kind") if isinstance(message.get("kind"), str) else "")
     reply = _ChildReply(proto, control["disconnect"])
     args = SimpleNamespace(max_memory=max_memory, console_ui=console, shutdown=None, lazy=True)
-    call(reply, runtime, body, selection, args, state)
+    try:
+        call(reply, runtime, body, selection, args, state)
+    finally:
+        flush = getattr(console, "flush", None)
+        if callable(flush):
+            flush()
     _emit(
         proto,
         {

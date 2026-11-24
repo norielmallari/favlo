@@ -95,6 +95,12 @@ def format_note(topic: str, **fields: Any) -> str:
         if atlas is None:
             return f"context {int(fields['tokens'])}"
         return f"context {int(fields['tokens'])} atlas {int(atlas)} images"
+    if topic == "vision":
+        kind = fields.get("kind")
+        if kind not in ("patches", "merged", "cached", "cache"):
+            message = "unknown vision note"
+            raise ValueError(message)
+        return f"vision {kind} {int(fields['count'])}"
     message = f"unknown console note {topic}"
     raise ValueError(message)
 
@@ -765,18 +771,16 @@ class Console:
         self._show_cursor()
 
     def flush(self) -> None:
-        """Drain host posts, then the console queue. Tests use this when the thread is off."""
+        """Drain host posts, then the console queue. The call returns after those lines are written."""
         if self._host is not None:
             self._host.flush()
-            self._actions.put(("flush",))
-            self._ensure_thread()
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                if self._actions.empty():
-                    return
-                time.sleep(0.01)
+        if not self._start_thread:
+            self._drain_actions()
             return
-        self._drain_actions()
+        done = threading.Event()
+        self._actions.put(("flush", done))
+        self._ensure_thread()
+        done.wait(2.0)
 
     def _ensure_thread(self) -> None:
         if not self._start_thread:
@@ -818,7 +822,9 @@ class Console:
             elif kind == "remote":
                 self._accept(action[1])
             elif kind == "flush":
-                continue
+                done = action[1] if len(action) > 1 else None
+                if done is not None:
+                    done.set()
 
     def _mirror_key(self, event: dict[str, Any]) -> tuple[Any, str, int | None]:
         request = event.get("request")
@@ -1376,6 +1382,7 @@ def _folded_log(line: str) -> bool:
             "incoming tokens ",
             "output tokens ",
             "context ",
+            "vision ",
         )
     )
 
