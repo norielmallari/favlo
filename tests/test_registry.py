@@ -22,6 +22,7 @@ from favlo.registry import (
     served_model_objects,
     set_alias,
     set_model_mtp,
+    set_pipeline_default,
 )
 
 PIPELINE = "qwen36_35b_a3b"
@@ -181,8 +182,15 @@ def test_choose_complete_lists_models_when_default_is_unset(tmp_path) -> None:
     assert data["default"] == "one:instruct"
     data["extra"] = {"kept": True}
     save_registry(data, tmp_path)
-    with pytest.raises(LookupError, match="pass --model"):
-        choose_complete(model=None, record=None, root=tmp_path, pipeline=PIPELINE)
+    first, again = choose_complete(model=None, record=None, root=tmp_path, pipeline=PIPELINE)
+    assert first.name == "one"
+    assert again is not None and again.folder == "one"
+    set_pipeline_default("two", root=tmp_path)
+    marked, selection = choose_complete(
+        model=None, record=None, root=tmp_path, pipeline=PIPELINE
+    )
+    assert marked.name == "two"
+    assert selection is not None and selection.folder == "two"
     explicit, none = choose_complete(model=None, record=path, root=tmp_path)
     assert explicit == path
     assert none is None

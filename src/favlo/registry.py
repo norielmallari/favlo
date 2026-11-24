@@ -542,7 +542,11 @@ def choose_complete(
     root: Path | None = None,
     pipeline: str | None = None,
 ) -> tuple[Path, Selection | None]:
-    """The record ``complete`` and ``bf16`` open. ``record`` wins when passed."""
+    """The record ``complete`` and ``bf16`` open. ``record`` wins when passed.
+
+    An omitted model uses the row marked ``pipeline_default`` for ``pipeline``,
+    then the first registered folder for that pipeline.
+    """
     if record is not None:
         return record, None
     if not pipeline:
@@ -552,15 +556,11 @@ def choose_complete(
     entries = [
         (folder, entry)
         for folder, entry in data["models"].items()
-        if entry.get("pipeline") == pipeline
+        if isinstance(entry, dict) and entry.get("pipeline") == pipeline
     ]
     if model:
         selection = resolve(model, root=root)
         return selection.path, selection
-    if len(entries) == 1:
-        folder = entries[0][0]
-        record_path = stored_directory(entries[0][1], folder, root)
-        return record_path, _selection(data, folder, folder, None, root)
     if not entries:
         message = (
             "no registered model\n"
@@ -568,9 +568,15 @@ def choose_complete(
             f"or register a record: favlo --{pipeline} models add <folder>"
         )
         raise LookupError(message)
-    listing = format_listing(root)
-    message = f"pass --model\n{listing}"
-    raise LookupError(message)
+    marked = pipeline_default(pipeline, root)
+    if marked:
+        for folder, entry in entries:
+            if folder == marked:
+                record_path = stored_directory(entry, folder, root)
+                return record_path, _selection(data, folder, folder, None, root)
+    folder, entry = entries[0]
+    record_path = stored_directory(entry, folder, root)
+    return record_path, _selection(data, folder, folder, None, root)
 
 
 def _context_length(entry: dict[str, Any]) -> int:
