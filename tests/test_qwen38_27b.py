@@ -74,8 +74,8 @@ def _config() -> dict:
     }
 
 
-def test_mtp_matrices_pack_as_half() -> None:
-    from qwen38_27b.metal41.convert import _half_matrix_entry, _keep_half, _mtp_needs_half
+def test_mtp_matrices_pack_as_fp8() -> None:
+    from qwen38_27b.metal41.convert import _half_matrix_entry, _keep_half, _mtp_needs_half, _pack_array
 
     assert _keep_half("mtp.norm.weight", np.ones(8, dtype=np.float32)) is True
     assert _mtp_needs_half({"mtp.fc.weight": {"dtype": "fp4"}, "lm_head.weight": {"dtype": "fp4"}}) is True
@@ -84,6 +84,12 @@ def test_mtp_matrices_pack_as_half() -> None:
     _blob, body = _half_matrix_entry(np.ones((64, 256), dtype=np.float32))
     assert body["dtype"] == "half"
     assert body["stored_shape"] == [64, 256]
+    matrix = np.ones((64, 256), dtype=np.float32)
+    for name in ("mtp.fc.weight", "lm_head.weight", "model.embed_tokens.weight"):
+        _packed, packed = _pack_array(name, matrix, set())
+        assert packed["dtype"] == "fp8"
+    _packed, projection = _pack_array("model.layers.0.self_attn.q_proj.weight", matrix, set())
+    assert projection["dtype"] == "fp4"
 
 
 def test_a_new_27b_row_defaults_mtp_on(tmp_path: Path) -> None:
@@ -1478,12 +1484,33 @@ def test_stream_sends_an_empty_delta_when_a_prefill_chunk_finishes() -> None:
     assert writers
     assert writers[0] is not sample
     assert writers[0].name == "favlo-stream"
-    assert any(
-        isinstance(payload, dict)
+    empty_at = next(
+        index
+        for index, payload in enumerate(reply.events)
+        if isinstance(payload, dict)
         and payload.get("type") == "response.output_text.delta"
         and payload.get("delta") == ""
-        for payload in reply.events
     )
+    added = [
+        payload
+        for payload in reply.events
+        if isinstance(payload, dict)
+        and payload.get("type") == "response.output_item.added"
+        and payload.get("output_index") == 1
+    ]
+    assert len(added) == 1
+    assert isinstance(added[0].get("item"), dict)
+    assert added[0]["item"].get("type") == "message"
+    assert reply.events.index(added[0]) < empty_at
+    from openai._models import construct_type_unchecked
+    from openai._types import omit
+    from openai.lib.streaming.responses._responses import ResponseStreamState
+    from openai.types.responses import ResponseStreamEvent as RawResponseStreamEvent
+
+    state = ResponseStreamState(input_tools=omit, text_format=omit)
+    for payload in reply.events:
+        event = construct_type_unchecked(type_=RawResponseStreamEvent, value=payload)
+        state.handle_event(event)
 
 
 def test_stream_decodes_off_the_sample_thread() -> None:
@@ -1747,6 +1774,56 @@ def test_openai_tool_call_delta_carries_an_index() -> None:
         if call.function is not None and call.function.arguments
     )
     assert arguments == "{}"
+
+
+def test_tool_call_argument_deltas_arrive_in_pieces() -> None:
+    import json
+
+    pytest.importorskip("openai")
+    from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
+
+    from favlo.responses import ChatWire
+
+    text = "<tool_call>\n<function=locker>\n<parameter=code>\npebble-7</parameter>\n</tool_call>"
+
+    class _Runtime:
+        _hit_limit = False
+        _cached_tokens = 0
+        _prefill_seconds = 0.0
+        _decode_seconds = 1.0
+        _output_ids: list[int] = []
+
+        def decode(self, ids: list[int]) -> str:
+            return text[: len(ids)]
+
+        def generate(self, prompt, limit, stop, **kwargs):
+            del prompt, limit, stop
+            on_token = kwargs["on_token"]
+            for index in range(1, len(text) + 1):
+                on_token(index)
+            self._output_ids = list(range(1, len(text) + 1))
+            return self._output_ids
+
+    from favlo.reply import MemoryReply
+
+    inner = MemoryReply("qwen38_27b")
+    reply = ChatWire(inner)
+    _stream(reply, _Runtime(), [9], [], False, 8, False)
+    pieces = [
+        call.function.arguments
+        for payload in inner.events
+        if (chunk := ChatCompletionChunk.model_validate(payload)).choices
+        and chunk.choices[0].delta.tool_calls
+        for call in chunk.choices[0].delta.tool_calls
+        if call.function is not None and call.function.arguments
+    ]
+    assert len(pieces) >= 2
+    try:
+        opened = json.loads(pieces[0])
+    except json.JSONDecodeError:
+        opened = None
+    assert not isinstance(opened, dict)
+    assert "".join(pieces) == '{"code": "pebble-7"}'
 
 
 def test_tool_call_arguments_join_as_json() -> None:
@@ -2474,17 +2551,19 @@ def test_repack_mtp_replaces_fp4_bytes(tmp_path: Path) -> None:
     packed = json.loads((record / "manifest.json").read_text())
     assert packed["mtp_weight"] == "half"
     assert packed["tensors"]["mtp.fc.weight"]["dtype"] == "half"
+    assert packed["tensors"]["mtp.fc.weight"]["file"] == "mtp.bin"
     assert packed["tensors"]["mtp.fc.weight"]["stored_shape"] == [64, 256]
     assert packed["tensors"]["model.norm.weight"]["dtype"] == "half"
     rewritten = (record / "resident.bin").read_bytes()
     norm = packed["tensors"]["model.norm.weight"]
     start = int(norm["offset"])
     assert rewritten[start : start + tensor_span(norm)] == neighbor
-    assert packed["tensors"]["mtp.fc.weight"]["offset"] == 128
+    assert packed["tensors"]["mtp.fc.weight"]["offset"] == 0
     assert "layout" not in packed
     assert blob not in rewritten
     mtp = packed["tensors"]["mtp.fc.weight"]
     assert tensor_span(mtp) == 64 * 256 * 2
+    assert (record / "mtp.bin").read_bytes()[: tensor_span(mtp)]
     assert not (record / "resident.bin.bak").exists()
     repack_mtp_half(record, source)
     again = json.loads((record / "manifest.json").read_text())
@@ -2512,12 +2591,18 @@ def test_planned_span_matches_the_packed_blob() -> None:
         ("model.layers.0.mlp.gate_proj.weight", np.ones((1, 32), dtype=np.float32), False),
         ("model.layers.0.mlp.gate_proj.weight", np.ones((1, 32), dtype=np.float32), True),
         ("model.layers.0.linear_attn.conv1d.weight", np.ones((2, 3, 4), dtype=np.float32), False),
+        ("model.visual.blocks.0.attn.proj.weight", np.ones((1, 32), dtype=np.float32), False),
+        ("model.visual.blocks.0.norm1.bias", np.ones(4, dtype=np.float32), False),
     ]
     for name, array, fp8 in cases:
         chosen = {0} if fp8 else set()
         blob, body = _pack_array(name, array, chosen)
         assert len(blob) == _planned_span(name, list(array.shape), fp8=fp8)
         assert len(blob) == tensor_span({**body, "offset": 0})
+        if name.endswith("attn.proj.weight") or name == "mtp.fc.weight":
+            assert body["dtype"] == "fp8"
+        if name.endswith("norm1.bias"):
+            assert body["dtype"] == "half"
 
 
 def _bf16_checkout(root: Path, arrays: dict[str, np.ndarray], *, layers: int = 1) -> None:
@@ -2582,11 +2667,9 @@ def test_quantize_writes_layout_two_without_inter_tensor_gaps(tmp_path: Path) ->
     assert order == [
         "model.embed_tokens.bias",
         "model.language_model.norm.weight",
-        "mtp.fc.weight",
         "model.layers.0.mlp.gate_proj.weight",
         "model.layers.0.mlp.up_proj.weight",
         "model.layers.0.mlp.down_proj.weight",
-        "model.visual.proj.bias",
     ]
     raw = (output / "resident.bin").read_bytes()
     cursor = 0
@@ -2602,18 +2685,72 @@ def test_quantize_writes_layout_two_without_inter_tensor_gaps(tmp_path: Path) ->
     assert gate["dtype"] == "fp4"
     assert tensor_span(gate) == gate["data_nbytes"] + gate["scale_pad"] + gate["scale_nbytes"]
     group = group_tensors(tensors, layers=1)
-    copies, stage_base, total = layout_copies(group, mtp=True, wired=(0,))
+    copies, stage_base, total = layout_copies(group, mtp=False, wired=(0,))
     assert total == stage_base
     assert all(file_offset == device for _name, file_offset, device, _span in copies)
-    assert tensors["model.visual.proj.bias"]["offset"] == stage_base
+    mtp = tensors["mtp.fc.weight"]
+    assert mtp["file"] == "mtp.bin"
+    assert mtp["dtype"] == "fp8"
+    assert mtp["offset"] == 0
+    assert packed["mtp_weight"] == "fp8"
+    with_mtp, _stage, mtp_total = layout_copies(group, mtp=True, wired=(0,))
+    assert mtp_total == total + tensor_span(mtp)
+    assert with_mtp[2][0] == "mtp.fc.weight"
+    assert with_mtp[2][1] == 0
+    mtp_raw = (output / "mtp.bin").read_bytes()
+    assert len(mtp_raw) == tensor_span(mtp)
+    vision = tensors["model.visual.proj.bias"]
+    assert vision["file"] == "vision.bin"
+    assert vision["offset"] == 0
+    assert (output / "vision.bin").read_bytes()[: tensor_span(vision)]
     progress = json.loads((output / "quantize_progress.json").read_text())
     assert progress["layout"] == 2
+    vision_raw = (output / "vision.bin").read_bytes()
     (output / "manifest.json").unlink()
     quantize(source, output)
     assert (output / "resident.bin").read_bytes() == raw
+    assert (output / "vision.bin").read_bytes() == vision_raw
+    assert (output / "mtp.bin").read_bytes() == mtp_raw
     again = json.loads((output / "manifest.json").read_text())
     assert again["layout"] == 2
     assert again["tensors"]["model.embed_tokens.bias"]["offset"] == 0
+
+
+def test_layout_two_rewrites_a_tensor_whose_bytes_do_not_match(tmp_path: Path) -> None:
+    import json
+
+    from qwen38_27b.metal41.convert import quantize
+
+    arrays = {
+        "model.visual.proj.bias": np.arange(2, dtype=np.float32),
+        "model.layers.0.mlp.down_proj.weight": np.ones((1, 32), dtype=np.float32),
+        "model.layers.0.mlp.up_proj.weight": np.full((1, 32), 2.0, dtype=np.float32),
+        "model.layers.0.mlp.gate_proj.weight": np.full((1, 32), 3.0, dtype=np.float32),
+        "mtp.fc.weight": np.linspace(-1.0, 1.0, 64 * 64, dtype=np.float32).reshape(64, 64),
+        "model.language_model.norm.weight": np.arange(4, dtype=np.float32) + 10,
+        "model.embed_tokens.bias": np.arange(4, dtype=np.float32),
+    }
+    source = tmp_path / "bf16"
+    output = tmp_path / "packed"
+    _bf16_checkout(source, arrays)
+    quantize(source, output)
+    good = (output / "resident.bin").read_bytes()
+    progress = json.loads((output / "quantize_progress.json").read_text())
+    entry = progress["tensors"]["model.language_model.norm.weight"]
+    offset = int(entry["offset"])
+    torn = bytearray(good)
+    torn[offset] ^= 0xFF
+    (output / "resident.bin").write_bytes(torn)
+    (output / "manifest.json").unlink()
+    quantize(source, output)
+    assert (output / "resident.bin").read_bytes() == good
+    progress = json.loads((output / "quantize_progress.json").read_text())
+    del progress["tensors"]["model.language_model.norm.weight"]["sha256"]
+    (output / "quantize_progress.json").write_text(json.dumps(progress))
+    (output / "resident.bin").write_bytes(torn)
+    (output / "manifest.json").unlink()
+    quantize(source, output)
+    assert (output / "resident.bin").read_bytes() == good
 
 
 def test_finished_manifest_without_layout_is_not_rewritten(tmp_path: Path) -> None:
@@ -2692,12 +2829,30 @@ def test_old_progress_resumes_the_scatter_writer(tmp_path: Path) -> None:
                 "file": "resident.bin",
                 "offset": index * 128,
             }
-        else:
-            shape = [64, 64] if name.startswith("mtp.") else [4]
+        elif name.startswith("model.visual."):
             done[name] = {
                 "dtype": "half",
-                "shape": shape,
-                "stored_shape": shape,
+                "shape": [4],
+                "stored_shape": [4],
+                "file": "vision.bin",
+                "offset": 0,
+            }
+        elif name.startswith("mtp."):
+            done[name] = {
+                "dtype": "fp8",
+                "shape": [64, 64],
+                "stored_shape": [64, 256],
+                "data_nbytes": 4,
+                "scale_pad": 0,
+                "scale_nbytes": 0,
+                "file": "mtp.bin",
+                "offset": 0,
+            }
+        else:
+            done[name] = {
+                "dtype": "half",
+                "shape": [4],
+                "stored_shape": [4],
                 "file": "resident.bin",
                 "offset": index * 128,
             }
@@ -2712,6 +2867,8 @@ def test_old_progress_resumes_the_scatter_writer(tmp_path: Path) -> None:
     assert "layout" not in packed
     assert packed["tensors"]["model.embed_tokens.bias"]["offset"] == 0
     assert packed["tensors"]["model.language_model.norm.weight"]["offset"] == 128
+    assert packed["tensors"]["model.visual.proj.bias"]["file"] == "vision.bin"
+    assert packed["tensors"]["model.visual.proj.bias"]["offset"] == 0
 
 
 def test_repack_layout_two_keeps_dense_order(tmp_path: Path) -> None:
@@ -2723,7 +2880,6 @@ def test_repack_layout_two_keeps_dense_order(tmp_path: Path) -> None:
     weight = np.linspace(-1.0, 1.0, 64 * 64, dtype=np.float32).reshape(64, 64)
     blob, body = _fp4_entry(weight)
     pieces = [
-        ("model.visual.proj.bias", b"VVVVVVVV"),
         ("model.layers.0.mlp.down_proj.weight", b"DDDD"),
         ("model.layers.0.mlp.up_proj.weight", b"UUUU"),
         ("model.layers.0.mlp.gate_proj.weight", b"GGGG"),
@@ -2745,6 +2901,14 @@ def test_repack_layout_two_keeps_dense_order(tmp_path: Path) -> None:
     source = tmp_path / "bf16"
     record.mkdir()
     source.mkdir()
+    tensors["model.visual.proj.bias"] = {
+        "dtype": "half",
+        "shape": [4],
+        "stored_shape": [4],
+        "file": "vision.bin",
+        "offset": 0,
+    }
+    (record / "vision.bin").write_bytes(b"VVVVVVVV")
     (record / "resident.bin").write_bytes(raw)
     (record / "manifest.json").write_text(
         json.dumps({"complete": True, "layout": 2, "layers": 1, "tensors": tensors})
@@ -2763,10 +2927,12 @@ def test_repack_layout_two_keeps_dense_order(tmp_path: Path) -> None:
     packed = json.loads((record / "manifest.json").read_text())
     assert packed["layout"] == 2
     assert packed["tensors"]["mtp.fc.weight"]["dtype"] == "half"
+    assert packed["tensors"]["mtp.fc.weight"]["file"] == "mtp.bin"
+    assert packed["tensors"]["mtp.fc.weight"]["offset"] == 0
     order = resident_names(packed["tensors"], 1)
     assert order[0] == "aaa.bias"
     assert order[1] == "zzz.weight"
-    assert order[2] == "mtp.fc.weight"
+    assert "mtp.fc.weight" not in order
     rewritten = (record / "resident.bin").read_bytes()
     assert rewritten.startswith(b"AAAAAAAAZZZZZZZZ")
     assert blob not in rewritten
@@ -2776,13 +2942,15 @@ def test_repack_layout_two_keeps_dense_order(tmp_path: Path) -> None:
         assert entry["offset"] == cursor
         cursor += tensor_span(entry)
     assert len(rewritten) == cursor
-    assert packed["tensors"]["mtp.fc.weight"]["offset"] == 16
+    assert (record / "mtp.bin").stat().st_size == 64 * 64 * 2
     gate = packed["tensors"]["model.layers.0.mlp.gate_proj.weight"]
     up = packed["tensors"]["model.layers.0.mlp.up_proj.weight"]
     down = packed["tensors"]["model.layers.0.mlp.down_proj.weight"]
     assert gate["offset"] < up["offset"] < down["offset"]
     assert rewritten[gate["offset"] : gate["offset"] + 4] == b"GGGG"
-    assert rewritten.endswith(b"VVVVVVVV")
+    assert rewritten.endswith(b"DDDD")
+    assert (record / "vision.bin").read_bytes() == b"VVVVVVVV"
+    assert packed["tensors"]["model.visual.proj.bias"]["file"] == "vision.bin"
 
 
 class _Trace:
@@ -2846,20 +3014,18 @@ def _half_file(parts: list[tuple[str, bytes]]) -> tuple[dict[str, dict], bytes]:
     return tensors, bytes(blob)
 
 
-def test_layout_two_reads_the_wired_prefix_and_skips_the_hole(tmp_path: Path, monkeypatch) -> None:
+def test_layout_two_reads_the_wired_prefix(tmp_path: Path, monkeypatch) -> None:
     from qwen38_27b.metal41.budget import LAYOUT_PREFIX, Wire
     from qwen38_27b.metal41.resident import DeviceImage
 
     parts = [
         ("model.norm.weight", b"TEXTTEXT"),
-        ("mtp.fc.weight", b"MTPMTPMTPMTP"),
         ("model.layers.0.mlp.gate_proj.weight", b"GATE"),
         ("model.layers.0.mlp.up_proj.weight", b"UPUP"),
         ("model.layers.0.mlp.down_proj.weight", b"DOWN"),
         ("model.layers.1.mlp.gate_proj.weight", b"gggg"),
         ("model.layers.1.mlp.up_proj.weight", b"uuuu"),
         ("model.layers.1.mlp.down_proj.weight", b"dddd"),
-        ("model.visual.pos.weight", b"VISION!!"),
     ]
     tensors, raw = _half_file(parts)
     path = tmp_path / "resident.bin"
@@ -2887,39 +3053,42 @@ def test_layout_two_reads_the_wired_prefix_and_skips_the_hole(tmp_path: Path, mo
             None,
             layout=LAYOUT_PREFIX,
         )
-        assert trace.seeks == [0, 20]
-        assert trace.reads == [(0, 8), (20, 10), (30, 2)]
+        assert trace.seeks == [0]
+        assert trace.reads == [(0, 10), (10, 10)]
         assert bytes(image.buffer.raw[:20]) == b"TEXTTEXTGATEUPUPDOWN"
         assert bytes(image.buffer.raw[20:32]) == b"\x00" * 12
         image.load_layer(1)
-        assert trace.seeks[-1:] == [32]
-        assert trace.reads[-2:] == [(32, 10), (42, 2)]
+        assert trace.seeks[-1:] == [20]
+        assert trace.reads[-2:] == [(20, 10), (30, 2)]
         assert bytes(image.buffer.raw[20:32]) == b"gggguuuudddd"
-        blob = image.load_span(session, 44, 8)
-        assert trace.seeks[-1:] == [44]
-        assert trace.reads[-1:] == [(44, 8)]
-        assert bytes(blob.raw) == b"VISION!!"
-        assert not any(8 <= pos < 20 for pos, _n in trace.reads)
         image.close()
     finally:
         handle.close()
 
 
-def test_layout_two_with_mtp_is_one_prefix_read(tmp_path: Path, monkeypatch) -> None:
+def test_layout_two_reads_mtp_from_its_own_file(tmp_path: Path, monkeypatch) -> None:
     from qwen38_27b.metal41.budget import LAYOUT_PREFIX, Wire
     from qwen38_27b.metal41.resident import DeviceImage
 
     parts = [
         ("model.norm.weight", b"TEXTTEXT"),
-        ("mtp.fc.weight", b"MTPMTPMTPMTP"),
         ("model.layers.0.mlp.gate_proj.weight", b"GATE"),
         ("model.layers.0.mlp.up_proj.weight", b"UPUP"),
         ("model.layers.0.mlp.down_proj.weight", b"DOWN"),
-        ("model.visual.pos.weight", b"VISION!!"),
     ]
     tensors, raw = _half_file(parts)
+    tensors["mtp.fc.weight"] = {
+        "dtype": "half",
+        "shape": [6],
+        "stored_shape": [6],
+        "file": "mtp.bin",
+        "offset": 0,
+    }
     path = tmp_path / "resident.bin"
     path.write_bytes(raw)
+    mtp_path = tmp_path / "mtp.bin"
+    mtp_path.write_bytes(b"MTPMTPMTPMTP")
+
     def scatter(*_args, **_kwargs) -> None:
         raise AssertionError("scatter fill")
 
@@ -2927,7 +3096,9 @@ def test_layout_two_with_mtp_is_one_prefix_read(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr("qwen38_27b.metal41.resident._fill", scatter)
     group = group_tensors(tensors, layers=1)
     handle = path.open("rb")
+    mtp_handle = mtp_path.open("rb")
     trace = _Trace(handle)
+    mtp_trace = _Trace(mtp_handle)
     try:
         image = DeviceImage(
             _Session(),
@@ -2936,14 +3107,17 @@ def test_layout_two_with_mtp_is_one_prefix_read(tmp_path: Path, monkeypatch) -> 
             Wire(2048, True, (0,), 0, 0, 17),
             None,
             layout=LAYOUT_PREFIX,
+            mtp=mtp_trace,
         )
-        assert trace.seeks == [0]
-        assert trace.reads == [(0, 10), (10, 10), (20, 10), (30, 2)]
-        assert bytes(image.buffer.raw[:32]) == raw[:32]
-        assert all(pos < 32 for pos, _n in trace.reads)
+        assert trace.seeks == [0, 8]
+        assert trace.reads == [(0, 8), (8, 10), (18, 2)]
+        assert mtp_trace.seeks == [0]
+        assert mtp_trace.reads == [(0, 10), (10, 2)]
+        assert bytes(image.buffer.raw[:32]) == b"TEXTTEXTMTPMTPMTPMTPGATEUPUPDOWN"
         image.close()
     finally:
         handle.close()
+        mtp_handle.close()
 
 
 def test_old_manifest_still_scatter_fills(tmp_path: Path, monkeypatch) -> None:
@@ -3037,56 +3211,38 @@ def test_prefix_runs_merge_and_reject_an_overlap() -> None:
         _runs([("a", 0, 0, 8), ("b", 4, 8, 8)])
 
 
-def test_layout_two_vision_record_is_the_suffix() -> None:
+def test_vision_record_reads_vision_bin(tmp_path: Path, monkeypatch) -> None:
     from qwen38_27b.metal41.tower import _record
 
-    calls: list[tuple[int, int]] = []
+    calls: list[tuple[str, int]] = []
 
-    class _Weights:
-        def load_span(self, _session, start: int, nbytes: int) -> str:
-            calls.append((start, nbytes))
-            return "blob"
+    def fake(_session, path: Path, nbytes: int) -> str:
+        calls.append((path.name, nbytes))
+        return "blob"
 
+    monkeypatch.setattr("qwen38_27b.metal41.tower.load_file", fake)
     tensors = {
-        "model.norm.weight": {"dtype": "half", "stored_shape": [2], "offset": 0},
-        "model.visual.a": {"dtype": "half", "stored_shape": [2], "offset": 4},
-        "model.visual.b": {"dtype": "half", "stored_shape": [3], "offset": 8},
+        "model.norm.weight": {
+            "dtype": "half",
+            "stored_shape": [2],
+            "file": "resident.bin",
+            "offset": 0,
+        },
+        "model.visual.a": {
+            "dtype": "half",
+            "stored_shape": [2],
+            "file": "vision.bin",
+            "offset": 0,
+        },
+        "model.visual.b": {
+            "dtype": "half",
+            "stored_shape": [3],
+            "file": "vision.bin",
+            "offset": 4,
+        },
     }
-    runtime = SimpleNamespace(
-        tensors=tensors,
-        manifest={"layout": 2},
-        weights=_Weights(),
-        session=object(),
-    )
+    runtime = SimpleNamespace(tensors=tensors, root=tmp_path, session=object())
     table = _record(runtime)
-    assert calls == [(4, 10)]
+    assert calls == [("vision.bin", 10)]
     assert table["model.visual.a"][1] == 0
     assert table["model.visual.b"][1] == 4
-
-
-def test_old_vision_record_keeps_the_gap() -> None:
-    from qwen38_27b.metal41.budget import vision_suffix
-    from qwen38_27b.metal41.tower import _record
-
-    calls: list[tuple[int, int]] = []
-
-    class _Weights:
-        def load_span(self, _session, start: int, nbytes: int) -> str:
-            calls.append((start, nbytes))
-            return "blob"
-
-    tensors = {
-        "model.visual.a": {"dtype": "half", "stored_shape": [2], "offset": 0},
-        "model.norm.weight": {"dtype": "half", "stored_shape": [2], "offset": 4},
-        "model.visual.b": {"dtype": "half", "stored_shape": [2], "offset": 8},
-    }
-    runtime = SimpleNamespace(
-        tensors=tensors,
-        manifest={},
-        weights=_Weights(),
-        session=object(),
-    )
-    _record(runtime)
-    assert calls == [(0, 12)]
-    with pytest.raises(RuntimeError, match="vision suffix"):
-        vision_suffix(tensors)

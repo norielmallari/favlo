@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import sys
+
+import numpy as np
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from favlo.registry import (
     stored_directory,
 )
 from qwen38_27b.metal41.checks import format_report, run_checks
+from qwen38_27b.metal41.calibration import calibrate
 from qwen38_27b.metal41.convert import quantize, repack_mtp_half
 from qwen38_27b.metal41.fetch import (
     CHECKOUT,
@@ -48,6 +51,9 @@ _BF16_REPO = "Qwen/Qwen3.8-27B"
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="favlo --qwen38_27b")
     sub = parser.add_subparsers(dest="command", required=True)
+    cal = sub.add_parser("calibrate", help="rewrite a full fp4 record with GPTQ and FOEM")
+    cal.add_argument("--src", type=Path, default=None)
+    cal.add_argument("--record", type=Path, default=None)
     quant = sub.add_parser("quantize", help="write the fp4 record, or a mixed feed-forward record")
     quant.add_argument("--src", type=Path, default=None)
     quant.add_argument("--output", type=Path, default=None)
@@ -95,6 +101,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _kernels()
     if args.command == "quantize":
         return _quantize(args)
+    if args.command == "calibrate":
+        return _calibrate(args)
     if args.command == "mtp-half":
         return _mtp_half(args)
     if args.command == "download":
@@ -206,6 +214,50 @@ def _percent(text: str | None) -> float | None:
     except ValueError as exc:
         message = f"ffn fp8 percentage {text} is not a number"
         raise ValueError(message) from exc
+
+
+def _calibrate(args: argparse.Namespace) -> int:
+    """Pack the record when needed, then replace the language codes."""
+    src = args.src or snapshot_dir(_BF16_REPO)
+    try:
+        output = calibrate(src, args.record)
+        _point_alias(output, src)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError, np.linalg.LinAlgError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    sys.stdout.write(f"{output}\n")
+    return 0
+
+
+def _point_alias(output: Path, src: Path) -> None:
+    """Move the pipeline alias onto ``output`` and keep the MTP flag it had."""
+    data = load_registry()
+    previous = None
+    flag = True
+    for name, entry in data["models"].items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("alias") == PIPELINE and entry.get("pipeline") == PIPELINE:
+            previous = name
+            flag = bool(entry.get("mtp", True))
+            break
+    if previous is not None and previous != output.name:
+        spare = f"{PIPELINE}_previous"
+        set_alias(previous, None if spare in data["models"] else spare)
+    register_quantized(
+        output.name,
+        source=src,
+        alias=PIPELINE,
+        directory=output,
+        pipeline=PIPELINE,
+        runtime="metal41",
+        kv_cache="half",
+    )
+    data = load_registry()
+    row = data["models"][output.name]
+    row["mtp"] = flag
+    row["mtp_depth"] = int(row.get("mtp_depth") or 3)
+    save_registry(data)
 
 
 def _quantize(args: argparse.Namespace) -> int:

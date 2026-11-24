@@ -72,7 +72,7 @@ uv run favlo --qwen38_27b download --check
 
 ### Pack
 
-The default pack stores every quantized matrix as fp4 and writes `models/Qwen3.8-27B-fp4`.
+The default pack writes `models/Qwen3.8-27B-fp4`. Language projections and the feed-forward are fp4. The embedding, `lm_head`, MTP, and the vision tower are fp8.
 
 ```bash
 uv run favlo --qwen38_27b quantize --src models/Qwen3.8-27B-bf16
@@ -85,7 +85,7 @@ uv run favlo --qwen38_27b quantize --src models/Qwen3.8-27B-bf16
 - The BF16 checkout stays.
 - A finished directory has `manifest.json` with `complete: true`.
 - Running `quantize` again on that directory returns it when the feed-forward percentage matches.
-- An unfinished directory resumes from `quantize_progress.json`.
+- An unfinished directory resumes from `quantize_progress.json`. A tensor is recorded only after its bytes are on disk. A layout 2 tensor with no digest, or whose bytes do not match, is written again.
 
 - With no `--src`, `quantize` reads the Hugging Face cache snapshot for [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
 - A missing cache is an error.
@@ -95,7 +95,7 @@ uv run favlo --qwen38_27b quantize --src models/Qwen3.8-27B-bf16
 
 ### Quantization
 
-`--ffn-fp8` is a percentage of the 64 language feed-forward layers. Omitting it stores every quantized matrix as fp4.
+`--ffn-fp8` is a percentage of the 64 language feed-forward layers. Omitting it stores the language projections and the feed-forward as fp4.
 
 - No `--ffn-fp8` writes `models/Qwen3.8-27B-fp4`. This is the default.
 - `100` stores all 64 language feed-forward layers as fp8 and writes `models/Qwen3.8-27B-fp8`.
@@ -105,10 +105,23 @@ uv run favlo --qwen38_27b quantize --src models/Qwen3.8-27B-bf16
 - Those layers are the highest BF16-to-fp4 relative errors.
 - Gate, up, and down move together.
 
-- The embedding, the projections, `lm_head`, and the vision tower stay fp4.
-- MTP matrices are Metal `half`, with rows and K padded to 64.
+- The embedding and `lm_head` are fp8 E4M3. Language projections stay fp4.
+- Vision-tower matrices are fp8 E4M3. Vision norms and biases stay Metal `half`.
+- MTP matrices are fp8 E4M3 in `mtp.bin`. One-dimensional MTP parameters stay Metal `half`. The file is opened only when MTP is on.
+
+`calibrate` rewrites a finished record. Language projections use GPTQ with the FOEM update. The embedding, `lm_head`, the vision tower, and MTP stay as `quantize` wrote them.
+
+```bash
+uv run favlo --qwen38_27b calibrate --src models/Qwen3.8-27B-bf16 --record models/Qwen3.8-27B-fp4
+```
+
+- A missing record is packed first. Language projections are round-to-nearest fp4. The embedding, `lm_head`, MTP, and the vision tower are round-to-nearest fp8.
+- Each pass covers eight language layers. The float32 input Gram accumulates on device, and the column update runs on device. BF16 rows are read in sequential 8 MiB pieces.
+- The command registers that folder under the alias `qwen38_27b` when it finishes.
+- Running it again on a manifest whose `quantization` is `gptq-foem` returns the directory.
+- MTP matrices are fp8 E4M3 in `mtp.bin`. Vision tensors are `vision.bin`. A text open does not open either file.
 - One-dimensional parameters, including MTP norms, stay Metal `half`.
-- `mtp-half` rewrites a finished record whose MTP matrices are still fp4 or fp8.
+- `mtp-half` rewrites MTP matrices in `mtp.bin` to Metal `half`.
 
 ```bash
 uv run favlo --qwen38_27b quantize --src models/Qwen3.8-27B-bf16 --ffn-fp8 100
@@ -183,4 +196,4 @@ A checkout outside `models/` is left in place. Another model's directory and row
 - [ceilings.md](ceilings.md) — per-dispatch kernel ceilings
 - [memory-usage.md](memory-usage.md) — device bytes at the served window
 - [benchmarks.md](benchmarks.md) — harness scores
-- Research: [kernel-ceilings](research/kernel-ceilings.md), [recorded-forward](research/recorded-forward.md), [int8-prefill](research/int8-prefill.md), [mixed-agent-forward](research/mixed-agent-forward.md), [coding-agent](research/coding-agent.md), [coding-agent-half](research/coding-agent-half.md), [needle-page](research/needle-page.md), [needle-retrieve](research/needle-retrieve.md), [synthetic-prompt](research/synthetic-prompt.md), [synthetic-prompt-half](research/synthetic-prompt-half.md), [synthetic-prompt-mtp](research/synthetic-prompt-mtp.md), [synthetic-prompt-mtp-half](research/synthetic-prompt-mtp-half.md), [synthetic-prompt-mtp-half-depth2](research/synthetic-prompt-mtp-half-depth2.md), [synthetic-prompt-mtp-half-depth4](research/synthetic-prompt-mtp-half-depth4.md), [synthetic-prompt-mtp-half-depth6](research/synthetic-prompt-mtp-half-depth6.md), [span-draft](research/span-draft.md), [mtp-window](research/mtp-window.md), [ffn-fp8-budget](research/ffn-fp8-budget.md)
+- Research: [kernel-ceilings](research/kernel-ceilings.md), [recorded-forward](research/recorded-forward.md), [int8-prefill](research/int8-prefill.md), [mixed-agent-forward](research/mixed-agent-forward.md), [coding-agent](research/coding-agent.md), [coding-agent-half](research/coding-agent-half.md), [needle-page](research/needle-page.md), [needle-retrieve](research/needle-retrieve.md), [synthetic-prompt](research/synthetic-prompt.md), [synthetic-prompt-half](research/synthetic-prompt-half.md), [synthetic-prompt-fp4](research/synthetic-prompt-fp4.md), [synthetic-prompt-mtp](research/synthetic-prompt-mtp.md), [synthetic-prompt-mtp-half](research/synthetic-prompt-mtp-half.md), [synthetic-prompt-mtp-half-depth2](research/synthetic-prompt-mtp-half-depth2.md), [synthetic-prompt-mtp-half-depth4](research/synthetic-prompt-mtp-half-depth4.md), [synthetic-prompt-mtp-half-depth6](research/synthetic-prompt-mtp-half-depth6.md), [span-draft](research/span-draft.md), [mtp-window](research/mtp-window.md), [ffn-fp8-budget](research/ffn-fp8-budget.md)

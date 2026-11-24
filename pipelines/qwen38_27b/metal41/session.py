@@ -53,8 +53,11 @@ KERNELS = (
     "cast_f32_half",
     "zero_f32",
     "embed_fp4_rows",
+    "embed_fp8_rows",
     "gather_fp4_row",
     "gather_fp4_id",
+    "gather_fp8_row",
+    "gather_fp8_id",
     "pack_half_m8",
     "span_fp8_m8",
     "gdn_in_proj",
@@ -83,6 +86,7 @@ KERNELS = (
     "vision_bias",
     "vision_to_half",
     "dequant_fp4_rows",
+    "dequant_fp8_rows",
     "vision_pos_add",
     "vision_rope",
     "vision_split_qkv",
@@ -124,6 +128,22 @@ KERNELS = (
     "sample_topk_draw",
     "sample_scan",
     "fill_mrope",
+    "gram_transpose_f32",
+    "gram_transpose_f16",
+    "gram_xtx",
+    "foem_block",
+    "foem_tail",
+    "foem_pack",
+    "gram_prepare",
+    "chol_panel",
+    "chol_trsm",
+    "chol_syrk",
+    "trinv_panel",
+    "trinv_mul",
+    "trinv_apply",
+    "xtx_lower",
+    "transpose_upper",
+    "gram_quadratic",
 )
 
 def projection_grid(tiles_x: int, tiles_y: int) -> tuple[bool, tuple[int, int, int]]:
@@ -137,6 +157,7 @@ def projection_grid(tiles_x: int, tiles_y: int) -> tuple[bool, tuple[int, int, i
 
 _SHADER = Path(__file__).resolve().parent / "shaders" / "kernels.metal"
 _VISION = Path(__file__).resolve().parent / "shaders" / "vision.metal"
+_GPTQ = Path(__file__).resolve().parent / "shaders" / "gptq.metal"
 _ZERO = b"\x00" * (8 << 20)
 
 
@@ -229,7 +250,13 @@ class Session:
         device = memory.device
         options = metal.MTLCompileOptions.alloc().init()
         options.setLanguageVersion_((4 << 16) + 1)
-        source = _SHADER.read_text(encoding="utf-8") + "\n" + _VISION.read_text(encoding="utf-8")
+        source = (
+            _SHADER.read_text(encoding="utf-8")
+            + "\n"
+            + _VISION.read_text(encoding="utf-8")
+            + "\n"
+            + _GPTQ.read_text(encoding="utf-8")
+        )
         library, error = _objc_pair(
             device.newLibraryWithSource_options_error_(source, options, None)
         )

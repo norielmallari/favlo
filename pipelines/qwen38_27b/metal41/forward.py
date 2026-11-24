@@ -1,7 +1,7 @@
-"""Text forward. Weights are fp4, with promoted feed-forward layers at fp8. The key/value cache is half or fp8_e4m3.
+"""Text forward. Projections are fp4. The embedding, ``lm_head``, and MTP matrices are fp8. The key/value cache is half or fp8_e4m3.
 
 A feed-forward layer that does not fit stays in the record and is copied into one
-stage before that layer runs. MTP weights stay in the record when MTP is off.
+stage before that layer runs. MTP weights stay in ``mtp.bin`` until MTP is on.
 The head leaves the device when the prompt needs its bytes. Decode does not run
 that block.
 
@@ -36,6 +36,7 @@ from qwen38_27b.metal41.budget import (
     choose_wire,
     group_tensors,
     layout_version,
+    mtp_file,
     same_weight_image,
     startup_bytes,
 )
@@ -131,6 +132,16 @@ _DEVICE_FIELDS = (
 )
 
 
+def _embed_kernel(entry: dict, *, row: bool) -> str:
+    kind = str(entry.get("dtype", "fp4"))
+    if kind == "fp8":
+        return "gather_fp8_row" if row else "gather_fp8_id"
+    if kind == "fp4":
+        return "gather_fp4_row" if row else "gather_fp4_id"
+    message = f"embedding dtype {kind} is not fp4 or fp8"
+    raise RuntimeError(message)
+
+
 def _device_buffers(runtime: Any) -> list[Any]:
     """Metal buffers this runtime still holds. The caller releases them after the drop."""
     found: list[Any] = []
@@ -181,6 +192,7 @@ class Qwen38Runtime:
         resident_percent: float | None = None,
         owner: str | None = None,
         mtp: bool = False,
+        context_limit: int | None = None,
     ) -> None:
         del resident_percent
         self._owner = owner or f"qwen38_27b:{id(self)}"
@@ -217,6 +229,8 @@ class Qwen38Runtime:
         self.full_slot = _slots(self.layer_types, "full_attention")
         card_limit = max_position(self.root) if (self.root / "config.json").is_file() else 262144
         self._limit = min(card_limit, DEFAULT_CONTEXT_LENGTH)
+        if context_limit is not None:
+            self._limit = min(self._limit, int(context_limit))
         self._fit_ceiling = 0
         self.filled = 0
         self.drafts = False
@@ -225,6 +239,7 @@ class Qwen38Runtime:
         self.wire = None
         self.weights = None
         self._record = None
+        self._mtp_record = None
         self._prefill = None
         self._prefill_progress = None
         self._decode_progress = None
@@ -328,6 +343,10 @@ class Qwen38Runtime:
             self._record = None
             if record is not None:
                 record.close()
+            mtp_record = getattr(self, "_mtp_record", None)
+            self._mtp_record = None
+            if mtp_record is not None:
+                mtp_record.close()
             for name in ("k_cache", "v_cache", "_held"):
                 held = getattr(self, name, None)
                 if isinstance(held, list):
@@ -537,6 +556,12 @@ class Qwen38Runtime:
         self._release_elastic()
         assert self.session is not None
         assert self._record is not None
+        mtp_handle = None
+        if plan.mtp:
+            mtp_file(self.tensors)
+            if self._mtp_record is None:
+                self._mtp_record = (self.root / "mtp.bin").open("rb")
+            mtp_handle = self._mtp_record
         image = DeviceImage(
             self.session,
             self._record,
@@ -544,6 +569,7 @@ class Qwen38Runtime:
             plan,
             self.session._load_note,
             layout=self._layout,
+            mtp=mtp_handle,
         )
         self.weights = image
         self.resident = image.buffer
@@ -837,7 +863,7 @@ class Qwen38Runtime:
         )
         _rows, inner = entry["stored_shape"]
         self.session.encode(
-            "gather_fp4_row",
+            _embed_kernel(entry, row=True),
             [(buf, offset), (buf, self.scale_offset(entry, offset)), (self.hidden, 0)],
             [_u32(token), _u32(int(inner))],
             (1, 1, 1),
@@ -851,7 +877,7 @@ class Qwen38Runtime:
         )
         _rows, inner = entry["stored_shape"]
         self.session.encode(
-            "gather_fp4_id",
+            _embed_kernel(entry, row=False),
             [
                 (buf, base),
                 (buf, self.scale_offset(entry, base)),

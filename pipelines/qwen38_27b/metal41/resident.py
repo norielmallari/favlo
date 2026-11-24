@@ -1,10 +1,10 @@
 """Device image of the text tensors this forward is allowed to keep.
 
-Layout 2 reads the wired prefix. When the MTP head is resident that prefix is
-one read from the start of the file through the last wired layer. When the head
-stays in the file, the text block is one read and the wired layer prefix is the
-next, so the MTP bytes are not pulled in. An unwired layer is one read of its
-gate, up, and down. Vision is one read of the dense suffix.
+Layout 2 reads the wired prefix of ``resident.bin`` in one run. Text and the
+wired feed-forward layers sit back to back in that file. MTP weights are
+``mtp.bin`` and are copied into the image only when the opening turns MTP on.
+An unwired layer is one read of its gate, up, and down. Vision weights are
+``vision.bin`` and are not opened here.
 
 An older manifest seeks to each span and writes it at the device offset.
 """
@@ -31,8 +31,14 @@ class DeviceImage:
         wire: Wire,
         note: Any = None,
         layout: int = LAYOUT_SCATTER,
+        mtp: BinaryIO | None = None,
     ) -> None:
         copies, stage_base, total = layout_copies(group, mtp=wire.mtp, wired=wire.wired)
+        resident_copies = [row for row in copies if not row[0].startswith("mtp.")]
+        mtp_copies = [row for row in copies if row[0].startswith("mtp.")]
+        if mtp_copies and mtp is None:
+            message = "mtp.bin is not open"
+            raise RuntimeError(message)
         buffer = session.allocate(max(total, 16))
         if buffer is None:
             message = f"device refused a {total} byte buffer"
@@ -41,9 +47,13 @@ class DeviceImage:
         view = memoryview(buffer.contents().as_buffer(max(total, 16)))
         try:
             if layout == LAYOUT_PREFIX:
-                _fill_prefix(record, view, copies, note)
+                _fill_prefix(record, view, resident_copies, note)
+                if mtp_copies:
+                    _fill_prefix(mtp, view, mtp_copies, note)
             else:
-                _fill(record, view, copies, note)
+                _fill(record, view, resident_copies, note)
+                if mtp_copies:
+                    _fill(mtp, view, mtp_copies, note)
             if note is not None and wire.stage:
                 note(wire.stage)
         except Exception:
@@ -178,9 +188,8 @@ def _fill_prefix(
 ) -> None:
     """Read each contiguous wired run straight into the device image.
 
-    A resident MTP head is one prefix of the file. A dropped head leaves a hole,
-    so the text block and the wired layer prefix are two reads. Vision and
-    unwired layers are not in ``copies``.
+    Text and wired layers are one run of ``resident.bin``. MTP copies are a
+    separate call on ``mtp.bin``. Vision and unwired layers are not in ``copies``.
     """
     for file_offset, device_offset, span in _runs(copies):
         _read_into(record, view, file_offset, device_offset, span, note)
@@ -206,6 +215,18 @@ def _runs(copies: list[tuple[str, int, int, int]]) -> list[tuple[int, int, int]]
                 continue
         runs.append((file_offset, device_offset, span))
     return runs
+
+
+def load_file(session: Any, path: Any, nbytes: int) -> Any:
+    """Copy ``path`` from byte 0 into a new buffer. The text image is not this buffer."""
+    buffer = session.allocate(nbytes)
+    if buffer is None:
+        message = f"device refused a {nbytes} byte buffer"
+        raise RuntimeError(message)
+    view = memoryview(buffer.contents().as_buffer(nbytes))
+    with path.open("rb") as handle:
+        _read_into(handle, view, 0, 0, nbytes, None)
+    return buffer
 
 
 def _read_into(

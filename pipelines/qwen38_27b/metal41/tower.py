@@ -1,7 +1,7 @@
 """Run the vision tower on Metal and keep the merged tokens for prefill.
 
-The record stores the tower. A text forward leaves it there. An image request
-copies that span once, then each block is a layer norm, an fp4 projection,
+The tower weights are ``vision.bin``. A text forward leaves that file closed. An image request
+copies it once, then each block is a layer norm, an fp8 projection,
 and a residual. The merger writes one language vector per 2×2 patch block.
 Each still is one file under ``~/.favlo/vision-cache/qwen38_27b/``, keyed by
 the checkpoint path, the byte hash, and the pixel bounds. The file holds the
@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import hashlib
 import struct
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from qwen38_27b.metal41.budget import LAYOUT_PREFIX, layout_version, tensor_span, vision_suffix
+from qwen38_27b.metal41.budget import is_vision, vision_file
+from qwen38_27b.metal41.resident import load_file
 from qwen38_27b.metal41.vision import IMAGE_PAD, MAX_PIXELS, MIN_PIXELS, prepare_image
 
 _HIDDEN = 1152
@@ -453,8 +455,18 @@ def _project(
 ) -> None:
     _buf, offset, entry = weights[f"{name}.weight"]
     stored_cols, inner = (int(value) for value in entry["stored_shape"])
-    if stored_cols % 64 or inner % 32 or row_pad % 64:
-        message = f"{name} tile {row_pad}x{stored_cols}x{inner} is not a 64-row fp4 tile"
+    kind = str(entry.get("dtype") or "")
+    if kind == "fp8":
+        kernel = "prefill_fp8_n64"
+        aligned = inner % 128 == 0
+    elif kind == "fp4":
+        kernel = "prefill_fp4_n64"
+        aligned = inner % 32 == 0
+    else:
+        message = f"{name} is stored as {kind or 'an unknown dtype'}"
+        raise RuntimeError(message)
+    if stored_cols % 64 or not aligned or row_pad % 64:
+        message = f"{name} tile {row_pad}x{stored_cols}x{inner} is not a 64-row {kind} tile"
         raise RuntimeError(message)
     session = runtime.session
     if host is not None:
@@ -466,7 +478,6 @@ def _project(
         src = half
         src_stride = inner
     del src_stride
-    kernel = "prefill_fp4_n64"
     width = int(session.pipes[kernel].threadExecutionWidth())
     session.encode(
         kernel,
@@ -495,9 +506,17 @@ def _positions(
 ) -> None:
     buf, offset, entry = weights["model.visual.pos_embed.weight"]
     _rows, inner = (int(value) for value in entry["stored_shape"])
+    kind = str(entry.get("dtype") or "")
+    if kind == "fp8":
+        kernel = "dequant_fp8_rows"
+    elif kind == "fp4":
+        kernel = "dequant_fp4_rows"
+    else:
+        message = f"model.visual.pos_embed.weight is stored as {kind or 'an unknown dtype'}"
+        raise RuntimeError(message)
     table = runtime.session.zeros(_POS_ROWS * _HIDDEN * 4)
     runtime.session.encode(
-        "dequant_fp4_rows",
+        kernel,
         [
             (buf, offset),
             (buf, offset + int(entry["data_nbytes"]) + int(entry.get("scale_pad") or 0)),
@@ -626,24 +645,11 @@ def _record(runtime: Any) -> dict[str, tuple[Any, int, dict]]:
     if cached is not None:
         return cached
     tensors = runtime.tensors
-    names = [name for name in tensors if name.startswith("model.visual.")]
-    if not names:
-        message = "this record has no vision tower"
-        raise RuntimeError(message)
-    manifest = getattr(runtime, "manifest", None) or {}
-    if layout_version(manifest) == LAYOUT_PREFIX:
-        origin, nbytes = vision_suffix(tensors)
-    else:
-        spans = []
-        for name in names:
-            entry = tensors[name]
-            start = int(entry["offset"])
-            spans.append((start, start + tensor_span(entry)))
-        origin = min(start for start, _end in spans)
-        nbytes = max(stop for _start, stop in spans) - origin
-    blob = runtime.weights.load_span(runtime.session, origin, nbytes)
+    names = [name for name in tensors if is_vision(name)]
+    nbytes = vision_file(tensors)
+    blob = load_file(runtime.session, Path(runtime.root) / "vision.bin", nbytes)
     table = {
-        name: (blob, int(tensors[name]["offset"]) - origin, tensors[name])
+        name: (blob, int(tensors[name]["offset"]), tensors[name])
         for name in names
     }
     runtime._vision_record = table

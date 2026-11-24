@@ -1011,6 +1011,8 @@ def _stream(
     pending: queue.Queue[int | str | None | object] = queue.Queue()
     failed: list[BaseException] = []
     held: list[tuple[str, int]] = []
+    streamed_calls: set[str] = set()
+    message_open: list[bool] = []
     keepalive = object()
 
     def on_prefill(_done: int) -> None:
@@ -1025,18 +1027,61 @@ def _stream(
         gate = StreamText(thinking, tools=emit_tools)
         opened: set[str] = set()
 
-        def emit_piece(channel: str, visible: str) -> None:
-            if not visible or channel in {"tool_start", "tool_args"}:
+        def emit_tool(channel: str, payload: dict[str, Any]) -> None:
+            index = int(payload.get("index") or 0)
+            call_id = str(payload.get("id") or f"call_{index}")
+            if channel == "tool_start":
+                streamed_calls.add(call_id)
+                event(
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": index,
+                        "item": {
+                            "type": "function_call",
+                            "id": f"fc_{call_id}",
+                            "call_id": call_id,
+                            "name": payload.get("name") or "",
+                            "arguments": "",
+                            "status": "in_progress",
+                        },
+                    }
+                )
+                return
+            fragment = payload.get("arguments") or ""
+            if not isinstance(fragment, str) or not fragment:
+                return
+            event(
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "delta": fragment,
+                    "item_id": f"fc_{call_id}",
+                    "output_index": index,
+                    "call_id": call_id,
+                }
+            )
+
+        def emit_piece(channel: str, visible: Any) -> None:
+            if channel in {"tool_start", "tool_args"}:
+                if isinstance(visible, dict):
+                    emit_tool(channel, visible)
+                return
+            if not isinstance(visible, str) or not visible:
                 return
             if channel not in opened:
                 opened.add(channel)
                 _open_item(event, channel, reasoning_id, message_id)
+                if channel != "reasoning":
+                    message_open.append(True)
             _emit_response(event, channel, visible, reasoning_id, message_id)
 
         try:
             while True:
                 item = pending.get()
                 if item is keepalive:
+                    if "content" not in opened:
+                        opened.add("content")
+                        _open_item(event, "content", reasoning_id, message_id)
+                        message_open.append(True)
                     event(
                         {
                             "type": "response.output_text.delta",
@@ -1122,22 +1167,36 @@ def _stream(
         if kind == "reasoning":
             item["id"] = reasoning_id
             event({"type": "response.output_item.done", "output_index": index, "item": item})
+        elif kind == "message":
+            item["id"] = message_id
+            event({"type": "response.output_item.done", "output_index": 1, "item": item})
+            message_open.clear()
         elif kind == "function_call":
             arguments = item.get("arguments") or "{}"
             if not isinstance(arguments, str):
                 arguments = json.dumps(arguments)
-            opened_item = dict(item)
-            opened_item["arguments"] = ""
-            event({"type": "response.output_item.added", "output_index": index, "item": opened_item})
+            call_id = str(item.get("call_id") or "")
+            if call_id:
+                item["id"] = f"fc_{call_id}"
+            if call_id not in streamed_calls:
+                opened_item = dict(item)
+                opened_item["arguments"] = ""
+                event({"type": "response.output_item.added", "output_index": index, "item": opened_item})
             event(
                 {
                     "type": "response.function_call_arguments.done",
                     "arguments": arguments,
                     "item_id": item.get("id") or "",
                     "output_index": index,
+                    "call_id": call_id,
                 }
             )
             event({"type": "response.output_item.done", "output_index": index, "item": item})
+    if message_open:
+        message = _message_item("")
+        message["id"] = message_id
+        payload["output"].append(message)
+        event({"type": "response.output_item.done", "output_index": 1, "item": message})
     event({"type": "response.completed", "response": payload})
     try:
         reply.done()

@@ -1,5 +1,5 @@
 // Qwen3.5 vision tower. Layer norm, tanh GELU, 2D RoPE, and full attention.
-// The fp4 projections reuse prefill_fp4_n64.
+// The fp8 projections reuse prefill_fp8_n64. An older fp4 record still uses prefill_fp4_n64.
 
 constant float VISION_GELU = 0.7978845608028654f;
 constant float VISION_THETA = 10000.0f;
@@ -166,6 +166,33 @@ kernel void dequant_fp4_rows(
         uchar byte = packed[element >> 1];
         uint nibble = (element & 1u) ? (byte >> 4) : (byte & 0x0Fu);
         dest[element] = fp4_e2m1(nibble) * factor;
+    }
+}
+
+kernel void dequant_fp8_rows(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    constant uint& logical [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= rows) {
+        return;
+    }
+    uint blocks = inner >> 5;
+    device const uchar* packed = weights + row * inner;
+    device const uchar* row_scale = scales + row * blocks;
+    device float* dest = destination + row * logical;
+    for (uint block = 0u; block < blocks; ++block) {
+        float factor = e8m0_code(row_scale[block]);
+        uint element = (block << 5) + lane;
+        if (element >= logical) {
+            continue;
+        }
+        dest[element] = e4m3_code(packed[element]) * factor;
     }
 }
 

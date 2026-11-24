@@ -468,6 +468,53 @@ def check_rope(session: Session) -> None:
     _close("rope", got, np.full_like(got, inv), atol=1e-4)
 
 
+def check_embed_fp8(session: Session) -> None:
+    weight = np.linspace(-1.5, 1.5, 2 * 64, dtype=np.float32).reshape(2, 64)
+    data, scales = quantize_fp8(weight)
+    expect = dequant_fp8(data, scales, 2, 64)
+    codes = session.upload(np.frombuffer(data, dtype=np.uint8).copy())
+    scale = session.upload(np.frombuffer(scales, dtype=np.uint8).copy())
+    destination = session.zeros(64 * 4)
+    session.dispatch(
+        "gather_fp8_row",
+        [codes, scale, destination],
+        [np.uint32(1).tobytes(), np.uint32(64).tobytes()],
+        (1, 1, 1),
+        (32, 1, 1),
+    )
+    _close("embed fp8 row", session.download_f32(destination, 64), expect[1], atol=1e-5)
+    tokens = session.upload(np.array([0, 1], dtype=np.uint32))
+    rows = session.zeros(2 * 64 * 4)
+    session.dispatch(
+        "embed_fp8_rows",
+        [codes, scale, tokens, rows],
+        [np.uint32(2).tobytes(), np.uint32(64).tobytes()],
+        (2, 1, 1),
+        (32, 1, 1),
+    )
+    _close("embed fp8 rows", session.download_f32(rows, 128).reshape(2, 64), expect, atol=1e-5)
+
+
+def check_vision_fp8_rows(session: Session) -> None:
+    weight = np.linspace(-2.0, 2.0, 2 * 64, dtype=np.float32).reshape(2, 64)
+    data, scales = quantize_fp8(weight)
+    expect = dequant_fp8(data, scales, 2, 64)
+    destination = session.zeros(expect.size * 4)
+    session.dispatch(
+        "dequant_fp8_rows",
+        [
+            session.upload(np.frombuffer(data, dtype=np.uint8).copy()),
+            session.upload(np.frombuffer(scales, dtype=np.uint8).copy()),
+            destination,
+        ],
+        [np.uint32(2).tobytes(), np.uint32(64).tobytes(), np.uint32(64).tobytes()],
+        (2, 1, 1),
+        (32, 1, 1),
+    )
+    got = session.download_f32(destination, expect.size).reshape(expect.shape)
+    _close("vision fp8 rows", got, expect, atol=1e-5)
+
+
 def check_vision_gelu(session: Session) -> None:
     values = np.array([0.0, 1.0, -0.5, 20.0, -20.0], dtype=np.float64)
     destination = session.zeros(values.size * 4)
@@ -1121,6 +1168,124 @@ def check_patch_cast(session: Session) -> None:
     assert np.array_equal(got, expect)
 
 
+def check_input_gram(session: Session) -> None:
+    from qwen38_27b.metal41.gptq import encode_gram, gram_bytes
+
+    rng = np.random.default_rng(4)
+    width = 40
+    count = 70
+    span = 80
+    values = rng.normal(size=(span, width)).astype(np.float32)
+    rounded = values[:count].astype(np.float16).astype(np.float32)
+    expect = rounded.T @ rounded
+    transpose_bytes, scratch_bytes = gram_bytes(count, width)
+    acc = session.zeros(width * width * 4)
+    source = session.upload(np.ascontiguousarray(values))
+    transposed = session.zeros(transpose_bytes)
+    scratch = session.zeros(scratch_bytes)
+    session.begin()
+    encode_gram(session, source, acc, count, span, width, transposed, scratch, half=False)
+    encode_gram(session, source, acc, count, span, width, transposed, scratch, half=False)
+    session.end()
+    got = session.download_f32(acc, width * width).reshape(width, width)
+    _close("gram f32", got, expect * 2, rtol=1e-3, atol=1e-2)
+    half = np.ascontiguousarray(values, dtype=np.float16)
+    expect_half = half[:count].astype(np.float32).T @ half[:count].astype(np.float32)
+    acc_half = session.zeros(width * width * 4)
+    source_half = session.upload(half)
+    session.begin()
+    encode_gram(session, source_half, acc_half, count, span, width, transposed, scratch, half=True)
+    session.end()
+    got_half = session.download_f32(acc_half, width * width).reshape(width, width)
+    _close("gram f16", got_half, expect_half, rtol=1e-3, atol=1e-2)
+
+
+def check_device_factor(session: Session) -> None:
+    from qwen38_27b.metal41.gptq import _inverse_factor, factor_gram, quadratic_form
+    from qwen38_27b.metal41.session import release_buffer
+
+    rng = np.random.default_rng(6)
+    width = 64
+    tokens = rng.normal(size=(96, width)).astype(np.float32)
+    gram = tokens.T @ tokens
+    expect, dead = _inverse_factor(gram, 0.01)
+    device = session.upload(np.ascontiguousarray(gram, dtype=np.float32))
+    try:
+        factor = factor_gram(session, device, width)
+        try:
+            got = session.download_f32(factor.upper, width * width).reshape(width, width)
+            _close("device factor", got, expect, rtol=1e-3, atol=1e-4)
+            if not np.array_equal(factor._dead, dead):
+                message = "device factor dead columns differ from the host"
+                raise AssertionError(message)
+            rows = rng.normal(size=(4, width)).astype(np.float32)
+            score = quadratic_form(session, device, width, rows)
+            host = float(np.sum((rows @ gram) * rows))
+            _close("gram quadratic", np.array([score]), np.array([host]), rtol=1e-3, atol=1e-2)
+        finally:
+            factor.release()
+    finally:
+        release_buffer(device)
+
+
+def check_foem_columns(session: Session) -> None:
+    from qwen38_27b.metal41.gptq import DeviceFactor, _inverse_factor, foem_fp4, foem_fp4_device
+
+    rng = np.random.default_rng(5)
+    matrix = rng.normal(size=(8, 256)).astype(np.float32) * np.float32(0.05)
+    eye = np.eye(256, dtype=np.float32)
+    upper, dead = _inverse_factor(eye, 0.01)
+    factor = DeviceFactor(session, upper, dead)
+    try:
+        packed, scales = foem_fp4_device(session, matrix, factor, beta=0.0)
+    finally:
+        factor.release()
+    cpu_packed, cpu_scales = foem_fp4(matrix, eye, beta=0.0)
+    if not np.array_equal(packed, cpu_packed) or not np.array_equal(scales, cpu_scales):
+        message = "foem diagonal codes differ from the host"
+        raise AssertionError(message)
+    wide = rng.normal(size=(4100, 64)).astype(np.float32) * np.float32(0.05)
+    upper, dead = _inverse_factor(np.eye(64, dtype=np.float32), 0.01)
+    factor = DeviceFactor(session, upper, dead)
+    try:
+        packed, scales = foem_fp4_device(session, wide, factor, beta=0.0)
+    finally:
+        factor.release()
+    cpu_packed, cpu_scales = foem_fp4(wide, np.eye(64), beta=0.0)
+    if not np.array_equal(packed, cpu_packed) or not np.array_equal(scales, cpu_scales):
+        message = "foem chunked codes differ from the host"
+        raise AssertionError(message)
+    tokens = rng.normal(size=(128, 128)).astype(np.float32)
+    hessian = tokens.T @ tokens
+    correlated = rng.normal(size=(16, 128)).astype(np.float32) * np.float32(0.05)
+    upper, dead = _inverse_factor(hessian, 0.01)
+    factor = DeviceFactor(session, upper, dead)
+    try:
+        gpu_packed, gpu_scales = foem_fp4_device(session, correlated, factor, beta=0.1)
+    finally:
+        factor.release()
+    cpu_packed, cpu_scales = foem_fp4(correlated, hessian, beta=0.1)
+    from qwen38_27b.metal41.gptq import relative_error
+
+    gpu_error = relative_error(correlated, gpu_packed, gpu_scales, hessian)
+    cpu_error = relative_error(correlated, cpu_packed, cpu_scales, hessian)
+    if not np.isfinite(gpu_error) or abs(gpu_error - cpu_error) > 1e-6:
+        message = f"foem device error {gpu_error} host {cpu_error}"
+        raise AssertionError(message)
+    hessian = np.eye(64)
+    hessian[3, 3] = 0.0
+    dead_matrix = np.ones((4, 64), dtype=np.float32)
+    upper, dead = _inverse_factor(hessian, 0.01)
+    factor = DeviceFactor(session, upper, dead)
+    try:
+        packed, _scales = foem_fp4_device(session, dead_matrix, factor, beta=0.1)
+    finally:
+        factor.release()
+    if not np.all((packed[:, 1] >> 4) == 0):
+        message = "foem dead column was rounded"
+        raise AssertionError(message)
+
+
 CHECKS = (
     ("fp4 tile", check_fp4_tile),
     ("int8 prefill", check_i8_prefill),
@@ -1137,6 +1302,8 @@ CHECKS = (
     ("conv", check_conv),
     ("e4m3", check_e4m3),
     ("rope", check_rope),
+    ("embed fp8", check_embed_fp8),
+    ("vision fp8 rows", check_vision_fp8_rows),
     ("vision gelu", check_vision_gelu),
     ("vision erf gelu", check_vision_gelu_erf),
     ("attention", check_attention),
@@ -1145,6 +1312,9 @@ CHECKS = (
     ("sample", check_sample),
     ("image rope", check_fill_mrope),
     ("patch cast", check_patch_cast),
+    ("input gram", check_input_gram),
+    ("device factor", check_device_factor),
+    ("foem columns", check_foem_columns),
 )
 
 

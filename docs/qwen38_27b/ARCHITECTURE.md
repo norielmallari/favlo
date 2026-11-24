@@ -93,7 +93,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 ## Kernels
 
 - `kernels` compiles this package's shader library and fails if any kernel in that library does not produce a pipeline.
-- It then dispatches the 64×64 and 64×32 fp4 `matmul2d` tiles, the 32×128 fp4 and fp8 tiles, the fp8 64×64 weight tile, an fp4 and an fp8 restore into int8, the 64×64 and 32×128 int8 tiles, the int8 scale epilogue, the fp4 GEMV, the four-row fp4 GEMV, the four-row fp8 GEMV, the fused fp8 gate and up projection, the two-activation fp4 GEMV, multiplicative RMSNorm, SwiGLU, one Gated DeltaNet step, the 10240-channel convolution, an E4M3 decode, partial RoPE at position 0, a top-k sample, image position ids, a patch cast, a four-token causal fp8 attention, the tanh GELU, and the erf GELU.
+- It then dispatches the 64×64 and 64×32 fp4 `matmul2d` tiles, the 32×128 fp4 and fp8 tiles, the fp8 64×64 weight tile, an fp4 and an fp8 restore into int8, the 64×64 and 32×128 int8 tiles, the int8 scale epilogue, the fp4 GEMV, the four-row fp4 GEMV, the four-row fp8 GEMV, the fused fp8 gate and up projection, the two-activation fp4 GEMV, multiplicative RMSNorm, SwiGLU, one Gated DeltaNet step, the 10240-channel convolution, an E4M3 decode, partial RoPE at position 0, a top-k sample, image position ids, a patch cast, a four-token causal fp8 attention, an fp8 embedding gather, a vision fp8 row restore, the tanh GELU, and the erf GELU.
 - The host formulas for those dispatches live in `qwen38_27b/checks.py`.
 
 - The DeltaNet state is float32, 48 heads of `128×128`.
@@ -112,8 +112,9 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 ## Record
 
 - `quantize` streams a Hugging Face BF16 checkout into `models/Qwen3.8-27B-fp4`.
-- Every matrix is fp4 E2M1 with an E8M0 scale every 32 along K.
-- That includes the embedding, the projections, the feed-forward, `lm_head`, the MTP block, and the vision tower.
+- Language projections and the feed-forward are fp4 E2M1 with an E8M0 scale every 32 along K.
+- The embedding, `lm_head`, and MTP matrices are fp8 E4M3 with an E8M0 scale every 32 along K.
+- Vision-tower matrices are fp8 E4M3 with an E8M0 scale every 32 along K. Vision norms and biases stay Metal `half`.
 - Rows are stored as a multiple of 64 and K as a multiple of 256.
 
 - One-dimensional parameters stay Metal `half`: RMSNorm gains, `A_log`, `dt_bias`, and biases.
@@ -122,23 +123,30 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - `100` stores all 64 as fp8 E4M3 and writes `models/Qwen3.8-27B-fp8`.
 - A percentage in between writes `models/Qwen3.8-27B-fp8-e<P>`, where `<P>` is that percentage. `20` writes `models/Qwen3.8-27B-fp8-e20`.
 - The layer count is the largest whole number that does not exceed that percentage, so `20` is 12 layers. Those layers are the highest BF16-to-fp4 relative errors. Gate, up, and down move together.
-- `quantize` stores MTP matrices as Metal `half`, with rows and K padded to 64. One-dimensional MTP parameters stay Metal `half`.
-- `mtp-half` rewrites a record whose MTP matrices are still fp4 or fp8, then deletes those quantized bytes.
+- `quantize` stores MTP matrices as fp8 E4M3 in `mtp.bin`. One-dimensional MTP parameters stay Metal `half` in that file.
+- `calibrate` rewrites the language projections of a finished record. The embedding and `lm_head` stay round-to-nearest fp8. Vision-tower matrices and MTP stay the round-to-nearest fp8 pack.
+- The codes are GPTQ with the FOEM column update at β = 0.1. The grid stays E2M1 with an E8M0 scale every 32. The lazy block is 128.
+- Calibration reads the shared corpus in [../calibration/calibration.md](../calibration/calibration.md): 128 sequences of 2048 tokens, 34 SWE, 34 code, 34 tool, and 26 chat. This pipeline renders each row with its own chat template.
+- Each pass prefills those sequences for eight layers. The input Gram is a half-precision `XᵀX` through one `matmul2d` per activation, accumulated in float32 on device. The inverse factor is a float32 Cholesky on that Gram, also on device, and the output-error score is a device quadratic form. The column update runs on device, and the next 4096-row block is staged while the current block is still running. BF16 rows are read from the checkout in sequential 8 MiB pieces, in shard order. The next pass sees the replaced codes. A pass that does not fit is retried one layer at a time.
+- A matrix whose FOEM output error on that Gram is above the round-to-nearest error keeps the round-to-nearest codes.
+- A finished calibrate writes `quantization` `gptq-foem` on the manifest and registers the folder.
+- `mtp-half` rewrites MTP matrices in `mtp.bin` to Metal `half` and drops any MTP bytes still in `resident.bin`.
 - A new `quantize` sets `layout` to 2.
-- That `resident.bin` is name-sorted text, name-sorted MTP, layers 0 through the last as gate, up, then down, and the vision tensors as a dense suffix.
+- `resident.bin` is name-sorted text, then layers 0 through the last as gate, up, and down.
+- MTP tensors are `mtp.bin`. Vision tensors are `vision.bin`. Offsets in each file start at 0 and sit back to back. A text open does not open either file.
 - Those tensors sit back to back. The 128-byte gap between tensors is not written.
 - Each tensor is still its data, then `scale_pad`, then its scales. `scale_offset` is that pad.
-- `mtp-half` on `layout` 2 rewrites that same order and does not put the gap back.
-- A manifest with no `layout`, or a `layout` other than 2, keeps shard order and the 128-byte gap. `mtp-half` on that manifest still rewrites in file-offset order with the gap.
-- The loader for `layout` 2 reads the wired prefix in 8 MiB pieces. When MTP is resident that prefix is one read from the start of the file through the last wired layer. When MTP stays in the file, the text block is one read and the wired layer prefix is the next, and the MTP bytes are not read.
-- Unwired layers and the vision suffix stay out of that read.
+- A manifest with no `layout`, or a `layout` other than 2, keeps shard order and the 128-byte gap.
+- The loader for `layout` 2 reads the wired prefix of `resident.bin` in 8 MiB pieces. Text and the wired layers are one read. `mtp.bin` is read only when MTP is on, into the same device image after the text block.
+- Unwired layers stay out of that read.
 - An unwired layer is one read of its gate, up, and down into the stage.
-- A vision request reads the dense suffix into a second buffer.
+- A vision request reads `vision.bin` into a second buffer.
 - An older manifest still seeks to each file offset and writes the span at its device offset.
 - The registry row written by `quantize` or `models add` sets `mtp` true and `mtp_depth` 3 when that row does not already store `mtp`.
 - The pack is a first rounding of the BF16 head, on the thesis that this raises the accept rate. That rate is not measured.
 - A partial percentage writes `ffn_error.json` before packing.
-- A finished directory has `manifest.json` with `complete: true`. Running quantize again on that directory returns it when the percentage matches. An unfinished directory resumes from `quantize_progress.json`. A progress file with `layout` 2 resumes the dense writer. A progress file without it resumes the shard-order writer.
+- A finished directory has `manifest.json` with `complete: true`. Running quantize again on that directory returns it when the percentage matches. An unfinished directory resumes from `quantize_progress.json`. A progress file with `layout` 2 resumes the dense writer. Each finished tensor stores a SHA-256 of its bytes, and those bytes are on disk before the progress file names them. A tensor with no digest, or whose bytes do not match, is written again. A progress file without `layout` resumes the shard-order writer. A recorded digest that does not match truncates that file from the tensor's offset and writes the tail again.
+- A matrix is on disk before `foem_progress.json` records its name. A name that is missing there is packed again.
 - The format bound is [research/ffn-fp8-budget.md](research/ffn-fp8-budget.md).
 - Prefill restores each feed-forward matrix from that packed fp4 or fp8 record into one int8 stage.
 - Decode reads gate, up, and down with `gemv_fp4_x4` or `gemv_fp8_x4`.
@@ -187,7 +195,7 @@ Streaming:
 - The sample loop enqueues each token id. A separate thread decodes that id and writes the delta.
 - The stream does not send `data: [DONE]`.
 - `POST /v1/chat/completions` writes those events back as a `chat.completion.chunk` with `id`, `object`, `created`, and `model`, framed as HTTP chunked encoding, and ends with `data: [DONE]`.
-- An empty delta is sent as each prefill chunk finishes, so the stream stays open through the copy.
+- An empty delta is sent as each prefill chunk finishes, after the message item is open, and that item is closed before the response completes.
 - Reasoning is `delta.reasoning_content` until `</think>`. The reply is `delta.content`.
 - A tool call streams as `delta.tool_calls` with an `index`: the name when `<function=` closes, then argument pieces that concatenate to one JSON object.
 - `tool_choice` `none` keeps the function list in the template, blocks tool-call tokens in the reply, and does not send `tool_calls`.
@@ -225,9 +233,9 @@ Context length and fit:
 
 Vision:
 
-- Vision tensors stay in the record file until a message contains an image.
-- `layout` 2 stores them as a dense suffix. That request reads the suffix.
-- An older manifest reads from the first vision offset through the last. That range can include bytes that are not vision tensors.
+- Vision-tower matrices are fp8 E4M3. The tower multiplies them with `prefill_fp8_n64` and restores the position table with `dequant_fp8_rows`. An older record whose vision matrices are fp4 still uses `prefill_fp4_n64` and `dequant_fp4_rows`.
+- Vision tensors stay in `vision.bin` until a message contains an image.
+- That request reads the file into a second buffer.
 - That request runs the tower's 27 blocks and replaces the image placeholder with one token per 2×2 patch block.
 - The tower resizes a still so both sides are multiples of 32 and the pixel count stays inside the checkpoint processor, 65536 through 16777216.
 - A chat image is an `image_url` part: an `http` or `https` URL, a `data:` URL, or base64. PNG, JPEG, GIF, and WebP decode to RGB.
@@ -313,12 +321,9 @@ Recorded rates and prefix store:
 - The sigmoid of the gate multiplies the attention output before `o_proj`.
 - The feed-forward is SwiGLU with intermediate width 17408.
 
-- One decode step reads the fp4 language projections and the head.
-- With `in_proj_a` and `in_proj_b` stored at 64 rows, that image is 13.18 GiB.
-- The embedding contributes one row.
+- One decode step reads the fp4 language projections and the fp8 head.
+- The embedding contributes one gathered row.
 - Convolution and norms are Metal `half`.
-- At 307 GB/s that 13.18 GiB read is 21.7 tok/s before the key/value cache.
-- That figure is the byte count divided by that bandwidth.
 - The isolated projection sum is a measurement in [research/kernel-ceilings.md](research/kernel-ceilings.md).
 
 Measured forward rates on this pipeline. Each run is filed under the linked research note.
@@ -339,6 +344,7 @@ Measured forward rates on this pipeline. Each run is filed under the linked rese
 - The cold synthetic instruct prompts at 512 and 10000 tokens are a measurement in [research/synthetic-prompt.md](research/synthetic-prompt.md).
 - The same lengths with MTP on at depth 3 are a measurement in [research/synthetic-prompt-mtp.md](research/synthetic-prompt-mtp.md).
 - The synthetic prompt on `half` keys and values, at 512, 1024, 4096, and 10000 tokens, is a measurement in [research/synthetic-prompt-half.md](research/synthetic-prompt-half.md).
+- The same lengths on the full-fp4 GPTQ-FOEM record, with `half` keys and values and MTP off, are a measurement in [research/synthetic-prompt-fp4.md](research/synthetic-prompt-fp4.md).
 - On 30 October 2026 the coding agent with MTP on at depth 3 measured 308.17 tok/s prefill over 2752 tokens (8.93 s) and 15.39 tok/s decode over 823 tokens (53.46 s), context 3265 over 8 requests.
 - On 1 November 2026 the same command with MTP off measured 302.30 tok/s prefill over 2763 tokens (9.14 s) and 14.36 tok/s decode over 942 tokens (65.60 s), context 3359 over 8 requests.
 - With MTP on at depth 3 it measured 298.38 tok/s prefill over 2766 tokens (9.27 s) and 15.34 tok/s decode over 997 tokens (64.98 s), context 3432 over 8 requests.
@@ -353,12 +359,12 @@ Measured forward rates on this pipeline. Each run is filed under the linked rese
 
 Decode and draft:
 
-- Decode multiplies half query, key, and value with `gemv_half`. Prefill uses `prefill_half_n64`.
+- Decode multiplies MTP query, key, and value with `gemv_fp8_x4`. Prefill uses the fp8 64-row tile.
 - Language layers stay on the fp4 `attn_qkv` kernel.
 - `mtp.norm` plus the shared `lm_head` argmax is the draft. Prefill fills that plane while the head is resident.
 - A chat request drafts with it when `mtp` is true and the head is resident.
 - A request that omits `mtp` uses the registry row. A row that omits `mtp` does not draft.
-- The opening copies the MTP block and its key/value plane only when that resolved flag is true. A false flag leaves those tensors in the record file.
+- The opening reads `mtp.bin` and its key/value plane only when that resolved flag is true. A false flag does not open the file.
 - Temperature, penalties, thinking, and the sampling card do not change that flag.
 - The draft length is `mtp_depth`. A request that omits it uses the row. A row that omits `mtp_depth` drafts three tokens.
 - One window drafts in one command buffer. The next draft reads the previous id from device. The host reads those ids once when the chain ends.

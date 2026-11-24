@@ -1584,6 +1584,67 @@ kernel void gather_fp4_row(
     }
 }
 
+kernel void embed_fp8_rows(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device const uint* tokens [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row [[threadgroup_position_in_grid]])
+{
+    if (row >= count) {
+        return;
+    }
+    uint blocks = inner >> 5;
+    device const uchar* packed = weights + tokens[row] * inner;
+    device const uchar* row_scale = scales + tokens[row] * blocks;
+    device float* dest = destination + row * inner;
+    for (uint block = 0u; block < blocks; ++block) {
+        float factor = e8m0_code(row_scale[block]);
+        uint element = (block << 5) + lane;
+        dest[element] = e4m3_code(packed[element]) * factor;
+    }
+}
+
+kernel void gather_fp8_row(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    constant uint& row [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    uint blocks = inner >> 5;
+    device const uchar* packed = weights + row * inner;
+    device const uchar* row_scale = scales + row * blocks;
+    for (uint block = 0u; block < blocks; ++block) {
+        float factor = e8m0_code(row_scale[block]);
+        uint element = (block << 5) + lane;
+        destination[element] = e4m3_code(packed[element]) * factor;
+    }
+}
+
+kernel void gather_fp8_id(
+    device const uchar* weights [[buffer(0)]],
+    device const uchar* scales [[buffer(1)]],
+    device float* destination [[buffer(2)]],
+    device const uint* row_id [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    uint row = row_id[0];
+    uint blocks = inner >> 5;
+    device const uchar* packed = weights + row * inner;
+    device const uchar* row_scale = scales + row * blocks;
+    for (uint block = 0u; block < blocks; ++block) {
+        float factor = e8m0_code(row_scale[block]);
+        uint element = (block << 5) + lane;
+        destination[element] = e4m3_code(packed[element]) * factor;
+    }
+}
+
 kernel void gather_fp4_id(
     device const uchar* weights [[buffer(0)]],
     device const uchar* scales [[buffer(1)]],

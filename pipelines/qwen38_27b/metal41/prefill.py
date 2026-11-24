@@ -181,6 +181,7 @@ def _chunk(
             if layer > 0 and layer % 4 == 0:
                 runtime.session.submit()
             _rms(runtime, work.hidden, runtime.weight(layer, "input_layernorm.weight"), work.normed, count)
+            _capture(runtime, work.normed, count, count, HIDDEN, layer, "attn", half=False)
             if kind == "full_attention":
                 _attend(runtime, work, layer, count, rows, pos0)
             else:
@@ -192,9 +193,18 @@ def _chunk(
                 work.normed,
                 count,
             )
+            _capture(runtime, work.normed, count, count, HIDDEN, layer, "ffn", half=False)
             _ffn(runtime, work, layer, count, rows)
         if mtp and getattr(runtime, "drafts", False):
             _mtp_rows(runtime, work, ids, pos0, follow, rows)
+        grams = getattr(runtime, "grams", None)
+        if grams is not None and grams.wants(-1, "head"):
+            final = runtime._resolve(
+                "model.language_model.norm.weight",
+                "model.norm.weight",
+            )
+            _rms(runtime, work.hidden, final, work.normed, count)
+            _capture(runtime, work.normed, count, count, HIDDEN, -1, "head", half=False)
         runtime.session.end()
     except Exception:
         runtime.session.finish()
@@ -244,8 +254,16 @@ def _mtp_rows(
 def _embed(runtime: Any, work: _Workspace, count: int, dest: Any = None) -> None:
     buf, offset, entry = runtime.locate("model.language_model.embed_tokens.weight", "model.embed_tokens.weight")
     _rows, inner = entry["stored_shape"]
+    kind = str(entry.get("dtype", "fp4"))
+    if kind == "fp8":
+        kernel = "embed_fp8_rows"
+    elif kind == "fp4":
+        kernel = "embed_fp4_rows"
+    else:
+        message = f"embedding dtype {kind} is not fp4 or fp8"
+        raise RuntimeError(message)
     runtime.session.encode(
-        "embed_fp4_rows",
+        kernel,
         [
             (buf, offset),
             (buf, runtime.scale_offset(entry, offset)),
@@ -296,6 +314,7 @@ def _gdn(runtime: Any, work: _Workspace, layer: int, count: int, rows: int) -> N
         (48, 1, 1),
         (128, 1, 1),
     )
+    _capture(runtime, work.big2, count, count, Z_WIDTH, layer, "gout", half=False)
     _cast_half(runtime, work, work.big2, count * Z_WIDTH, rows, Z_WIDTH)
     _quantize_act(runtime, work, rows, Z_WIDTH)
     _matmul_i8(runtime, work, runtime.weight(layer, "linear_attn.out_proj.weight"), work.big0, rows)
@@ -381,6 +400,8 @@ def _attend(
         count=count,
         slot=slot,
     )
+    if prefix is None:
+        _capture(runtime, work.big0, count, count, ATTN_OUT, layer, "aout", half=False)
     _cast_half(runtime, work, work.big0, count * ATTN_OUT, rows, ATTN_OUT)
     _matmul(runtime, work.half, weight("self_attn.o_proj.weight"), work.big1, rows)
     _add(runtime, work, count, work.big1)
@@ -432,6 +453,7 @@ def _ffn(
         (rows * INTERMEDIATE // 256, 1, 1),
         (256, 1, 1),
     )
+    _capture(runtime, work.half, count, rows, INTERMEDIATE, layer, "down", half=True)
     _quantize_act(runtime, work, rows, INTERMEDIATE)
     _matmul_i8(runtime, work, weight("mlp.down_proj.weight"), work.big0, rows)
     _add(runtime, work, count, work.big0)
@@ -616,6 +638,24 @@ def _add(runtime: Any, work: _Workspace, count: int, src: Any) -> None:
         (n // 256, 1, 1),
         (256, 1, 1),
     )
+
+
+def _capture(
+    runtime: Any,
+    buffer: Any,
+    count: int,
+    span: int,
+    width: int,
+    layer: int | None,
+    stream: str,
+    *,
+    half: bool,
+) -> None:
+    """Copy one activation into ``runtime.grams`` when this pass asked for it."""
+    grams = getattr(runtime, "grams", None)
+    if grams is None or layer is None or not grams.wants(layer, stream):
+        return
+    grams.observe(runtime.session, buffer, count, span, width, layer, stream, half=half)
 
 
 def _write(buffer: Any, blob: bytes) -> None:

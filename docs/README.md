@@ -31,6 +31,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [qwen38_27b/research/synthetic-prompt.md](qwen38_27b/research/synthetic-prompt.md) | Qwen3.8-27B cold 512-token and 10000-token prompts |
 | [qwen38_27b/research/synthetic-prompt-mtp.md](qwen38_27b/research/synthetic-prompt-mtp.md) | Qwen3.8-27B cold synthetic prompts with MTP on |
 | [qwen38_27b/research/synthetic-prompt-half.md](qwen38_27b/research/synthetic-prompt-half.md) | Qwen3.8-27B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e20 pack with half keys and values |
+| [qwen38_27b/research/synthetic-prompt-fp4.md](qwen38_27b/research/synthetic-prompt-fp4.md) | Qwen3.8-27B cold 512, 1024, 4096, and 10000-token prompts on the full-fp4 GPTQ-FOEM pack with half keys and values |
 | [qwen38_27b/research/synthetic-prompt-mtp-half.md](qwen38_27b/research/synthetic-prompt-mtp-half.md) | Qwen3.8-27B cold 512, 1024, 4096, and 10000-token prompts on the fp8-e20 pack with half keys and values and MTP on |
 | [qwen36_35b_a3b/README.md](qwen36_35b_a3b/README.md) | Qwen3.6-35B-A3B summary |
 | [inkling_2_mini/README.md](inkling_2_mini/README.md) | Inkling 2 Mini summary |

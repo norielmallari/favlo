@@ -1,10 +1,10 @@
 """What stays on the device when the prompt and the next token need room.
 
 The prefill workspace, the decode buffers, the DeltaNet state, and the key/value
-cache are claimed first. Vision tensors stay in the record. MTP weights stay in
-the record when the opening turns MTP off. When it is on, the head is dropped
-as a whole before any language feed-forward layer. Unwired language layers are
-read into one stage, from the last index downward.
+cache are claimed first. Vision tensors stay in ``vision.bin``. MTP weights stay
+in ``mtp.bin`` and are copied only when the opening turns MTP on. When it is on,
+the head is dropped as a whole before any language feed-forward layer. Unwired
+language layers are read into one stage, from the last index downward.
 """
 
 from __future__ import annotations
@@ -144,9 +144,14 @@ def is_vision(name: str) -> bool:
     return name.startswith("visual.") or ".visual." in f".{name}."
 
 
+def is_mtp(name: str) -> bool:
+    """True when ``name`` is an MTP tensor."""
+    return name.startswith("mtp.")
+
+
 def language_ffn_layer(name: str) -> int | None:
     """The language feed-forward layer of ``name``, or None."""
-    if name.startswith("mtp.") or is_vision(name):
+    if is_mtp(name) or is_vision(name):
         return None
     if not any(name.endswith(part) for part in _FFN_PARTS):
         return None
@@ -169,7 +174,7 @@ def group_tensors(tensors: dict[str, dict], layers: int = LAYERS) -> Group:
     per: list[list[tuple[str, int, int]]] = [[] for _ in range(layers)]
     for name, entry in tensors.items():
         item = (name, int(entry["offset"]), tensor_span(entry))
-        if name.startswith("mtp."):
+        if is_mtp(name):
             mtp.append(item)
             continue
         if is_vision(name):
@@ -192,17 +197,15 @@ def group_tensors(tensors: dict[str, dict], layers: int = LAYERS) -> Group:
 
 
 def resident_names(names: Iterable[str], layers: int = LAYERS) -> list[str]:
-    """Layout 2 file order: name-sorted text, name-sorted MTP, gate then up then down, vision last."""
+    """Layout 2 order of ``resident.bin``: text, then gate, up, and down.
+
+    Vision lives in ``vision.bin`` and MTP lives in ``mtp.bin``. Neither file is
+    this list.
+    """
     text: list[str] = []
-    mtp: list[str] = []
     per: list[list[str]] = [[] for _ in range(layers)]
-    vision: list[str] = []
     for name in names:
-        if name.startswith("mtp."):
-            mtp.append(name)
-            continue
-        if is_vision(name):
-            vision.append(name)
+        if is_vision(name) or is_mtp(name):
             continue
         layer = language_ffn_layer(name)
         if layer is None:
@@ -213,44 +216,56 @@ def resident_names(names: Iterable[str], layers: int = LAYERS) -> list[str]:
             raise RuntimeError(message)
         per[layer].append(name)
     ordered = sorted(text)
-    ordered.extend(sorted(mtp))
     for layer, items in enumerate(per):
         if items:
             ordered.extend(_layer_names(layer, items))
-    ordered.extend(sorted(vision))
     return ordered
 
 
-def vision_suffix(tensors: dict[str, dict]) -> tuple[int, int]:
-    """File offset and length of the dense vision suffix."""
+def vision_file(tensors: dict[str, dict]) -> int:
+    """Byte length of ``vision.bin``. Offsets start at 0 and sit back to back."""
     rows: list[tuple[int, int, str]] = []
-    others: list[tuple[int, int, str]] = []
     for name, entry in tensors.items():
-        item = (int(entry["offset"]), tensor_span(entry), name)
-        if is_vision(name):
-            rows.append(item)
-        else:
-            others.append(item)
+        if not is_vision(name):
+            continue
+        if str(entry.get("file") or "") != "vision.bin":
+            message = f"{name} is not in vision.bin"
+            raise RuntimeError(message)
+        rows.append((int(entry["offset"]), tensor_span(entry), name))
     if not rows:
         message = "this record has no vision tower"
         raise RuntimeError(message)
     rows.sort()
-    start = rows[0][0]
-    cursor = start
+    cursor = 0
     for offset, span, name in rows:
         if offset != cursor:
-            message = f"{name} is not in the vision suffix"
+            message = f"{name} is not packed in vision.bin"
             raise RuntimeError(message)
         cursor += span
-    end = cursor
-    for offset, span, name in others:
-        if offset < end and offset + span > start:
-            message = f"{name} sits in the vision suffix"
+    return cursor
+
+
+def mtp_file(tensors: dict[str, dict]) -> int:
+    """Byte length of ``mtp.bin``. Offsets start at 0 and sit back to back."""
+    rows: list[tuple[int, int, str]] = []
+    for name, entry in tensors.items():
+        if not is_mtp(name):
+            continue
+        if str(entry.get("file") or "") != "mtp.bin":
+            message = f"{name} is not in mtp.bin"
             raise RuntimeError(message)
-        if offset >= end:
-            message = f"{name} is past the vision suffix"
+        rows.append((int(entry["offset"]), tensor_span(entry), name))
+    if not rows:
+        message = "this record has no MTP block"
+        raise RuntimeError(message)
+    rows.sort()
+    cursor = 0
+    for offset, span, name in rows:
+        if offset != cursor:
+            message = f"{name} is not packed in mtp.bin"
             raise RuntimeError(message)
-    return start, end - start
+        cursor += span
+    return cursor
 
 
 def _layer_names(layer: int, names: list[str]) -> list[str]:
