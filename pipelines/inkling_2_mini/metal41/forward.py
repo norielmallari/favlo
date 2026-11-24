@@ -1227,7 +1227,8 @@ class InklingRuntime:
         self.reset()
         self.expert_grams = grams
         try:
-            self._prefill([int(item) for item in tokens], 0, 0.0, False)
+            ids = [int(item) for item in tokens]
+            self._prefill(ids, ids, 0, 0.0, False)
             for item in grams.values():
                 item.tokens += len(tokens)
                 item.done += 1
@@ -1240,7 +1241,8 @@ class InklingRuntime:
         self.reset()
         self.capture = capture
         try:
-            self._prefill([int(item) for item in tokens], 0, 0.0, False)
+            ids = [int(item) for item in tokens]
+            self._prefill(ids, ids, 0, 0.0, False)
             capture.tokens += len(tokens)
         finally:
             self.capture = None

@@ -980,6 +980,31 @@ def test_mxfp8_scale_covers_the_block_peak() -> None:
     assert float(np.max(np.abs(rebuilt - matrix)) / np.max(np.abs(matrix))) < 0.03
 
 
+def test_expert_capture_prefills_the_sequence_without_sampling() -> None:
+    from types import SimpleNamespace
+
+    from inkling_2_mini.metal41.forward import InklingRuntime
+
+    runtime = InklingRuntime.__new__(InklingRuntime)
+    seen: list[tuple[object, ...]] = []
+
+    def reset() -> None:
+        return None
+
+    def prefill(
+        prompt: list[int], fresh: list[int], pos: int, temperature: float, device_pick: bool
+    ) -> None:
+        seen.append((prompt, fresh, pos, temperature, device_pick))
+
+    runtime.reset = reset
+    runtime._prefill = prefill
+    gram = SimpleNamespace(tokens=0, done=0)
+    runtime.capture_experts([7, 8, 9], {0: gram})
+    assert seen == [([7, 8, 9], [7, 8, 9], 0, 0.0, False)]
+    assert gram.tokens == 3 and gram.done == 1
+    assert runtime.expert_grams is None
+
+
 def test_portable_import_leaves_the_device_unloaded() -> None:
     import sys
 
