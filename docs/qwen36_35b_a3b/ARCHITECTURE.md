@@ -424,7 +424,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - A reply after a reasoning item stays output index 1.
 - The reasoning item opens with `response.output_item.added`, then `response.content_part.added` for an empty `reasoning_text` part.
 - Deltas are `response.reasoning_text.delta`.
-- The same trace is `summary` (`summary_text`) and `content` (`reasoning_text`) on the completed item.
+- The same trace is `summary` (`summary_text`), `content` (`reasoning_text`), and `encrypted_content` on the completed item.
 - That item is closed (`response.reasoning_text.done`, `response.content_part.done`, then `response.output_item.done`) before the message item opens.
 - The first text delta is preceded by `response.content_part.added`.
 - The completed response reuses the streamed message id.

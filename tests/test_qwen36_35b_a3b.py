@@ -895,6 +895,7 @@ def test_a_thinking_reply_completes_after_the_text_deltas() -> None:
     )
     assert closed["item"]["summary"][0]["text"] == "Need a plan\n"
     assert closed["item"]["content"][0]["text"] == "Need a plan\n"
+    assert closed["item"]["encrypted_content"] == "Need a plan\n"
     reason_done = kinds.index("response.output_item.done")
     message_added = next(
         i

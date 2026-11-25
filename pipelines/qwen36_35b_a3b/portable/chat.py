@@ -987,6 +987,7 @@ def _stream(
                         "content": (
                             [{"type": "reasoning_text", "text": body}] if body else []
                         ),
+                        "encrypted_content": body,
                         "status": "completed",
                     },
                 }
