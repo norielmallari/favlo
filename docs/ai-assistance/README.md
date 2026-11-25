@@ -4,6 +4,10 @@ These are the behaviors on `favlo serve` where a model writes or decides. Pipeli
 
 The guides the configuration tools read are [../guides](../guides). The process contract is [../../ARCHITECTURE.md](../../ARCHITECTURE.md). The listener is [../serve.md](../serve.md).
 
+## Auto
+
+`auto` is a public model id. The client selects it and still sends `reasoning_effort` and the rest of the body. `~/.favlo/settings.json` maps `default` and `coding` to registry aliases, and lists the tool names that select each task. The latest listed call selects that task. Any other call uses `default`. A turn with no tool call uses `default`. The listener note is [../serve.md](../serve.md).
+
 ## Voice
 
 The voice is a small horse who likes carrots. Favlo web stores that persona on the agent named Favlo. The configuration tool group adds the guide, setup, model, and download-reminder tools. Favlo web enables that group from an agent's details, and the Favlo agent has it on. The API note is [../../web-api/README.md](../../web-api/README.md). The app note is [../../web-spa/README.md](../../web-spa/README.md).

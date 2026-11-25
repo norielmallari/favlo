@@ -14,7 +14,7 @@ from harness.coding.__main__ import argument_parser
 from harness.coding.agent_tools import coding_tools
 from harness.coding.grade import grade
 from harness.coding.compliance import vision_problems
-from harness.coding.loop import agent_options, decode_ready, ledger_log, prefix_problems
+from harness.coding.loop import agent_options, decode_ready, ledger_log, prefix_problems, scores_prefix
 from harness.turn_printer import print_updates
 from harness.file_session import parse_requests, pipeline_log
 from harness.coding.session import REQUIRED_TOOLS, session_for
@@ -50,6 +50,11 @@ cache miss
 
 def test_thinking_card_id() -> None:
     assert card_model_id("qwen38_27b", thinking=True) == "qwen38_27b:thinking"
+
+
+def test_auto_skips_the_prefix_check() -> None:
+    assert scores_prefix("auto") is False
+    assert scores_prefix("example-coder") is True
 
 
 def test_prefix_problems_require_a_disk_load() -> None:

@@ -107,9 +107,18 @@ def main(argv: list[str] | None = None) -> int:
         vision = HORSE.read_bytes()
     server = Server(args.max_memory, pipeline=stem)
     try:
+        from favlo.auto_route import PUBLIC_ID, auto_map
         from favlo.registry import resolve
 
-        selection = resolve(args.model, root=root)
+        if stem == PUBLIC_ID:
+            mapping = auto_map()
+            coding = mapping.get("coding") if mapping else None
+            if not isinstance(coding, str):
+                print("auto is not configured", flush=True)
+                return 1
+            selection = resolve(coding, root=root)
+        else:
+            selection = resolve(args.model, root=root)
         server.start()
         vision_flag = "on" if args.vision else "off"
         store = args.store == "on"

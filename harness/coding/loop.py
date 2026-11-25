@@ -194,6 +194,11 @@ def _still_span(blocks: list[tuple[int, list[str]]]) -> tuple[int, int]:
     return start, end
 
 
+def scores_prefix(model: str) -> bool:
+    """A named model must reload its prefix. ``auto`` may change checkpoint."""
+    return model.partition(":")[0] != "auto"
+
+
 def prefix_problems(
     requests: list[RequestRate], *, preserve_thinking: bool = False
 ) -> list[str]:
@@ -316,9 +321,10 @@ def run_session(
             )
         )
         text = ledger_log(pipeline_log(server.log.text(), model))
-        problems.extend(
-            prefix_problems(parse_requests(text), preserve_thinking=preserve_thinking)
-        )
+        if scores_prefix(model):
+            problems.extend(
+                prefix_problems(parse_requests(text), preserve_thinking=preserve_thinking)
+            )
         if vision is not None:
             from harness.coding.compliance import vision_problems
 

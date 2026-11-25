@@ -388,24 +388,41 @@ def build_app(args: Any, state: dict[str, Any]) -> Any:
 
 
 def _models(_request: Request, state: dict[str, Any]) -> Response:
+    from favlo.auto_route import auto_row
+
     rows = served_model_objects(resident=state.get("record"))
+    rows.append(auto_row())
     return _json_response({"object": "list", "data": rows})
 
 
 def _one_model(request: Request, state: dict[str, Any]) -> Response:
+    from favlo.auto_route import PUBLIC_ID, auto_row
+
+    model_id = request.path_params["model_id"]
+    if model_id == PUBLIC_ID:
+        return _json_response(auto_row())
     try:
-        row = one_model(request.path_params["model_id"], resident=state.get("record"))
+        row = one_model(model_id, resident=state.get("record"))
     except LookupError as exc:
         return _error(404, str(exc), "not_found")
     return _json_response(row)
 
 
 def _props(request: Request, state: dict[str, Any]) -> Response:
+    from favlo.auto_route import PUBLIC_ID, auto_map
+
     model = request.query_params.get("model")
+    if model == PUBLIC_ID:
+        mapping = auto_map()
+        model = mapping.get("default") if mapping else None
+        if not model:
+            return _error(404, "auto is not configured", "not_found")
     try:
         payload = model_props(model, resident=state.get("record"))
     except LookupError as exc:
         return _error(404, str(exc), "not_found")
+    if request.query_params.get("model") == PUBLIC_ID:
+        payload["model_alias"] = PUBLIC_ID
     return _json_response(payload)
 
 
@@ -713,6 +730,7 @@ def _run_once(
             reply.json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             return
         dispatch = kind
+        asked = ""
         if kind == "chat":
             from favlo.responses import ChatWire, RequestError, chat_to_responses
 
@@ -727,10 +745,21 @@ def _run_once(
             from favlo.responses import ResponseWire
 
             reply = ResponseWire(reply)
+        if kind in {"chat", "responses"}:
+            from favlo.auto_route import AutoRouteError, is_auto, prepare, request_label
+
+            if is_auto(body):
+                asked = "auto"
+                try:
+                    body = prepare(body, state)
+                except AutoRouteError as exc:
+                    reply.json(404, {"error": {"message": str(exc), "type": "not_found"}})
+                    return
         try:
             prepared = open_for(kind if kind not in {"chat", "responses"} else "responses", body, state, args)
         except LookupError as exc:
-            model = _request_model(None, body)
+            concrete = _request_model(None, body)
+            model = request_label(concrete) if asked else concrete
             _log(_request_edge("request open", model))
             opened = True
             reply.json(404, {"error": {"message": str(exc), "type": "not_found"}})
@@ -743,7 +772,8 @@ def _run_once(
         park_embed = prepared.park_embed
         if selection is not None:
             reply.model_id = selection.requested_id
-        model = _request_model(selection, body)
+        concrete = _request_model(selection, body)
+        model = request_label(concrete) if asked else concrete
         _log(_request_edge("request open", model))
         opened = True
         if runtime is None or module is None:
