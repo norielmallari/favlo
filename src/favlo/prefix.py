@@ -8,15 +8,17 @@ One directory is ``~/.favlo/prefix/<model>/<checkpoint>/<hash>.bin``. The
 checkpoint id is the hex SHA-256 of ``manifest.json``, or of ``config.json``
 when the record has no manifest. The file name is the hex SHA-256 of the
 format, the model id, that digest, the cache tag, and the token ids. Regions
-that are read back start on a 16 KB page. The write goes to a temporary name
-in the same directory and replaces the destination after the header hash is
-in place. A crash leaves the previous complete file. When the new token list
-extends a file already in the directory, a region whose stored bytes are a
-prefix of the new blob is copied forward and the new tail is written after
-it. The store root (``~/.favlo/prefix``, or one scratch name) is kept to
-32 GiB when a budget is set. Past that, the oldest files under that root are
-deleted, across every model and checkpoint. The file just written stays, and
-so does every file named in a ``pinned`` sidecar under the root.
+that are read back start on a 16 KB page and keep the adapter's capture order
+on disk so install walks the file forward. A restore reads the span that holds
+the named regions in one sequential pass (1 MiB pieces). The write goes to a
+temporary name in the same directory and replaces the destination after the
+header hash is in place. A crash leaves the previous complete file. When the
+new token list extends a file already in the directory, a region whose stored
+bytes are a prefix of the new blob is copied forward and the new tail is
+written after it. The store root (``~/.favlo/prefix``, or one scratch name) is
+kept to 32 GiB when a budget is set. Past that, the oldest files under that
+root are deleted, across every model and checkpoint. The file just written
+stays, and so does every file named in a ``pinned`` sidecar under the root.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ PREFERRED_IO = 1 << 20
 DEFAULT_BUDGET = 32 << 30
 _SCRATCH_NAME = re.compile(r"^[a-z0-9-]{1,64}$")
 _MAGIC = b"MADP"
-_VERSION = 1
+_VERSION = 2
 
 _F_PREALLOCATE = 42
 _F_ALLOCATECONTIG = 0x00000002
@@ -456,19 +458,25 @@ def read_tokens(path: Path) -> list[int] | None:
     return list(header.tokens)
 
 
-def read_regions(header: PrefixHeader, names: Sequence[str]) -> dict[str, bytes] | None:
-    """One read of each named region. ``None`` when a name is missing."""
+def read_regions(
+    header: PrefixHeader, names: Sequence[str]
+) -> dict[str, bytes | memoryview] | None:
+    """Load the named regions in one sequential span read.
+
+    Missing names return ``None``. Empty regions are empty ``bytes``. Non-empty
+    values are ``memoryview`` slices of one host buffer; keep the dict alive
+    until those bytes are copied onto the device.
+    """
     refs: list[RegionRef] = []
     for name in names:
         ref = header.region(name)
         if ref is None:
             return None
         refs.append(ref)
-    fd = os.open(header.path, os.O_RDONLY)
     try:
-        return {ref.name: _read_ref(fd, ref) for ref in refs}
-    finally:
-        os.close(fd)
+        return _read_refs(header.path, refs)
+    except OSError:
+        return None
 
 
 def _parse_header(path: Path, blob: bytes, file_size: int) -> PrefixHeader:
@@ -557,7 +565,8 @@ def _write_file(
     prior: PrefixHeader | None,
     prior_fd: int | None,
 ) -> None:
-    ordered = tuple(sorted(record.regions, key=lambda region: region.name))
+    # Keep capture order so a later install walks the file forward.
+    ordered = tuple(record.regions)
     names = [region.name for region in ordered]
     header_size = _header_size(store.model, store.tag, record.tokens, names)
     cursor = stored_bytes(header_size)
@@ -668,15 +677,47 @@ def _copy_pages(src: int, src_at: int, dst: int, dst_at: int, nbytes: int) -> No
 
 
 def _materialize(header: PrefixHeader) -> PrefixRecord:
-    fd = os.open(header.path, os.O_RDONLY)
-    try:
-        regions = [Region(ref.name, _read_ref(fd, ref)) for ref in header.regions]
-    finally:
-        os.close(fd)
+    blobs = _read_refs(header.path, header.regions)
+    regions = [Region(ref.name, bytes(blobs[ref.name])) for ref in header.regions]
     return PrefixRecord(list(header.tokens), regions)
 
 
+def _read_refs(path: Path, refs: Sequence[RegionRef]) -> dict[str, bytes | memoryview]:
+    """One sequential span covering every non-empty ref."""
+    out: dict[str, bytes | memoryview] = {}
+    live = [ref for ref in refs if ref.length > 0]
+    for ref in refs:
+        if ref.length == 0:
+            out[ref.name] = b""
+    if not live:
+        return out
+    start = min(ref.offset for ref in live)
+    end = max(ref.offset + ref.length for ref in live)
+    size = end - start
+    buf = bytearray(size)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        _prepare_sequential_read(fd)
+        filled = 0
+        while filled < size:
+            take = min(PREFERRED_IO, size - filled)
+            got = _pread(fd, take, start + filled)
+            if len(got) != take:
+                message = "prefix file ended early"
+                raise OSError(message)
+            buf[filled : filled + take] = got
+            filled += take
+    finally:
+        os.close(fd)
+    view = memoryview(buf)
+    for ref in live:
+        lo = ref.offset - start
+        out[ref.name] = view[lo : lo + ref.length]
+    return out
+
+
 def _read_ref(fd: int, ref: RegionRef) -> bytes:
+    """One region from an already-open descriptor. Prefer ``_read_refs``."""
     if ref.length == 0:
         return b""
     got = _pread(fd, ref.length, ref.offset)
@@ -848,3 +889,16 @@ def _bypass_cache(fd: int) -> None:
     flag = getattr(fcntl, "F_NOCACHE", None)
     if flag is not None:
         fcntl.fcntl(fd, flag, 1)
+
+
+def _prepare_sequential_read(fd: int) -> None:
+    """Sequential read-ahead, then skip the page cache for this large scan."""
+    if fcntl is None:
+        return
+    ahead = getattr(fcntl, "F_RDAHEAD", None)
+    if ahead is not None:
+        try:
+            fcntl.fcntl(fd, ahead, 1)
+        except OSError:
+            pass
+    _bypass_cache(fd)

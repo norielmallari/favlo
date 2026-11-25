@@ -17,7 +17,7 @@ Another pipeline's adapter, region names, and pack functions are not a reference
 | Which bytes are a region, and whether a header can continue a prompt | this pipeline's adapter |
 | When the live sequence is written or loaded | `PrefixSession`, or this pipeline's `align` when it has extra device policy |
 
-`longest()` reads every region into memory. The request path uses `matches()` and the adapter. A region name is unique inside one record. The store sorts names when it writes.
+`longest()` reads every region into memory. The request path uses `matches()` and the adapter. A region name is unique inside one record. The store keeps the adapter's region order when it writes so install walks the file forward.
 
 The directory is `~/.favlo/prefix/<model>/<checkpoint>/<hash>.bin`. `<model>` is this pipeline's flag stem. The tag is the active key/value mode. The digest is `checkpoint_digest(root)`. Pass `budget=DEFAULT_BUDGET`. That budget caps every `.bin` under the store root (`~/.favlo/prefix`, or one scratch name), not one model alone. A file whose header does not parse is removed when the store opens. A file for another model, digest, or tag is ignored by lookup.
 
@@ -30,7 +30,7 @@ Put `<package>/prefix.py` in this pipeline. Implement the four `PrefixAdapter` m
 - `reset()` clears the device sequence.
 - `accept(header, prompt)` is the only place that decides a header can continue `prompt`.
 
-`read_regions(header, names)` reads those regions in one open. `header.region(name)` is the offset and length for a Metal read. Use that when the stored bytes are already the device layout. Pack on the host when the device buffer is strided by the full context: store positions `0 .. count-1` only.
+`read_regions(header, names)` loads those regions in one sequential span read and returns `memoryview` slices (or empty `bytes`). Keep that dict alive until the bytes are on the device. `header.region(name)` is the offset and length for a Metal read. Use that when the stored bytes are already the device layout. Pack on the host when the device buffer is strided by the full context: store positions `0 .. count-1` only.
 
 An exact-length file is usable only when this pipeline can sample without stepping the last token again. A pipeline that must step the next token refuses `len(header.tokens) >= len(prompt)`. Stepping a token that is already in a recurrent state applies it twice.
 
