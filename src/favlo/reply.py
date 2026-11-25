@@ -62,7 +62,9 @@ class LiveReply:
         self.status = 200
         self.payload: dict[str, Any] | None = None
         self._encoded = b""
-        self._chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=32)
+        # Unbounded: a 32-slot queue raised "client closed" under brief SSE
+        # stalls and cut the reply after a long thinking block.
+        self._chunks: queue.Queue[bytes | None] = queue.Queue()
 
     @property
     def ready(self) -> threading.Event:
@@ -112,20 +114,13 @@ class LiveReply:
         if self._kind != "stream":
             self._ready.set()
             return
-        try:
-            self._chunks.put(None, timeout=2.0)
-        except queue.Full:
-            return
+        self._chunks.put(None)
 
     def _write(self, data: bytes) -> None:
         if self._disconnected.is_set():
             message = "client closed"
             raise OSError(message)
-        try:
-            self._chunks.put(data, timeout=2.0)
-        except queue.Full:
-            message = "client closed"
-            raise OSError(message) from None
+        self._chunks.put(data)
 
     def pull(self) -> bytes | None:
         try:

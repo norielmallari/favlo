@@ -515,17 +515,18 @@ class ChatWire:
             self._send([{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}])
             return
         if kind == "response.reasoning_text.delta":
-            delta = payload.get("delta") or ""
-            if str(delta).strip():
-                self._send(
-                    [
-                        {
-                            "index": 0,
-                            "delta": {"reasoning": delta, "reasoning_content": delta},
-                            "finish_reason": None,
-                        }
-                    ]
-                )
+            delta = payload.get("delta")
+            if not isinstance(delta, str) or delta == "":
+                return
+            self._send(
+                [
+                    {
+                        "index": 0,
+                        "delta": {"reasoning": delta, "reasoning_content": delta},
+                        "finish_reason": None,
+                    }
+                ]
+            )
             return
         if kind == "response.output_text.delta":
             self._send(
@@ -954,10 +955,13 @@ def _call_message(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reasoning_text(item: dict[str, Any]) -> str:
-    content = item.get("content")
-    if isinstance(content, list):
-        parts = [part.get("text") or "" for part in content if isinstance(part, dict)]
-        text = "".join(parts).strip()
+    for name in ("content", "summary"):
+        parts = item.get(name)
+        if not isinstance(parts, list):
+            continue
+        text = "".join(
+            part.get("text") or "" for part in parts if isinstance(part, dict)
+        ).strip()
         if text:
             return text
     encrypted = item.get("encrypted_content")
