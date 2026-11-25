@@ -65,6 +65,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--reuse", action="store_true", help="round again from the saved calibration input sums"
     )
     sub.add_parser("bake", help="requant the NVFP4 experts into the expert fp4 pack")
+    quantize = sub.add_parser(
+        "quantize",
+        help="pack a BF16 checkpoint as mixed fp4 and fp8 experts and seal it",
+    )
+    quantize.add_argument(
+        "--src", type=Path, required=True, help="folder that holds the BF16 shard"
+    )
+    quantize.add_argument(
+        "--name",
+        type=_folder_name,
+        default="Inkling-2-mini-fp8-e50",
+        help="folder under models/ and the registry id",
+    )
+    quantize.add_argument("--expert-fp8", type=float, default=50.0)
+    quantize.add_argument("--promote", choices=("error", "firing"), default="error")
+    quantize.add_argument("--firing-db", type=Path, default=None)
+    quantize.add_argument("--since", type=int, default=None)
     try:
         args = parser.parse_args(list(argv) if argv is not None else None)
     except SystemExit as exc:
@@ -79,7 +96,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _calibrate(args.limit, args.reuse)
     if args.command == "bake":
         return _bake()
+    if args.command == "quantize":
+        return _quantize(args)
     return _models()
+
+
+def _quantize(args: argparse.Namespace) -> int:
+    from favlo.registry import models_dir
+    from inkling_2_mini.metal41.bf16 import quantize
+
+    dest = models_dir() / args.name
+    quantize(
+        args.src,
+        dest,
+        expert_fp8=args.expert_fp8,
+        promote=args.promote,
+        firing_db=args.firing_db,
+        firing_since=args.since,
+        log=lambda line: print(line, flush=True),
+    )
+    return 0
 
 
 def _bake(folder: Path | None = None) -> int:
@@ -97,9 +133,6 @@ def _bake(folder: Path | None = None) -> int:
         return 0
     bake(root, log=note)
     ensure_pack(root, log=note)
-    from inkling_2_mini.metal41.weights import ensure_dense
-
-    ensure_dense(root, log=note)
     publish(root, log=note)
     return 0
 
@@ -158,6 +191,29 @@ def _close(found: np.ndarray, expect: np.ndarray, tol: float, label: str) -> Non
         raise RuntimeError(message)
 
 
+def _check_f16_band(
+    session: Session,
+    rng: np.random.Generator,
+    rows: int,
+    cols: int,
+    inner: int,
+    stride: int,
+) -> None:
+    """Half matmul into a row stride wider than the written band."""
+    activation = rng.standard_normal((rows, inner)).astype(np.float16)
+    weight = rng.standard_normal((cols, inner)).astype(np.float16)
+    expect = activation.astype(np.float32) @ weight.astype(np.float32).T
+    dest = session.zeros(rows * stride * 4)
+    session.dispatch(
+        "matmul_f16_band",
+        [session.upload(activation), session.upload(weight), dest],
+        [u32(rows), u32(cols), u32(inner), u32(stride)],
+        (cols // 64, rows // 64, 1),
+    )
+    found = session.download_f32(dest, rows * stride).reshape(rows, stride)[:, :cols]
+    _close(found, expect, 2e-3, f"half band {rows}x{cols} stride {stride}")
+
+
 def _check_f16(session: Session, rng: np.random.Generator) -> None:
     rows, cols, inner = 64, 128, 256
     activation = rng.standard_normal((rows, inner)).astype(np.float16)
@@ -171,6 +227,10 @@ def _check_f16(session: Session, rng: np.random.Generator) -> None:
         (cols // 64, rows // 64, 1),
     )
     _close(session.download_f32(dest, rows * cols).reshape(rows, cols), expect, 1e-3, "half matmul")
+    _check_f16_band(session, rng, 128, 128, 256, 192)
+    _check_f16_band(session, rng, 192, 64, 256, 160)
+    # The attention plane writes Q into a stride of ATTN_ROWS. Several M tiles.
+    _check_f16_band(session, rng, 128, 128, 2304, 256)
     one = activation[0].astype(np.float32)
     gemv = session.zeros(cols * 4)
     session.dispatch(
@@ -222,7 +282,9 @@ def _check_fp8(session: Session, rng: np.random.Generator) -> None:
     gram = matrix.T @ matrix + np.eye(128, dtype=np.float32)
     host_codes, host_scales = foem_fp8(matrix, gram, beta=0.1)
     device_codes, device_scales = foem_fp8_device(session, matrix, gram, beta=0.1)
-    if not np.array_equal(host_codes, device_codes) or not np.array_equal(host_scales, device_scales):
+    if not np.array_equal(host_codes, device_codes) or not np.array_equal(
+        host_scales, device_scales
+    ):
         message = "fp8 foem device does not match the host"
         raise RuntimeError(message)
 
@@ -552,14 +614,20 @@ def _folder_name(text: str) -> str:
     return text
 
 
-def register_folder(folder: Path, *, alias: str | None, root: Path | None = None) -> None:
-    """Write the registry row. The folder holds the language file and the packs."""
+def register_folder(
+    folder: Path,
+    *,
+    alias: str | None,
+    source: Path | None = None,
+    root: Path | None = None,
+) -> None:
+    """Write the registry row. ``source`` is the BF16 folder when it is not ``folder``."""
     from favlo.registry import load_registry, register_quantized, save_registry
     from inkling_2_mini.portable.sampling import CONTEXT_LENGTH, PRESERVE_THINKING
 
     register_quantized(
         folder.name,
-        source=folder,
+        source=folder if source is None else source,
         alias=alias,
         directory=folder,
         root=root,

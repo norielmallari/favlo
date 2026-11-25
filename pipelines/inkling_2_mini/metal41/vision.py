@@ -27,7 +27,7 @@ from inkling_2_mini.metal41.codec import e4m3_to_float
 from inkling_2_mini.metal41.gptq import config_digest, write_pack
 from inkling_2_mini.metal41.resident import pread_handle
 from inkling_2_mini.metal41.session import f32, u32
-from inkling_2_mini.metal41.weights import Tensors
+from inkling_2_mini.metal41.weights import Safetensors, Tensors
 
 PIPELINE = "inkling_2_mini"
 PACK_NAME = "vision-fp8.safetensors"
@@ -195,7 +195,13 @@ def expand_prompt(
     return out, plan
 
 
-def ensure_pack(root: Path, dest: Path | None = None, log: Any = None) -> None:
+def ensure_pack(
+    root: Path,
+    dest: Path | None = None,
+    log: Any = None,
+    *,
+    language: Path | None = None,
+) -> None:
     """Write the fp8 vision pack when it is missing or does not match ``config.json``."""
     base = Path(root)
     pack = Path(dest or root)
@@ -205,7 +211,7 @@ def ensure_pack(root: Path, dest: Path | None = None, log: Any = None) -> None:
         return
     if log is not None:
         log("baking the vision fp8 planes")
-    _write_pack(base, path, log)
+    _write_pack(base, path, log, language=language)
 
 
 def bind_vision(runtime: Any, tokens: list[int], hit: int, dropped: int) -> None:
@@ -790,11 +796,14 @@ def _pack_ready(path: Path, root: Path) -> bool:
         tensors.close()
 
 
-def _write_pack(root: Path, path: Path, log: Any = None) -> None:
-    source = root / "vision.safetensors"
-    if not source.is_file():
-        source = root / "model-00001-of-00001.safetensors"
-    tensors = Tensors(source)
+def _write_pack(root: Path, path: Path, log: Any = None, *, language: Path | None = None) -> None:
+    if language is not None:
+        source = Path(language)
+    else:
+        source = root / "vision.safetensors"
+        if not source.is_file():
+            source = root / "model-00001-of-00001.safetensors"
+    tensors = Safetensors(source)
     packed: dict[str, np.ndarray] = {}
     try:
         for name, checkpoint, shape in _vector_catalog():

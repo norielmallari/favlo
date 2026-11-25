@@ -207,10 +207,14 @@ kernel void expert_fp4_tile(
     device const uint* expert_of [[buffer(5)]],
     device const uint* row_base [[buffer(6)]],
     device const uint* info [[buffer(7)]],
-    constant uint& inner [[buffer(8)]],
-    constant uint& cols [[buffer(9)]],
-    constant uint& data_stride [[buffer(10)]],
-    constant uint& scale_stride [[buffer(11)]],
+    device const uint* data_offsets [[buffer(8)]],
+    device const uint* scale_offsets [[buffer(9)]],
+    device const uchar* widths [[buffer(10)]],
+    constant uint& inner [[buffer(11)]],
+    constant uint& cols [[buffer(12)]],
+    constant uint& data_stride [[buffer(13)]],
+    constant uint& scale_stride [[buffer(14)]],
+    constant uint& expect [[buffer(15)]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
     if (tgid.y >= info[1]) {
@@ -219,15 +223,18 @@ kernel void expert_fp4_tile(
     uint slot = jobs[tgid.y * 2u];
     uint row0 = jobs[tgid.y * 2u + 1u] * 32u;
     uint expert = expert_of[slot];
+    if (expect != 0u && widths[expert] != expect) {
+        return;
+    }
     uint col0 = tgid.x * 128u;
     uint base_row = row_base[slot] + row0;
     tensor<device half, dextents<int, 2>, tensor_inline> left(
         pack + (ulong)base_row * inner, dextents<int, 2>(int(inner), 32), array<int, 2>{1, int(inner)});
     tensor<device metal_fp4_e2m1_format, dextents<int, 2>, tensor_inline, scales_plane> right(
-        weights + (ulong)expert * data_stride,
+        weights + data_offsets[expert],
         dextents<int, 2>(int(inner), int(cols)),
         array<int, 2>{1, int(inner)},
-        scales_plane(scales + (ulong)expert * scale_stride));
+        scales_plane(scales + scale_offsets[expert]));
     tensor<device float, dextents<int, 2>, tensor_inline> out(
         destination + (ulong)base_row * cols, dextents<int, 2>(int(cols), 32), array<int, 2>{1, int(cols)});
     constexpr auto desc = matmul2d_descriptor(
@@ -248,10 +255,14 @@ kernel void expert_fp8_tile(
     device const uint* expert_of [[buffer(5)]],
     device const uint* row_base [[buffer(6)]],
     device const uint* info [[buffer(7)]],
-    constant uint& inner [[buffer(8)]],
-    constant uint& cols [[buffer(9)]],
-    constant uint& data_stride [[buffer(10)]],
-    constant uint& scale_stride [[buffer(11)]],
+    device const uint* data_offsets [[buffer(8)]],
+    device const uint* scale_offsets [[buffer(9)]],
+    device const uchar* widths [[buffer(10)]],
+    constant uint& inner [[buffer(11)]],
+    constant uint& cols [[buffer(12)]],
+    constant uint& data_stride [[buffer(13)]],
+    constant uint& scale_stride [[buffer(14)]],
+    constant uint& expect [[buffer(15)]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
     if (tgid.y >= info[1]) {
@@ -260,15 +271,18 @@ kernel void expert_fp8_tile(
     uint slot = jobs[tgid.y * 2u];
     uint row0 = jobs[tgid.y * 2u + 1u] * 32u;
     uint expert = expert_of[slot];
+    if (expect != 0u && widths[expert] != expect) {
+        return;
+    }
     uint col0 = tgid.x * 128u;
     uint base_row = row_base[slot] + row0;
     tensor<device half, dextents<int, 2>, tensor_inline> left(
         pack + (ulong)base_row * inner, dextents<int, 2>(int(inner), 32), array<int, 2>{1, int(inner)});
     tensor<device metal_fp8_e4m3_format, dextents<int, 2>, tensor_inline, scales_plane> right(
-        weights + (ulong)expert * data_stride,
+        weights + data_offsets[expert],
         dextents<int, 2>(int(inner), int(cols)),
         array<int, 2>{1, int(inner)},
-        scales_plane(scales + (ulong)expert * scale_stride));
+        scales_plane(scales + scale_offsets[expert]));
     tensor<device float, dextents<int, 2>, tensor_inline> out(
         destination + (ulong)base_row * cols, dextents<int, 2>(int(cols), 32), array<int, 2>{1, int(cols)});
     constexpr auto desc = matmul2d_descriptor(
@@ -713,20 +727,27 @@ kernel void moe_gate_fp4(
     device const uchar* scales [[buffer(2)]],
     device const uint* ids [[buffer(3)]],
     device float* gated [[buffer(4)]],
-    constant uint& data_stride [[buffer(5)]],
-    constant uint& scale_stride [[buffer(6)]],
-    constant uint& inner [[buffer(7)]],
-    constant uint& half_width [[buffer(8)]],
+    device const uint* data_offsets [[buffer(5)]],
+    device const uint* scale_offsets [[buffer(6)]],
+    device const uchar* widths [[buffer(7)]],
+    constant uint& data_stride [[buffer(8)]],
+    constant uint& scale_stride [[buffer(9)]],
+    constant uint& inner [[buffer(10)]],
+    constant uint& half_width [[buffer(11)]],
+    constant uint& expect [[buffer(12)]],
     uint lane [[thread_index_in_simdgroup]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
     uint row0 = tgid.x * 4u;
     uint slot = tgid.y;
     uint expert = ids[slot];
+    if (expect != 0u && widths[expert] != expect) {
+        return;
+    }
     float4 acc = simd_sum4(fp4_part4(
         activation,
-        weights + (ulong)expert * data_stride,
-        scales + (ulong)expert * scale_stride,
+        weights + data_offsets[expert],
+        scales + scale_offsets[expert],
         row0, inner >> 3u, inner >> 1u, inner >> 5u, lane));
     if (lane == 0u) {
         uint col = row0 >> 1u;
@@ -741,20 +762,27 @@ kernel void moe_gate_fp8(
     device const uchar* scales [[buffer(2)]],
     device const uint* ids [[buffer(3)]],
     device float* gated [[buffer(4)]],
-    constant uint& data_stride [[buffer(5)]],
-    constant uint& scale_stride [[buffer(6)]],
-    constant uint& inner [[buffer(7)]],
-    constant uint& half_width [[buffer(8)]],
+    device const uint* data_offsets [[buffer(5)]],
+    device const uint* scale_offsets [[buffer(6)]],
+    device const uchar* widths [[buffer(7)]],
+    constant uint& data_stride [[buffer(8)]],
+    constant uint& scale_stride [[buffer(9)]],
+    constant uint& inner [[buffer(10)]],
+    constant uint& half_width [[buffer(11)]],
+    constant uint& expect [[buffer(12)]],
     uint lane [[thread_index_in_simdgroup]],
     uint2 tgid [[threadgroup_position_in_grid]])
 {
     uint row0 = tgid.x * 4u;
     uint slot = tgid.y;
     uint expert = ids[slot];
+    if (expect != 0u && widths[expert] != expect) {
+        return;
+    }
     float4 acc = simd_sum4(fp8_part4(
         activation,
-        weights + (ulong)expert * data_stride,
-        scales + (ulong)expert * scale_stride,
+        weights + data_offsets[expert],
+        scales + scale_offsets[expert],
         row0, inner >> 4u, inner, inner >> 5u, lane));
     if (lane == 0u) {
         uint col = row0 >> 1u;
@@ -774,11 +802,16 @@ kernel void moe_down_fp4(
     device const float* conv_w [[buffer(5)]],
     device float* state [[buffer(6)]],
     device float* sum [[buffer(7)]],
-    constant uint& cols [[buffer(8)]],
-    constant uint& data_stride [[buffer(9)]],
-    constant uint& scale_stride [[buffer(10)]],
-    constant uint& inner [[buffer(11)]],
-    constant uint& stored [[buffer(12)]],
+    device const uint* data_offsets [[buffer(8)]],
+    device const uint* scale_offsets [[buffer(9)]],
+    device const uchar* widths [[buffer(10)]],
+    constant uint& cols [[buffer(11)]],
+    constant uint& data_stride [[buffer(12)]],
+    constant uint& scale_stride [[buffer(13)]],
+    constant uint& inner [[buffer(14)]],
+    constant uint& stored [[buffer(15)]],
+    constant uint& expect [[buffer(16)]],
+    constant uint& apply_conv [[buffer(17)]],
     uint lane [[thread_index_in_simdgroup]],
     uint group [[threadgroup_position_in_grid]])
 {
@@ -789,17 +822,24 @@ kernel void moe_down_fp4(
     float4 acc = float4(0.0f);
     for (uint slot = 0u; slot < 8u; ++slot) {
         uint expert = ids[slot];
+        if (expect != 0u && widths[expert] != expect) {
+            continue;
+        }
         float4 part = fp4_part4(
             gated + slot * inner,
-            weights + (ulong)expert * data_stride,
-            scales + (ulong)expert * scale_stride,
+            weights + data_offsets[expert],
+            scales + scale_offsets[expert],
             row0, inner >> 3u, stored >> 1u, stored >> 5u, lane);
         acc = fma(float4(route[slot]), part, acc);
     }
     acc = simd_sum4(acc);
     if (lane < 4u) {
         uint c = row0 + lane;
-        sum[c] += conv_step(acc[lane], conv_w, state, c, cols);
+        float value = acc[lane];
+        if (apply_conv != 0u) {
+            value = conv_step(value, conv_w, state, c, cols);
+        }
+        sum[c] += value;
     }
 }
 
@@ -812,11 +852,16 @@ kernel void moe_down_fp8(
     device const float* conv_w [[buffer(5)]],
     device float* state [[buffer(6)]],
     device float* sum [[buffer(7)]],
-    constant uint& cols [[buffer(8)]],
-    constant uint& data_stride [[buffer(9)]],
-    constant uint& scale_stride [[buffer(10)]],
-    constant uint& inner [[buffer(11)]],
-    constant uint& stored [[buffer(12)]],
+    device const uint* data_offsets [[buffer(8)]],
+    device const uint* scale_offsets [[buffer(9)]],
+    device const uchar* widths [[buffer(10)]],
+    constant uint& cols [[buffer(11)]],
+    constant uint& data_stride [[buffer(12)]],
+    constant uint& scale_stride [[buffer(13)]],
+    constant uint& inner [[buffer(14)]],
+    constant uint& stored [[buffer(15)]],
+    constant uint& expect [[buffer(16)]],
+    constant uint& apply_conv [[buffer(17)]],
     uint lane [[thread_index_in_simdgroup]],
     uint group [[threadgroup_position_in_grid]])
 {
@@ -827,11 +872,90 @@ kernel void moe_down_fp8(
     float4 acc = float4(0.0f);
     for (uint slot = 0u; slot < 8u; ++slot) {
         uint expert = ids[slot];
+        if (expect != 0u && widths[expert] != expect) {
+            continue;
+        }
         float4 part = fp8_part4(
             gated + slot * inner,
-            weights + (ulong)expert * data_stride,
-            scales + (ulong)expert * scale_stride,
+            weights + data_offsets[expert],
+            scales + scale_offsets[expert],
             row0, inner >> 4u, stored, stored >> 5u, lane);
+        acc = fma(float4(route[slot]), part, acc);
+    }
+    acc = simd_sum4(acc);
+    if (lane < 4u) {
+        uint c = row0 + lane;
+        float value = acc[lane];
+        if (apply_conv != 0u) {
+            value = conv_step(value, conv_w, state, c, cols);
+        }
+        sum[c] += value;
+    }
+}
+
+// One decode grid for a layer that stores both widths. Each slot reads its
+// own expert. The down applies the residual convolution once.
+kernel void moe_gate_mix(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device const uint* ids [[buffer(3)]],
+    device float* gated [[buffer(4)]],
+    device const uint* data_offsets [[buffer(5)]],
+    device const uint* scale_offsets [[buffer(6)]],
+    device const uchar* widths [[buffer(7)]],
+    constant uint& inner [[buffer(8)]],
+    constant uint& half_width [[buffer(9)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint row0 = tgid.x * 4u;
+    uint slot = tgid.y;
+    uint expert = ids[slot];
+    device const uchar* row = weights + data_offsets[expert];
+    device const uchar* scale = scales + scale_offsets[expert];
+    float4 part = widths[expert] == 4u
+        ? fp4_part4(activation, row, scale, row0, inner >> 3u, inner >> 1u, inner >> 5u, lane)
+        : fp8_part4(activation, row, scale, row0, inner >> 4u, inner, inner >> 5u, lane);
+    float4 acc = simd_sum4(part);
+    if (lane == 0u) {
+        uint col = row0 >> 1u;
+        gated[slot * half_width + col] = swiglu_f(acc.x, acc.y);
+        gated[slot * half_width + col + 1u] = swiglu_f(acc.z, acc.w);
+    }
+}
+
+kernel void moe_down_mix(
+    device const float* gated [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device const uint* ids [[buffer(3)]],
+    device const float* route [[buffer(4)]],
+    device const float* conv_w [[buffer(5)]],
+    device float* state [[buffer(6)]],
+    device float* sum [[buffer(7)]],
+    device const uint* data_offsets [[buffer(8)]],
+    device const uint* scale_offsets [[buffer(9)]],
+    device const uchar* widths [[buffer(10)]],
+    constant uint& cols [[buffer(11)]],
+    constant uint& inner [[buffer(12)]],
+    constant uint& stored_fp4 [[buffer(13)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group * 4u;
+    if (row0 >= cols) {
+        return;
+    }
+    float4 acc = float4(0.0f);
+    for (uint slot = 0u; slot < 8u; ++slot) {
+        uint expert = ids[slot];
+        device const float* act = gated + slot * inner;
+        device const uchar* row = weights + data_offsets[expert];
+        device const uchar* scale = scales + scale_offsets[expert];
+        float4 part = widths[expert] == 4u
+            ? fp4_part4(act, row, scale, row0, inner >> 3u, stored_fp4 >> 1u, stored_fp4 >> 5u, lane)
+            : fp8_part4(act, row, scale, row0, inner >> 4u, inner, inner >> 5u, lane);
         acc = fma(float4(route[slot]), part, acc);
     }
     acc = simd_sum4(acc);
@@ -3067,4 +3191,23 @@ kernel void gram_xtx_wave(
     }
 }
 #pragma clang fp contract(on)
+
+// One layer, one phase. ids are the real expert indices, eight per token.
+kernel void count_layer_routes(
+    device const uint* ids [[buffer(0)]],
+    device atomic_uint* hist [[buffer(1)]],
+    constant uint& tokens [[buffer(2)]],
+    constant uint& experts [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint n = tokens * 8u;
+    if (gid >= n) {
+        return;
+    }
+    uint expert = ids[gid];
+    if (expert >= experts) {
+        return;
+    }
+    atomic_fetch_add_explicit(hist + expert, 1u, memory_order_relaxed);
+}
 

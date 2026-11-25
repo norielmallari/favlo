@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,7 @@ _IMAGE_PARTS = frozenset({"image", "input_image", "image_url"})
 _LOAD_LOCK = threading.Lock()
 _TOKENIZERS: dict[str, Tokenizer] = {}
 _TEMPLATES: dict[str, Any] = {}
+_MODES: dict[str, frozenset[str] | None] = {}
 
 
 def _raise(message: str) -> None:
@@ -76,6 +78,7 @@ def _chat_template(root: Path) -> Any:
         if found is not None:
             return found
         text = (root / "chat_template.jinja").read_text()
+        _MODES[key] = _mode_names(text)
         text = text.replace("{%- generation -%}", "").replace("{%- endgeneration -%}", "")
         env = Environment()
         env.globals["raise_exception"] = _raise
@@ -83,6 +86,31 @@ def _chat_template(root: Path) -> Any:
         found = env.from_string(text)
         _TEMPLATES[key] = found
         return found
+
+
+def _mode_names(text: str) -> frozenset[str] | None:
+    """Names a template accepts. A numeric-only template has none."""
+    found = re.search(r"set reason_mods = \[([^\]]*)\]", text)
+    if found is None:
+        return None
+    return frozenset(re.findall(r"'([^']*)'", found.group(1)))
+
+
+def _listed_effort(name: str, modes: frozenset[str] | None) -> str:
+    """A listed mode keeps its name. A missing name uses ``off`` or ``low``."""
+    if modes is not None and name not in modes:
+        return "off" if template_effort(name) == 0.0 else "low"
+    return name
+
+
+def _effort_argument(root: Path, chosen: str | float | int) -> str | float:
+    """The effort value this checkpoint's template accepts.
+
+    A template that lists mode names rejects the numeric form.
+    """
+    if not isinstance(chosen, str):
+        return template_effort(chosen)
+    return _listed_effort(chosen.strip().lower(), _MODES.get(str(root)))
 
 
 def shield_image_sentinel(value: Any) -> Any:
@@ -150,7 +178,8 @@ def encode_chat(
     text = _chat_template(root).render(
         messages=_objects(messages),
         tools=shield_image_sentinel(_declared_tools(tools)),
-        reasoning_effort=template_effort(chosen),
+        reasoning_effort=_effort_argument(root, chosen),
+        enable_thinking=thinking,
     )
     if opening is None:
         opening = forced_text(thinking, None, plain=not tools)
@@ -418,9 +447,15 @@ class Pipeline(LanguagePipeline):
         return True
 
     def on_open(self, runtime: Any, reply: Any, selection: Any) -> None:
+        from inkling_2_mini.metal41.firing import open_request
+
         super().on_open(runtime, reply, selection)
+        open_request(runtime)
 
     def on_finish(self, runtime: Any, selection: Any, *, complete: bool) -> None:
+        from inkling_2_mini.metal41.firing import finish_request
+
+        finish_request(runtime, selection, complete=complete)
         super().on_finish(runtime, selection, complete=complete)
 
     def client_closed(self, exc: OSError) -> bool:

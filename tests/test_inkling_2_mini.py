@@ -114,6 +114,16 @@ def test_resolve_effort_keeps_the_template_names() -> None:
     assert set(EFFORT_LEVEL) == {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 
+def test_a_listed_mode_keeps_its_name() -> None:
+    from inkling_2_mini.portable.chat import _listed_effort, _mode_names
+
+    modes = _mode_names("{%- set reason_mods = ['high', 'medium', 'low', 'off'] %}")
+    assert modes == frozenset({"high", "medium", "low", "off"})
+    assert _listed_effort("medium", modes) == "medium"
+    assert _listed_effort("none", modes) == "off"
+    assert _listed_effort("high", None) == "high"
+
+
 def test_template_effort_is_the_number_the_checkpoint_writes() -> None:
     assert template_effort("high") == 0.9
     assert template_effort("none") == 0.0
@@ -152,6 +162,9 @@ class _Runtime:
             slots = cache_slots(layer, context) * ROW_BYTES
             self.k_cache.append(bytearray(slots))
             self.v_cache.append(bytearray(slots))
+
+    def _user_marker(self) -> int:
+        return -1
 
 
 def test_a_user_marker_ends_the_prefill_piece() -> None:
@@ -904,7 +917,8 @@ def test_seal_writes_a_raw_record_and_drops_safetensors(tmp_path: Path) -> None:
     resident, experts = open_language(tmp_path)
     vision = open_vision(tmp_path)
     try:
-        assert "model.llm.layers.0.attn.wq_du.weight" not in resident.header
+        assert "model.llm.layers.0.attn.wq_du.weight" in resident.header
+        assert resident.header["model.llm.layers.0.attn.wq_du.weight"]["dtype"] == "F16"
         assert "model.llm.layers.0.mlp.experts.w13_weight" not in resident.header
         assert np.allclose(resident.vector("model.llm.embed.weight", (1, 2)), [[1.0, -2.0]])
         assert resident.vector("model.llm.norm.weight", (2,)).tolist() == [0.5, 1.5]

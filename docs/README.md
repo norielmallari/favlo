@@ -44,6 +44,7 @@ The public tree under `docs/` is **as-built** detail. The process and the write 
 | [inkling_2_mini/research/synthetic-prompt-fp8-nearest.md](inkling_2_mini/research/synthetic-prompt-fp8-nearest.md) | Inkling 2 Mini cold 512, 1024, 4096, and 10000-token prompts on nearest fp8 attention with GPTQ-FOEM experts and half keys and values |
 | [inkling_2_mini/research/coding-text-fp8.md](inkling_2_mini/research/coding-text-fp8.md) | Inkling 2 Mini text coding agent on the FOEM fp8 attention pack with half keys and values |
 | [inkling_2_mini/research/coding-text-fp8-nearest.md](inkling_2_mini/research/coding-text-fp8-nearest.md) | Inkling 2 Mini text coding agent on nearest fp8 attention with GPTQ-FOEM experts and half keys and values |
+| [inkling_2_mini/research/coding-text-fp8-e50.md](inkling_2_mini/research/coding-text-fp8-e50.md) | Inkling 2 Mini text coding agent on the 1536 MXFP8 expert mix with half keys and values |
 | [inkling_2_mini/research/coding-vision-fp8-nearest.md](inkling_2_mini/research/coding-vision-fp8-nearest.md) | Inkling 2 Mini vision coding agent on nearest fp8 attention with GPTQ-FOEM experts and half keys and values |
 | [inkling_2_mini/research/file-agent-fp8.md](inkling_2_mini/research/file-agent-fp8.md) | Inkling 2 Mini file agent on the FOEM fp8 attention pack with half keys and values |
 | [inkling_2_mini/research/file-agent-fp8-nearest.md](inkling_2_mini/research/file-agent-fp8-nearest.md) | Inkling 2 Mini file agent on nearest fp8 attention with GPTQ-FOEM experts and half keys and values |

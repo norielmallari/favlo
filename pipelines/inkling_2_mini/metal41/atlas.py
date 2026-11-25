@@ -100,6 +100,9 @@ class ExpertAtlas:
         self._spans: list[Any] = []
         self._staged: dict[int, tuple[int, ...]] = {}
         self._baked = weights.experts is not None
+        self.slot_data_off = [session.zeros(EXPERTS * 4) for _ in range(2)]
+        self.slot_scale_off = [session.zeros(EXPERTS * 4) for _ in range(2)]
+        self.slot_widths = session.zeros(EXPERTS)
         if complete:
             self._load_all()
             return
@@ -115,6 +118,7 @@ class ExpertAtlas:
                 experts.scale = stage_scale[which]
                 if experts.nvfp4:
                     _converted(experts)
+        self._bind_offsets()
 
     def _device(self, nbytes: int) -> Any:
         handle = device_buffer(self.owner, nbytes)
@@ -137,6 +141,9 @@ class ExpertAtlas:
         return partial_bytes()
 
     def _load_all(self) -> None:
+        if getattr(self.weights, "_mixed", False):
+            self._load_mixed()
+            return
         weights = self.weights
         if self._baked:
             record = weights.experts
@@ -150,6 +157,7 @@ class ExpertAtlas:
                     record.pread(experts.scale, scale_off, scale_n, note=weights._read)
                     if experts.nvfp4:
                         _converted(experts)
+            self._bind_offsets()
             return
         largest_data = 0
         largest_scale = 0
@@ -176,6 +184,44 @@ class ExpertAtlas:
             for handle in (raw_data, raw_scale):
                 if handle is not None:
                     memory.release(handle)
+        self._bind_offsets()
+
+    def _load_mixed(self) -> None:
+        record = self.weights.experts
+        for layer in self.weights.layers:
+            handle = self.session.upload(np.ascontiguousarray(layer.widths, dtype=np.uint8))
+            layer.w13.widths = handle
+            layer.w2.widths = handle
+            for experts in (layer.w13, layer.w2):
+                data_off, data_n = experts.file_data
+                experts.data = self._device(data_n)
+                experts.scale = experts.data
+                record.pread(experts.data, data_off, data_n, note=self.weights._read)
+                experts.data_offsets = self.session.upload(
+                    np.ascontiguousarray(experts.host_data_off, dtype=np.uint32)
+                )
+                experts.scale_offsets = self.session.upload(
+                    np.ascontiguousarray(experts.host_scale_off, dtype=np.uint32)
+                )
+
+    def _bind_offsets(self) -> None:
+        """Identity tables for a uniform stride. A mixed layer already has its own."""
+        for layer in self.weights.layers:
+            if getattr(layer, "mixed", False) and getattr(layer, "widths", None) is not None:
+                if getattr(layer.w13, "widths", None) is None:
+                    handle = self.session.upload(np.ascontiguousarray(layer.widths, dtype=np.uint8))
+                    layer.w13.widths = handle
+                    layer.w2.widths = handle
+            for experts in (layer.w13, layer.w2):
+                if experts.data_offsets is not None:
+                    continue
+                if getattr(layer, "mixed", False) and int(layer.uniform) == 0:
+                    continue
+                count = EXPERTS
+                data = np.arange(count, dtype=np.uint32) * np.uint32(experts.data_stride)
+                scale = np.arange(count, dtype=np.uint32) * np.uint32(experts.scale_stride)
+                experts.data_offsets = self.session.upload(data)
+                experts.scale_offsets = self.session.upload(scale)
 
     def _convert(
         self,
@@ -209,6 +255,41 @@ class ExpertAtlas:
         if global_handle is None:
             memory.release(gs)
 
+    def _stage_mixed(self, layer: Any, chosen: list[int]) -> None:
+        """Copy interleaved fp4 and fp8 images into per-slot strides."""
+        key = tuple(chosen)
+        if self._staged.get(layer.index) == key and self._staged.get(-1) == (layer.index,):
+            return
+        record = self.weights.experts
+        for which, experts in enumerate((layer.w13, layer.w2)):
+            data_base = int(experts.file_data[0])
+            slot_data = int(np.max(experts.host_data_bytes))
+            slot_scale = int(np.max(experts.host_scale_bytes))
+            data_off = np.zeros(EXPERTS, dtype=np.uint32)
+            scale_off = np.zeros(EXPERTS, dtype=np.uint32)
+            widths = np.zeros(EXPERTS, dtype=np.uint8)
+            for slot, expert in enumerate(chosen):
+                record.pread(
+                    experts.data,
+                    data_base + int(experts.host_data_off[expert]),
+                    int(experts.host_data_bytes[expert]),
+                    dest_off=slot * slot_data,
+                )
+                record.pread(
+                    experts.scale,
+                    data_base + int(experts.host_scale_off[expert]),
+                    int(experts.host_scale_bytes[expert]),
+                    dest_off=slot * slot_scale,
+                )
+                data_off[slot] = slot * slot_data
+                scale_off[slot] = slot * slot_scale
+                widths[slot] = int(layer.widths[expert])
+            memory.store(self.slot_data_off[which], 0, data_off.tobytes())
+            memory.store(self.slot_scale_off[which], 0, scale_off.tobytes())
+            if which == 0:
+                memory.store(self.slot_widths, 0, widths.tobytes())
+        self._staged = {layer.index: key, -1: (layer.index,)}
+
     def stage(self, layer: Any, chosen: list[int]) -> None:
         """Copy up to eight routed experts into slots 0..n-1 of both projections.
 
@@ -218,6 +299,9 @@ class ExpertAtlas:
         if len(chosen) > TOP_K:
             message = f"{len(chosen)} experts do not fit {TOP_K} slots"
             raise RuntimeError(message)
+        if getattr(layer, "mixed", False):
+            self._stage_mixed(layer, chosen)
+            return
         key = tuple(chosen)
         if self._staged.get(layer.index) == key and self._staged.get(-1) == (layer.index,):
             return

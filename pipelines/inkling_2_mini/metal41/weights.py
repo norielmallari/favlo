@@ -1,7 +1,7 @@
 """Load the safetensors checkpoint. Experts stay packed in the file.
 
-The fused attention plane and the output projection are nearest E4M3, one
-E8M0 scale per 32 along K, from the checkpoint bf16. The head stays half.
+The fused attention plane and the output projection are float16, from the
+checkpoint bf16. The head stays half.
 The router, the sink, the dynamic convolution taps, and the message gates
 stay half. The head keeps the unpadded vocabulary rows.
 """
@@ -40,6 +40,7 @@ from inkling_2_mini.metal41.layout import (
     REL_DIM,
     UNPADDED_VOCAB,
     VOCAB,
+    stored_k,
 )
 from inkling_2_mini.metal41.session import Session
 
@@ -109,6 +110,13 @@ class Experts:
         self.fp4 = False
         self.baked = False
         self.inner = int(cols)
+        self.data_offsets = None
+        self.scale_offsets = None
+        self.widths = None
+        self.host_data_off = None
+        self.host_scale_off = None
+        self.host_data_bytes = None
+        self.host_scale_bytes = None
 
 
 class Layer:
@@ -140,6 +148,9 @@ class Layer:
         self.attn_query = None
         self.attn_queries = 1
         self.mlp_query = None
+        self.mixed = False
+        self.uniform = 0
+        self.widths = None
 
 
 def _bf16_f32(raw: bytes, shape: tuple[int, ...]) -> np.ndarray:
@@ -312,6 +323,79 @@ def checkpoint_file(root: Path) -> Path:
     return Path(root) / "model-00001-of-00001.safetensors"
 
 
+def safetensor_files(path: Path) -> list[Path]:
+    """The safetensors files of a checkpoint. Payloads stay where they are.
+
+    A file is that file. A directory with an index opens the files the index
+    names. A directory without an index opens every safetensors file there.
+    """
+    path = Path(path)
+    if path.is_file():
+        if path.suffix != ".safetensors":
+            message = f"{path.name} is not a safetensors file"
+            raise ValueError(message)
+        return [path]
+    index = path / "model.safetensors.index.json"
+    if index.is_file():
+        body = json.loads(index.read_text())
+        mapping = body.get("weight_map") if isinstance(body, dict) else None
+        if not isinstance(mapping, dict) or not mapping:
+            message = f"{index.name} has no weight map"
+            raise ValueError(message)
+        names = sorted({str(item) for item in mapping.values()})
+        files = [path / name for name in names]
+        missing = [item.name for item in files if not item.is_file()]
+        if missing:
+            message = f"checkpoint is missing {', '.join(missing)}"
+            raise FileNotFoundError(message)
+        return files
+    files = sorted(
+        item for item in path.iterdir() if item.is_file() and item.suffix == ".safetensors"
+    )
+    if not files:
+        message = f"{path.name} has no safetensors file"
+        raise FileNotFoundError(message)
+    return files
+
+
+class Safetensors:
+    """One checkpoint, looked up by tensor name. Payloads stay in place."""
+
+    def __init__(self, path: Path, on_read: Any = None) -> None:
+        self.files = safetensor_files(path)
+        self._open = [Tensors(item, on_read) for item in self.files]
+        self._by_name: dict[str, Tensors] = {}
+        self.header: dict[str, Any] = {}
+        for tensors in self._open:
+            for name, info in tensors.header.items():
+                if name in self._by_name:
+                    message = f"{name} is in two shards"
+                    raise ValueError(message)
+                self._by_name[name] = tensors
+                self.header[name] = info
+
+    def close(self) -> None:
+        for tensors in self._open:
+            tensors.close()
+
+    def vector(self, name: str, shape: tuple[int, ...]) -> np.ndarray:
+        tensors = self._by_name.get(name)
+        if tensors is None:
+            message = f"checkpoint is missing {name}"
+            raise KeyError(message)
+        return tensors.vector(name, shape)
+
+    def locate(self, name: str) -> tuple[int, int]:
+        """File descriptor and absolute payload offset of one tensor."""
+        tensors = self._by_name.get(name)
+        if tensors is None:
+            message = f"checkpoint is missing {name}"
+            raise KeyError(message)
+        info = tensors.header[name]
+        start, _end = info["data_offsets"]
+        return tensors.fileno(), tensors._data + int(start)
+
+
 DENSE_PACK = "dense-fp8.safetensors"
 DENSE_FORMAT = "favlo-dense-fp8-nearest-1"
 
@@ -345,7 +429,7 @@ def open_dense_pack(root: Path) -> Any:
     return record
 
 
-def ensure_dense(root: Path, log: Any = None) -> None:
+def ensure_dense(root: Path, log: Any = None, *, language: Path | None = None) -> None:
     """Quantize attention and the output projection once. The open preads the file."""
     ready = open_dense_pack(root)
     if ready is not None:
@@ -353,7 +437,7 @@ def ensure_dense(root: Path, log: Any = None) -> None:
         if log is not None:
             log("dense fp8 pack is current")
         return
-    source = Tensors(checkpoint_file(root))
+    source = Safetensors(Path(language) if language is not None else checkpoint_file(root))
     try:
         _write_dense_nearest(root, source, log)
     finally:
@@ -365,7 +449,7 @@ def _write_pair(sink: Any, name: str, codes: np.ndarray, scales: np.ndarray) -> 
     sink.write_view(f"{name}.scale", memoryview(np.ascontiguousarray(scales).ravel()))
 
 
-def _write_dense_nearest(root: Path, source: Tensors, log: Any) -> None:
+def _write_dense_nearest(root: Path, source: Safetensors, log: Any) -> None:
     from inkling_2_mini.metal41.resident import Sink
 
     sink = Sink(Path(root) / DENSE_PACK, dense_catalog(), {"format": DENSE_FORMAT})
@@ -383,7 +467,7 @@ def _write_dense_nearest(root: Path, source: Tensors, log: Any) -> None:
         raise
 
 
-def _fused_fp8(tensors: Tensors, index: int) -> tuple[np.ndarray, np.ndarray]:
+def _fused_fp8(tensors: Safetensors, index: int) -> tuple[np.ndarray, np.ndarray]:
     """E4M3 rows of ``[wq; wr; gate; wk; wv]`` and their E8M0 scales."""
     attn = f"model.llm.layers.{index}.attn"
     parts = (
@@ -484,7 +568,6 @@ class Checkpoint:
             from inkling_2_mini.metal41.resident import open_expert_pack
 
             self.experts = open_expert_pack(self.pack_root, self.root)
-            ensure_dense(self.pack_root)
             self._dense = open_dense_pack(self.pack_root)
         try:
             self._load()
@@ -502,12 +585,12 @@ class Checkpoint:
 
     def _load(self) -> None:
         session = self.session
+        record = getattr(self, "experts", None)
+        self._mixed = record is not None and "widths" in record.header
         self.embed = self._f16_rows("model.llm.embed.weight", VOCAB, HIDDEN, VOCAB).handle
         self.embed_norm = self._f32("model.llm.embed_norm.weight", (HIDDEN,))
         self.final_norm = self._f32("model.llm.norm.weight", (HIDDEN,))
-        self.unembed = self._f16_rows(
-            "model.llm.unembed.weight", UNPADDED_VOCAB, HIDDEN, HEAD_ROWS
-        )
+        self.unembed = self._f16_rows("model.llm.unembed.weight", UNPADDED_VOCAB, HIDDEN, HEAD_ROWS)
         self.output_query = self._f32("model.llm.attn_res.output_query", (HIDDEN,))
         cross_q = self._vector_f32("model.llm.middle_cycle_cross_pass_queries", (24, HIDDEN))
         cross_kv = self._vector_f32("model.llm.middle_cycle_cross_pass_kv_queries", (24, HIDDEN))
@@ -516,6 +599,7 @@ class Checkpoint:
             np.ascontiguousarray(np.concatenate([cross_q, cross_kv], axis=0))
         )
         self.layers = [self._layer(index) for index in range(LAYERS)]
+        self.dense_tag = "fp16" if not self.layers[0].attn.fp8 else "fp8-nearest"
         self.expert_bytes = 0
         for layer in self.layers:
             for experts in (layer.w13, layer.w2):
@@ -600,6 +684,12 @@ class Checkpoint:
         )
         return Plane(handle, rows, padded, inner)
 
+    def _half_attention(self, index: int) -> bool:
+        """True when this layer's attention weights are float16 or bf16."""
+        name = f"model.llm.layers.{index}.attn.wq_du.weight"
+        info = self._tensors.header.get(name)
+        return isinstance(info, dict) and info.get("dtype") in {"F16", "BF16"}
+
     def _fp8_plane(self, name: str, rows: int, inner: int) -> Plane:
         """Pread one baked E4M3 plane and its E8M0 scales."""
         pack = self._dense
@@ -650,8 +740,74 @@ class Checkpoint:
         array = self._vector_f32(name, (channels, 1, 4)).reshape(channels, 4)
         return self.session.upload(np.ascontiguousarray(array))
 
+    def _mixed_widths(self) -> np.ndarray:
+        cached = getattr(self, "_widths", None)
+        if cached is not None:
+            return cached
+        raw, info = self.experts.raw("widths")
+        shape = tuple(info.get("shape", ()))
+        if info.get("dtype") != "U8" or shape != (LAYERS, EXPERTS):
+            message = f"widths shape {shape} is not {(LAYERS, EXPERTS)}"
+            raise ValueError(message)
+        self._widths = np.frombuffer(raw, dtype=np.uint8).reshape(LAYERS, EXPERTS).copy()
+        return self._widths
+
+    def _u32_row(self, name: str) -> np.ndarray:
+        raw, info = self.experts.raw(name)
+        if tuple(info.get("shape", ())) != (EXPERTS, 4):
+            message = f"{name} shape {info.get('shape')} is not {(EXPERTS, 4)}"
+            raise ValueError(message)
+        return np.frombuffer(raw, dtype="<u4").reshape(EXPERTS).copy()
+
+    def _mixed_experts(self, layer: int, kind: str, rows: int, cols: int) -> Experts:
+        record = self.experts
+        widths = self._mixed_widths()[layer]
+        uniform = 4 if np.all(widths == 4) else 8 if np.all(widths == 8) else 0
+        data_off = self._u32_row(f"layers.{layer}.{kind}.data_off")
+        scale_off = self._u32_row(f"layers.{layer}.{kind}.scale_off")
+        info = record.header[f"layers.{layer}.{kind}"]
+        shape = tuple(info["shape"])
+        blob_off, blob_n = record.span(f"layers.{layer}.{kind}", shape)
+        ends = np.empty(EXPERTS, dtype=np.uint32)
+        ends[:-1] = data_off[1:]
+        ends[-1] = np.uint32(blob_n)
+        data_bytes = (scale_off - data_off).astype(np.uint32)
+        scale_bytes = (ends - scale_off).astype(np.uint32)
+        if np.any(data_bytes <= 0) or np.any(scale_bytes <= 0):
+            message = f"layers.{layer}.{kind} offsets are not packed"
+            raise ValueError(message)
+        experts = Experts(
+            rows,
+            cols,
+            cols // 32,
+            0,
+            0,
+            None,
+            (blob_off, blob_n),
+            (blob_off, 0),
+            False,
+        )
+        experts.baked = True
+        experts.host_data_off = data_off
+        experts.host_scale_off = scale_off
+        experts.host_data_bytes = data_bytes
+        experts.host_scale_bytes = scale_bytes
+        if uniform == 0:
+            experts.inner = stored_k(cols) if kind == "w2" else int(cols)
+            return experts
+        if not np.all(data_bytes == data_bytes[0]) or not np.all(scale_bytes == scale_bytes[0]):
+            message = f"layers.{layer}.{kind} widths are uniform but the images are not"
+            raise ValueError(message)
+        experts.fp4 = uniform == 4
+        experts.inner = stored_k(cols) if uniform == 4 else int(cols)
+        experts.data_stride = int(data_bytes[0])
+        experts.scale_stride = int(scale_bytes[0])
+        return experts
+
     def _experts(self, layer: int, kind: str, rows: int, cols: int, nvfp4: bool) -> Experts:
         record = getattr(self, "experts", None)
+        if record is not None and "widths" in record.header:
+            return self._mixed_experts(layer, kind, rows, cols)
         if record is not None:
             from inkling_2_mini.metal41.resident import baked_shapes
 
@@ -725,12 +881,21 @@ class Checkpoint:
         layer = Layer()
         layer.index = index
         layer.full = index in FULL_LAYERS
-        layer.nvfp4 = index < NVFP4_LAYERS
+        layer.nvfp4 = index < NVFP4_LAYERS and not self._mixed
+        layer.mixed = self._mixed
+        if self._mixed:
+            layer.widths = self._mixed_widths()[index]
+            row = layer.widths
+            layer.uniform = 4 if np.all(row == 4) else 8 if np.all(row == 8) else 0
         layer.core = CORE_START <= index < CORE_END
         stem = f"model.llm.layers.{index}"
         attn = f"{stem}.attn"
-        layer.attn = self._fp8_plane(f"layers.{index}.attn", ATTN_ROWS, HIDDEN)
-        layer.wo = self._fp8_plane(f"layers.{index}.wo", HIDDEN, Q_DIM)
+        if self._half_attention(index):
+            layer.attn = self._attn(index)
+            layer.wo = self._f16_rows(f"{attn}.wo_ud.weight", HIDDEN, Q_DIM, HIDDEN)
+        else:
+            layer.attn = self._fp8_plane(f"layers.{index}.attn", ATTN_ROWS, HIDDEN)
+            layer.wo = self._fp8_plane(f"layers.{index}.wo", HIDDEN, Q_DIM)
         layer.sink = self._f16_rows(f"{attn}.attn_sink_proj.weight", 24, HIDDEN, 64)
         layer.q_scale = self._f32(f"{attn}.q_l2_clip.scale", (24, 128))
         layer.rel_scale = self._f32(f"{attn}.rel_l2_clip.scale", (24, 16))

@@ -1,7 +1,7 @@
 """Raw weight record for an 8 MiB pread.
 
-``resident.bin`` holds the float language planes and the nearest fp8 attention
-planes. ``experts.bin`` holds the Metal fp4 and MXFP8 expert payloads.
+``resident.bin`` holds the float language planes, including float16 attention
+and the float16 output projection. ``experts.bin`` holds the Metal fp4 and MXFP8 expert payloads.
 ``vision.bin`` and ``mtp.bin`` are separate files. ``manifest.json`` indexes
 each tensor. The language open does not read a safetensors weight file.
 """
@@ -25,7 +25,6 @@ EXPERTS = "experts.bin"
 VISION = "vision.bin"
 MTP = "mtp.bin"
 _PIECE = 8 << 20
-_DROPPED = frozenset({"wq_du", "wr_du", "gate_attn", "wk_dv", "wv_dv", "wo_ud"})
 _GROUPS = {
     "language": RESIDENT,
     "experts": EXPERTS,
@@ -75,42 +74,57 @@ def publish(root: Path, log: Callable[[str], None] | None = None) -> None:
         return
     from inkling_2_mini.metal41.resident import bake
     from inkling_2_mini.metal41.vision import ensure_pack
-    from inkling_2_mini.metal41.weights import checkpoint_file, ensure_dense
+    from inkling_2_mini.metal41.weights import checkpoint_file
 
     if not checkpoint_file(root).is_file():
         message = "the language shard is missing"
         raise FileNotFoundError(message)
     bake(root, log=log)
-    ensure_dense(root, log=log)
     ensure_pack(root, log=log)
     seal(root, log=log)
 
 
-def seal(root: Path, log: Callable[[str], None] | None = None) -> None:
-    """Write the record from the safetensors packs already in ``root``."""
+def seal(
+    root: Path,
+    log: Callable[[str], None] | None = None,
+    *,
+    language: Path | None = None,
+) -> None:
+    """Write the record from the safetensors packs already in ``root``.
+
+    ``language`` is the BF16 folder, or one shard when it stays outside ``root``. The partial
+    resident file is written beside the dense pack.
+    """
     root = Path(root)
     if ready(root):
         _drop_sources(root)
         return
     from inkling_2_mini.metal41.resident import EXPERT_PACK
     from inkling_2_mini.metal41.vision import PACK_NAME
-    from inkling_2_mini.metal41.weights import DENSE_PACK, checkpoint_file
+    from inkling_2_mini.metal41.weights import DENSE_PACK, checkpoint_file, safetensor_files
 
-    language = checkpoint_file(root)
+    if language is not None:
+        shards = safetensor_files(language)
+    else:
+        shards = [checkpoint_file(root)]
     experts = root / EXPERT_PACK
     dense = root / DENSE_PACK
     vision = root / PACK_NAME
-    missing = [path.name for path in (language, experts, dense, vision) if not path.is_file()]
+    missing = [path.name for path in (*shards, experts, vision) if not path.is_file()]
     if missing:
         message = f"record is missing {', '.join(missing)}"
         raise FileNotFoundError(message)
     mtp = root / "mtp.safetensors"
+    if not mtp.is_file():
+        sibling = shards[0].parent / "mtp.safetensors"
+        if sibling.is_file():
+            mtp = sibling
     try:
         groups = {
-            "language": _resident(language, dense),
+            "language": _resident(shards, root, dense if dense.is_file() else None),
             "experts": _export_payload(experts, root / f"{EXPERTS}.partial"),
             "vision": _export_payload(vision, root / f"{VISION}.partial"),
-            "mtp": _mtp(root, language, mtp),
+            "mtp": _mtp(root, shards, mtp),
         }
         _check_groups(root, groups)
         for name in (RESIDENT, EXPERTS, VISION, MTP):
@@ -273,52 +287,70 @@ def _keep_language(name: str) -> bool:
         return False
     if "mtp" in parts or "experts" in parts:
         return False
-    return not _DROPPED.intersection(parts)
+    return True
 
 
-def _resident(language: Path, dense: Path) -> dict[str, Any]:
-    dest = language.parent / f"{RESIDENT}.partial"
-    fd, header, base = _open_header(language)
-    try:
-        with dest.open("wb") as out:
-            entries = _append(out, fd, base, header, _keep_language)
-    finally:
-        os.close(fd)
-    fd, header, base = _open_header(dense)
-    try:
-        with dest.open("ab") as out:
-            added = _append(out, fd, base, header, lambda _name: True)
-    finally:
-        os.close(fd)
-    overlap = set(entries).intersection(added)
-    if overlap:
-        message = f"dense name collides with a language tensor: {sorted(overlap)[0]}"
-        raise RuntimeError(message)
-    entries.update(added)
+def _resident(shards: list[Path], root: Path, dense: Path | None) -> dict[str, Any]:
+    dest = Path(root) / f"{RESIDENT}.partial"
+    entries: dict[str, Any] = {}
+    for language in shards:
+        fd, header, base = _open_header(language)
+        try:
+            with dest.open("ab" if entries else "wb") as out:
+                added = _append(out, fd, base, header, _keep_language)
+        finally:
+            os.close(fd)
+        overlap = set(entries).intersection(added)
+        if overlap:
+            message = f"language name collides across shards: {sorted(overlap)[0]}"
+            raise RuntimeError(message)
+        entries.update(added)
+    if dense is not None:
+        fd, header, base = _open_header(dense)
+        try:
+            with dest.open("ab") as out:
+                added = _append(out, fd, base, header, lambda _name: True)
+        finally:
+            os.close(fd)
+        overlap = set(entries).intersection(added)
+        if overlap:
+            message = f"dense name collides with a language tensor: {sorted(overlap)[0]}"
+            raise RuntimeError(message)
+        entries.update(added)
     if not entries:
         message = "resident record is empty"
         raise RuntimeError(message)
     return entries
 
 
-def _mtp(root: Path, language: Path, standalone: Path) -> dict[str, Any]:
+def _mtp(root: Path, shards: list[Path], standalone: Path) -> dict[str, Any]:
     dest = root / f"{MTP}.partial"
     if standalone.is_file():
         return _export_payload(standalone, dest, float16=True)
-    fd, header, base = _open_header(language)
-    try:
-        chosen = {
-            name: info
-            for name, info in header.items()
-            if name != "__metadata__" and "mtp" in name.split(".")
-        }
-        if not chosen:
-            message = "record is missing mtp.safetensors"
-            raise FileNotFoundError(message)
-        with dest.open("wb") as out:
-            return _append(out, fd, base, chosen, lambda _name: True)
-    finally:
-        os.close(fd)
+    entries: dict[str, Any] = {}
+    for language in shards:
+        fd, header, base = _open_header(language)
+        try:
+            chosen = {
+                name: info
+                for name, info in header.items()
+                if name != "__metadata__" and "mtp" in name.split(".")
+            }
+            if not chosen:
+                continue
+            with dest.open("ab" if entries else "wb") as out:
+                added = _append(out, fd, base, chosen, lambda _name: True)
+        finally:
+            os.close(fd)
+        overlap = set(entries).intersection(added)
+        if overlap:
+            message = f"mtp name collides across shards: {sorted(overlap)[0]}"
+            raise RuntimeError(message)
+        entries.update(added)
+    if not entries:
+        message = "record is missing mtp.safetensors"
+        raise FileNotFoundError(message)
+    return entries
 
 
 def _export_payload(src: Path, dest: Path, *, float16: bool = False) -> dict[str, Any]:

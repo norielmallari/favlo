@@ -100,6 +100,23 @@ def request_totals(path: Path, *, since: int | None = None) -> dict[str, float]:
     }
 
 
+def widths_layout(path: Path) -> tuple[int, int, float]:
+    """Layer count, expert count, and expected hits per token for a widths file.
+
+    Forty layers selecting 8 experts is 320. Inkling stores 24 layers and visits
+    48 of them, so eight experts a visit is 384.
+    """
+    if not path.is_file():
+        return LAYERS, EXPERTS, float(LAYERS * TOP_K)
+    size = path.stat().st_size
+    if size == LAYERS * EXPERTS:
+        return LAYERS, EXPERTS, float(LAYERS * TOP_K)
+    if size == 24 * 128:
+        return 24, 128, 384.0
+    message = f"widths.bin length {size} is not a known expert plane"
+    raise ValueError(message)
+
+
 def load_widths(path: Path, *, layers: int = LAYERS, experts: int = EXPERTS) -> np.ndarray:
     """Width plane. Missing file is all fp4."""
     if not path.is_file():
@@ -163,6 +180,7 @@ def report(
     since: int | None,
     layers: int = LAYERS,
     experts: int = EXPERTS,
+    expected_hits: float | None = None,
 ) -> dict[str, Any]:
     """Numbers for one packed folder. Empty when no request finished in the window."""
     widths = load_widths(widths_path, layers=layers, experts=experts)
@@ -216,7 +234,9 @@ def report(
         "fp4_score_median": float(np.median(rel[~fp8])) if (~fp8).any() else 0.0,
         "score_gt_1": int((rel > 1.0).sum()),
         "score_gt_1_fp8": int(((rel > 1.0) & fp8).sum()),
-        "expected_hits_per_token": float(layers * TOP_K),
+        "expected_hits_per_token": (
+            float(layers * TOP_K) if expected_hits is None else float(expected_hits)
+        ),
     }
 
 
@@ -295,7 +315,16 @@ def analyze_folder(
     if not db.is_file():
         message = f"firing log is missing for {folder}"
         raise FileNotFoundError(message)
-    return report(folder=folder, db=db, widths_path=widths, since=since)
+    layers, experts, expected = widths_layout(widths)
+    return report(
+        folder=folder,
+        db=db,
+        widths_path=widths,
+        since=since,
+        layers=layers,
+        experts=experts,
+        expected_hits=expected,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

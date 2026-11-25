@@ -6,7 +6,7 @@ then function-calling dialogs. General chat fills the remaining sequences.
 Nothing is generated. The capture prefill sums ``X^T X`` for each expert on
 the device. Several layers share one prefill, as many as the budget holds.
 Those layers are rounded before the next group starts.
-Attention and the output projection are nearest fp8 and are not part of this
+Attention and the output projection stay float16 and are not part of this
 capture.
 """
 
@@ -46,7 +46,7 @@ from inkling_2_mini.metal41.layout import (
     OUTER_SCALE_DENOMINATOR,
     stored_k,
 )
-from inkling_2_mini.metal41.weights import Tensors, _quantize_fp4, checkpoint_file, ensure_dense
+from inkling_2_mini.metal41.weights import Tensors, _quantize_fp4, checkpoint_file
 
 HESSIANS_NAME = "dense-fp4-inputs.npz"
 ROUND_PARTIAL = "dense-fp4-partial.npz"
@@ -945,7 +945,6 @@ def calibrate(
         message = "calibrate reads the language shard"
         raise FileNotFoundError(message)
     _drop_dense_fp4(folder)
-    ensure_dense(folder, log=log)
     probe = Session("inkling_2_mini:gptq")
     try:
         foem_device_matches(probe)

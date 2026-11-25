@@ -1,19 +1,19 @@
 ---
 name: smoke-testing
-description: Run a Favlo GPU smoke through the machine lock. Every pipeline uses python -m favlo.smoke_lock. run owns the lock when this process compiles, dispatches, loads weights, or quantizes. attach is the listener path and does not take the lock. Language pipeline smoke is greedy decode, the instruct card, the thinking card, and each reasoning effort. Agent smoke is the file agent and the coding agent. Use for any image, video, music, voice, or text GPU smoke. No exceptions.
+description: Run a Favlo GPU smoke through the machine lock. Every pipeline uses python -m favlo.smoke_lock. run owns the lock when this process compiles, dispatches, or loads weights onto the device. A quantize that only reads and writes files on the CPU does not take the lock. A quantize that dispatches Metal does. attach is the listener path and does not take the lock. Language pipeline smoke is greedy decode, the instruct card, the thinking card, and each reasoning effort. Agent smoke is the file agent and the coding agent. Use for any image, video, music, voice, or text GPU smoke. No exceptions.
 ---
 
 # Smoke testing
 
-One pipeline. Read this skill when another skill says to smoke, and whenever a command in this process compiles shaders, dispatches Metal, loads a checkpoint, or quantizes. Image, video, music, voice, and text are the same rule. Do not copy these commands into that skill.
+One pipeline. Read this skill when another skill says to smoke, and whenever a command in this process compiles shaders, dispatches Metal, or loads a checkpoint onto the device. A quantize that stays on the CPU does not. Image, video, music, voice, and text are the same rule. Do not copy these commands into that skill.
 
 ## Lock
 
-Every GPU smoke uses `python -m favlo.smoke_lock`. No exceptions. Do not launch `pytest`, `kernels`, `quantize`, or a generate that touches the GPU except as the command after `--`. Do not take the lock by hand. Do not sleep and retry outside the script.
+Every GPU smoke uses `python -m favlo.smoke_lock`. No exceptions. Do not launch `pytest`, `kernels`, or a generate that touches the GPU except as the command after `--`. A quantize that dispatches Metal is one of those commands. A quantize that only reads and writes files on the CPU is not, and it does not take the lock. Do not take the lock by hand. Do not sleep and retry outside the script.
 
 `run` owns the lock when this process uses the GPU. `attach` is the only listener path. It waits until the lock is clear, reuses `127.0.0.1:8129`, and does not take the lock. It starts the daemon only when that port is closed, and stops it only when this call started it. When `--pipeline` is the resident model and that package's sources are newer than its worker, `attach` closes the model before the command. Do not wrap a listener command in `run`.
 
-Wait until the machine is free before a command that compiles shaders, dispatches Metal, loads a checkpoint, quantizes, or starts `favlo serve` in its own process. That includes `pytest`, `kernels`, `quantize`, `complete`, `bf16`, `probe`, and `matmul`. Editing the write set does not wait. Reading another package does not.
+Wait until the machine is free before a command that compiles shaders, dispatches Metal, loads a checkpoint onto the device, quantizes on the device, or starts `favlo serve` in its own process. That includes `pytest`, `kernels`, `complete`, `bf16`, `probe`, and `matmul`. A CPU file quantize does not wait. Editing the write set does not wait. Reading another package does not.
 
 The machine is busy when `artifacts/pipeline-test.lock` exists and the `pid` in it is still running. A running `favlo serve` is not itself a reason to wait. The file is gitignored. Do not commit it.
 

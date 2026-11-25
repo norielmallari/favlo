@@ -10,8 +10,10 @@ PIPELINE = "inkling_2_mini"
 
 
 def idle_heartbeat(runtime: Any, selection: Any) -> None:
-    """The runtime has no idle promotion pass."""
-    del runtime, selection
+    """Write a finished request's expert hits after the reply closes."""
+    from inkling_2_mini.metal41.firing import idle_heartbeat as _write
+
+    _write(runtime, selection)
 
 
 handle_responses = pipeline

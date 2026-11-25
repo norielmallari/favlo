@@ -25,6 +25,7 @@ from favlo.console import format_note, format_rate, publish_count
 from favlo.memory import memory
 from favlo.prefix import aim_session
 from inkling_2_mini.metal41.atlas import CONTEXTS, ExpertAtlas, plan_opening
+from inkling_2_mini.metal41.firing import LAYERS, RouteScratch
 from inkling_2_mini.metal41.layout import (
     EPS,
     EXPERTS,
@@ -177,6 +178,12 @@ class InklingRuntime:
         self._filled = 0
         self._prefill_seconds = 0.0
         self._decode_seconds = 0.0
+        self._prefill_token_count = 0
+        self._decode_token_count = 0
+        self._route_prefill = False
+        self._firing_open = False
+        self._route_plane = 0
+        self.routes = RouteScratch(LAYERS, EXPERTS)
         self._seed = 0x1234567
         self._snapshot_step = -1
         self._prefix_budget: int | None = None
@@ -423,6 +430,11 @@ class InklingRuntime:
         self.expert_out = zeros(most * HIDDEN * 4)
         self.ids = zeros(rows * TOP_K * 4)
         self.masked = zeros(rows * TOP_K * 4)
+        hist_bytes = 2 * LAYERS * EXPERTS * 4
+        self._route_hist_planes = [zeros(hist_bytes), zeros(hist_bytes)]
+        self._route_hist = self._route_hist_planes[0]
+        self._zero_widths = zeros(EXPERTS)
+        self.moe_partial = zeros(HIDDEN * 4)
         self.route = zeros(rows * TOP_K * 4)
         self.csr_i = zeros(rows * TOP_K * 4)
         self.csr_lane = zeros(rows * TOP_K * 4)
@@ -540,6 +552,21 @@ class InklingRuntime:
             padded * cols,
         )
         return padded
+
+    def _matmul_plane(
+        self,
+        plane: Plane,
+        row: int,
+        cols: int,
+        dest: Any,
+        padded: int,
+        stride: int,
+    ) -> None:
+        """One attention or output product. Float16 and fp8 both use ``matmul2d``."""
+        if plane.fp8:
+            self._matmul_fp8_band(plane, row, cols, dest, padded, stride)
+            return
+        self._matmul_f16_band(plane, row, cols, dest, padded, stride)
 
     def _matmul_f16(self, activation: Any, plane: Plane, dest: Any, padded: int) -> None:
         self.session.dispatch(
@@ -719,7 +746,7 @@ class InklingRuntime:
         sink: Any = self.sink
         k_taps: Any = self.k_taps
         v_taps: Any = self.v_taps
-        if tokens == 1:
+        if tokens == 1 and plane.fp8:
             groups = ATTN_ROWS // 4 + 6 + (16 if layer.full else 0)
             self.session.dispatch(
                 "gemv_attn",
@@ -749,18 +776,18 @@ class InklingRuntime:
                     self.capture.add(layer.index, "shared", self._gather(q_in, tokens, HIDDEN))
             padded = self._cast(q_in, tokens, HIDDEN)
             if distinct:
-                self._matmul_fp8_band(plane, 0, Q_ROWS, self.proj, padded, ATTN_ROWS)
+                self._matmul_plane(plane, 0, Q_ROWS, self.proj, padded, ATTN_ROWS)
             else:
-                self._matmul_fp8(self.half, plane, self.proj, padded)
+                self._matmul_plane(plane, 0, plane.padded, self.proj, padded, ATTN_ROWS)
             self._matmul_f16(self.half, layer.sink, self.sink, padded)
             if distinct:
                 self._cast(k_in, tokens, HIDDEN)
-                self._matmul_fp8_band(plane, ROW_K, KV_DIM, self.proj, padded, ATTN_ROWS)
+                self._matmul_plane(plane, ROW_K, KV_DIM, self.proj, padded, ATTN_ROWS)
             if layer.full:
                 self._matmul_f16(self.half, layer.k_proj, self.k_taps, padded)
             if distinct:
                 self._cast(v_in, tokens, HIDDEN)
-                self._matmul_fp8_band(plane, ROW_V, KV_DIM, self.proj, padded, ATTN_ROWS)
+                self._matmul_plane(plane, ROW_V, KV_DIM, self.proj, padded, ATTN_ROWS)
             if layer.full:
                 self._matmul_f16(self.half, layer.v_proj, self.v_taps, padded)
         local = 0 if layer.full else cache_slots(layer.index, self.context)
@@ -832,41 +859,50 @@ class InklingRuntime:
                 [u32(pos0), u32(window), u32(span), u32(slot_mask)],
                 (1, 8, -(-keys // span)),
             )
+            if layer.wo.fp8:
+                self.session.dispatch(
+                    "gemv_fp8_conv_add",
+                    [
+                        self.attn_out,
+                        layer.wo.handle,
+                        layer.wo.scale,
+                        layer.attn_conv,
+                        attn_state,
+                        dest,
+                    ],
+                    [u32(HIDDEN), u32(Q_DIM)],
+                    (HIDDEN // 4, 1, 1),
+                )
+                return
+        else:
             self.session.dispatch(
-                "gemv_fp8_conv_add",
-                [self.attn_out, layer.wo.handle, layer.wo.scale, layer.attn_conv, attn_state, dest],
-                [u32(HIDDEN), u32(Q_DIM)],
-                (HIDDEN // 4, 1, 1),
+                "attend_flash",
+                [*attend, self.attn_out],
+                [
+                    u32(tokens),
+                    u32(pos0),
+                    u32(window),
+                    u32(ATTN_ROWS),
+                    u32(ATTN_ROWS),
+                    u32(64),
+                    u32(ATTN_ROWS),
+                    u32(origin),
+                ],
+                (24, (tokens + 31) // 32, 1),
             )
-            return
-        self.session.dispatch(
-            "attend_flash",
-            [*attend, self.attn_out],
-            [
-                u32(tokens),
-                u32(pos0),
-                u32(window),
-                u32(ATTN_ROWS),
-                u32(ATTN_ROWS),
-                u32(64),
-                u32(ATTN_ROWS),
-                u32(origin),
-            ],
-            (24, (tokens + 31) // 32, 1),
-        )
-        if local:
-            self._window(1, visit, origin, pos0, kend, local)
-        self.session.dispatch(
-            "conv_tail",
-            [(self.proj, ROW_K * 4), k_state, (self.proj, ROW_V * 4), v_state],
-            [u32(tokens), u32(KV_DIM), u32(ATTN_ROWS), u32(ATTN_ROWS)],
-            ((KV_DIM + 255) // 256, 2, 1),
-            (256, 1, 1),
-        )
+            if local:
+                self._window(1, visit, origin, pos0, kend, local)
+            self.session.dispatch(
+                "conv_tail",
+                [(self.proj, ROW_K * 4), k_state, (self.proj, ROW_V * 4), v_state],
+                [u32(tokens), u32(KV_DIM), u32(ATTN_ROWS), u32(ATTN_ROWS)],
+                ((KV_DIM + 255) // 256, 2, 1),
+                (256, 1, 1),
+            )
         if self.capture is not None:
             self.capture.add(layer.index, "wo", self._gather(self.attn_out, tokens, Q_DIM))
         padded = self._cast(self.attn_out, tokens, Q_DIM)
-        self._matmul_fp8(self.half, layer.wo, self.wo_out, padded)
+        self._matmul_plane(layer.wo, 0, layer.wo.padded, self.wo_out, padded, layer.wo.padded)
         self._conv_add(self.wo_out, layer.attn_conv, attn_state, dest, tokens)
 
     def _conv_add(self, source: Any, weight: Any, state: Any, dest: Any, tokens: int) -> None:
@@ -882,6 +918,167 @@ class InklingRuntime:
             [u32(tokens), u32(HIDDEN), u32(HIDDEN), u32(HIDDEN)],
             ((HIDDEN + 255) // 256, 1, 1),
             (256, 1, 1),
+        )
+
+    def _count_routes(self, tokens: int, layer_index: int) -> None:
+        if not self._firing_open or tokens < 1:
+            return
+        phase = 0 if self._route_prefill else 1
+        off = (phase * LAYERS + int(layer_index)) * EXPERTS * 4
+        self.session.dispatch(
+            "count_layer_routes",
+            [self.ids, (self._route_hist, off)],
+            [u32(tokens), u32(EXPERTS)],
+            ((tokens * TOP_K + 255) // 256, 1, 1),
+            (256, 1, 1),
+        )
+
+    def _pull_route_hist(self, plane: int) -> None:
+        raw = np.frombuffer(
+            self.session.download(self._route_hist_planes[plane], 2 * LAYERS * EXPERTS * 4),
+            dtype=np.uint32,
+        ).copy()
+        self.routes.prefill[:] = raw[: LAYERS * EXPERTS].reshape(LAYERS, EXPERTS)
+        self.routes.decode[:] = raw[LAYERS * EXPERTS :].reshape(LAYERS, EXPERTS)
+        self.routes.prefill_tokens = int(self._prefill_token_count)
+        self.routes.decode_tokens = int(self._decode_token_count)
+
+    def _clear_route_hist(self, plane: int | None = None) -> None:
+        blob = bytes(2 * LAYERS * EXPERTS * 4)
+        planes = (plane,) if plane is not None else (0, 1)
+        for index in planes:
+            memory.store(self._route_hist_planes[index], 0, blob)
+
+    def _bind_route_plane(self, plane: int) -> None:
+        self._route_plane = int(plane) % 2
+        self._route_hist = self._route_hist_planes[self._route_plane]
+
+    def _expert_kinds(self, layer: Any) -> tuple[str, ...]:
+        if bool(getattr(layer, "mixed", False)) and int(getattr(layer, "uniform", 0)) == 0:
+            return ("fp4", "fp8")
+        if getattr(layer.w13, "fp4", False):
+            return ("fp4",)
+        return ("fp8",)
+
+    def _expert_tables(
+        self, layer: Any, experts: Any, which: int, kind: str
+    ) -> tuple[tuple[Any, Any, Any], int]:
+        mixed = bool(getattr(layer, "mixed", False)) and int(getattr(layer, "uniform", 0)) == 0
+        expect = (4 if kind == "fp4" else 8) if mixed else 0
+        if mixed and not self.atlas.complete:
+            return (
+                self.atlas.slot_data_off[which],
+                self.atlas.slot_scale_off[which],
+                self.atlas.slot_widths,
+            ), expect
+        widths = getattr(experts, "widths", None)
+        if widths is None:
+            widths = self._zero_widths
+        return (experts.data_offsets, experts.scale_offsets, widths), expect
+
+    def _gate(self, layer: Any, ids: Any, kind: str) -> None:
+        w13 = layer.w13
+        tables, expect = self._expert_tables(layer, w13, 0, kind)
+        self.session.dispatch(
+            f"moe_gate_{kind}",
+            [self.moe_norm, w13.data, w13.scale, ids, self.expert_out, *tables],
+            [
+                u32(w13.data_stride),
+                u32(w13.scale_stride),
+                u32(HIDDEN),
+                u32(INTERMEDIATE),
+                u32(expect),
+            ],
+            (_FUSED // 4, TOP_K, 1),
+        )
+
+    def _gate_mix(self, layer: Any, ids: Any) -> None:
+        w13 = layer.w13
+        tables, _expect = self._expert_tables(layer, w13, 0, "fp8")
+        self.session.dispatch(
+            "moe_gate_mix",
+            [self.moe_norm, w13.data, w13.scale, ids, self.expert_out, *tables],
+            [u32(HIDDEN), u32(INTERMEDIATE)],
+            (_FUSED // 4, TOP_K, 1),
+        )
+
+    def _down_mix(self, layer: Any, ids: Any, state: Any, dest: Any) -> None:
+        w2 = layer.w2
+        tables, _expect = self._expert_tables(layer, w2, 1, "fp4")
+        self.session.dispatch(
+            "moe_down_mix",
+            [
+                self.expert_out,
+                w2.data,
+                w2.scale,
+                ids,
+                self.route,
+                layer.mlp_conv,
+                state,
+                dest,
+                *tables,
+            ],
+            [u32(HIDDEN), u32(INTERMEDIATE), u32(stored_k(INTERMEDIATE))],
+            (HIDDEN // 4, 1, 1),
+        )
+
+    def _down(self, layer: Any, ids: Any, kind: str, state: Any, dest: Any, *, conv: bool) -> None:
+        w2 = layer.w2
+        tables, expect = self._expert_tables(layer, w2, 1, kind)
+        stored = stored_k(INTERMEDIATE) if kind == "fp4" else INTERMEDIATE
+        self.session.dispatch(
+            f"moe_down_{kind}",
+            [
+                self.expert_out,
+                w2.data,
+                w2.scale,
+                ids,
+                self.route,
+                layer.mlp_conv,
+                state,
+                dest,
+                *tables,
+            ],
+            [
+                u32(HIDDEN),
+                u32(w2.data_stride),
+                u32(w2.scale_stride),
+                u32(INTERMEDIATE),
+                u32(stored),
+                u32(expect),
+                u32(1 if conv else 0),
+            ],
+            (HIDDEN // 4, 1, 1),
+        )
+
+    def _expert_tile(
+        self,
+        layer: Any,
+        which: int,
+        kind: str,
+        source: Any,
+        dest: Any,
+        grouping: list[Any],
+        jobs: int,
+        cols: int,
+    ) -> None:
+        experts = layer.w13 if which == 0 else layer.w2
+        tables, expect = self._expert_tables(layer, experts, which, kind)
+        if which == 0:
+            inner = HIDDEN
+        else:
+            inner = stored_k(INTERMEDIATE) if kind == "fp4" else INTERMEDIATE
+        self.session.dispatch(
+            f"expert_{kind}_tile",
+            [source, experts.data, experts.scale, dest, *grouping, *tables],
+            [
+                u32(inner),
+                u32(cols),
+                u32(experts.data_stride),
+                u32(experts.scale_stride),
+                u32(expect),
+            ],
+            (cols // 128, jobs, 1),
         )
 
     # ------------------------------------------------------------------
@@ -914,6 +1111,7 @@ class InklingRuntime:
                 [u32(tokens), u32(128)],
                 (tokens, 1, 1),
             )
+        self._count_routes(tokens, layer.index)
         if tokens == 1:
             ids = self.ids
             if not complete:
@@ -929,36 +1127,14 @@ class InklingRuntime:
                 self.session.begin()
                 self.atlas.stage(layer, chosen)
                 ids = self.masked
-            w13 = layer.w13
-            w2 = layer.w2
-            kind = "fp4" if w13.fp4 else "fp8"
-            self.session.dispatch(
-                f"moe_gate_{kind}",
-                [self.moe_norm, w13.data, w13.scale, ids, self.expert_out],
-                [u32(w13.data_stride), u32(w13.scale_stride), u32(w13.inner), u32(INTERMEDIATE)],
-                (_FUSED // 4, TOP_K, 1),
-            )
-            self.session.dispatch(
-                f"moe_down_{kind}",
-                [
-                    self.expert_out,
-                    w2.data,
-                    w2.scale,
-                    ids,
-                    self.route,
-                    layer.mlp_conv,
-                    mlp_state,
-                    dest,
-                ],
-                [
-                    u32(HIDDEN),
-                    u32(w2.data_stride),
-                    u32(w2.scale_stride),
-                    u32(INTERMEDIATE),
-                    u32(w2.inner),
-                ],
-                (HIDDEN // 4, 1, 1),
-            )
+            kinds = self._expert_kinds(layer)
+            if len(kinds) == 1:
+                kind = kinds[0]
+                self._gate(layer, ids, kind)
+                self._down(layer, ids, kind, mlp_state, dest, conv=True)
+            else:
+                self._gate_mix(layer, ids)
+                self._down_mix(layer, ids, mlp_state, dest)
             return
         if complete:
             self._grouped(layer, self.ids, tokens, accumulate=False)
@@ -1015,30 +1191,38 @@ class InklingRuntime:
             [u32(HIDDEN)],
             (jobs, 1, 1),
         )
-        w13 = layer.w13
-        w2 = layer.w2
-        kind = "fp4" if w13.fp4 else "fp8"
-        tile = f"expert_{kind}_tile"
+        kinds = self._expert_kinds(layer)
         grouping = [self.jobs, self.expert_of, self.row_base, self.info]
-        self.session.dispatch(
-            tile,
-            [self.pack, w13.data, w13.scale, self.expert_out, *grouping],
-            [u32(w13.inner), u32(_FUSED), u32(w13.data_stride), u32(w13.scale_stride)],
-            (_FUSED // 128, jobs, 1),
-        )
         most = _max_rows(tokens)
-        self.session.launch(
-            "swiglu_grouped",
-            [self.expert_out, self.gated, self.info],
-            [u32(INTERMEDIATE), u32(w2.inner)],
-            most * w2.inner,
-        )
-        self.session.dispatch(
-            tile,
-            [self.gated, w2.data, w2.scale, self.expert_out, *grouping],
-            [u32(w2.inner), u32(HIDDEN), u32(w2.data_stride), u32(w2.scale_stride)],
-            (HIDDEN // 128, jobs, 1),
-        )
+        for kind in kinds:
+            self._expert_tile(layer, 0, kind, self.pack, self.expert_out, grouping, jobs, _FUSED)
+        if len(kinds) == 1:
+            inner = int(layer.w2.inner)
+            self.session.launch(
+                "swiglu_grouped",
+                [self.expert_out, self.gated, self.info],
+                [u32(INTERMEDIATE), u32(inner)],
+                most * inner,
+            )
+            self._expert_tile(
+                layer, 1, kinds[0], self.gated, self.expert_out, grouping, jobs, HIDDEN
+            )
+        else:
+            wide = stored_k(INTERMEDIATE)
+            self.session.launch(
+                "swiglu_grouped",
+                [self.expert_out, self.gated, self.info],
+                [u32(INTERMEDIATE), u32(wide)],
+                most * wide,
+            )
+            self.session.launch(
+                "swiglu_grouped",
+                [self.expert_out, self.pack, self.info],
+                [u32(INTERMEDIATE), u32(INTERMEDIATE)],
+                most * INTERMEDIATE,
+            )
+            self._expert_tile(layer, 1, "fp4", self.gated, self.expert_out, grouping, jobs, HIDDEN)
+            self._expert_tile(layer, 1, "fp8", self.pack, self.expert_out, grouping, jobs, HIDDEN)
         self.session.dispatch(
             "scatter_grouped",
             [self.moe_out, self.expert_out, self.pack_row, self.route],
@@ -1393,6 +1577,25 @@ class InklingRuntime:
     ) -> None:
         offset = 0
         last = 0
+        self._route_prefill = True
+        try:
+            offset, last = self._prefill_pieces(
+                prompt, fresh, pos, temperature, device_pick, offset, last
+            )
+        finally:
+            self._route_prefill = False
+        return
+
+    def _prefill_pieces(
+        self,
+        prompt: list[int],
+        fresh: list[int],
+        pos: int,
+        temperature: float,
+        device_pick: bool,
+        offset: int,
+        last: int,
+    ) -> tuple[int, int]:
         while offset < len(fresh):
             applied = pos + offset
             marker = self._user_marker()
@@ -1422,6 +1625,7 @@ class InklingRuntime:
                 self.session.end()
             if self._stopped():
                 raise RequestClosed()
+        return offset, last
 
     def _user_marker(self) -> int:
         found = getattr(self, "_user_marker_id", None)
@@ -1555,6 +1759,8 @@ class InklingRuntime:
             self._end_phase(decode_row, format_rate("decode", len(produced), self._decode_seconds))
             decode_row = None
             self._output_ids = produced
+            self._prefill_token_count = len(fresh)
+            self._decode_token_count = len(produced)
             return produced
         finally:
             self._end_phase(prefill_row, "")
@@ -1648,6 +1854,7 @@ class InklingRuntime:
         """
         produced: list[int] = []
         self._snapshot_step = -1
+        self._route_prefill = False
         if steps < 1:
             return produced
         first = int(np.frombuffer(self.session.download(self.history, 4, 0), dtype=np.uint32)[0])
@@ -1713,6 +1920,7 @@ class InklingRuntime:
     ) -> list[int]:
         produced: list[int] = []
         self._snapshot_step = -1
+        self._route_prefill = False
         seen = list(prompt)
         logits = self._logits()
         for step in range(steps):

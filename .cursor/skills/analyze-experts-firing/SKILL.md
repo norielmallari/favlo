@@ -5,7 +5,7 @@ description: Summarize MoE expert firing from a packed record's SQLite log and m
 
 # Analyze experts firing
 
-One packed folder. The log is written only after a finished request. A mid-forward stop is not stored. Today only `qwen36_35b_a3b` writes this log.
+One packed folder. The log is written only after a finished request. A mid-forward stop is not stored. `qwen36_35b_a3b` and `inkling_2_mini` write this log.
 
 Run the harness script. Do not invent hit counts. Do not requant from this skill.
 
@@ -30,7 +30,7 @@ Read the script output. Do not recompute the ranks by hand unless the script fai
 | `ideal_global_pct` | Share if the top `k` experts by hits were fp8 (`k` = current fp8 count). Same number a `--promote firing` requant would capture on this window at that `k` |
 | `ideal_layer_pct` | Share if each layer kept its own top-`k_layer` set |
 | `overlap_global` / `overlap_layer` | How many current fp8 experts sit in that ideal set. Slots that would move are `fp8_experts − overlap_global` |
-| `hits_per_token` | Sanity check. This package selects 8 experts on 40 layers, so 320 |
+| `hits_per_token` | Sanity check. Forty layers selecting 8 experts is 320. Inkling's 48 visits selecting 8 experts is 384 |
 | `fp8_score_median` / `fp4_score_median` | Relative score `hits / (layer_hits / 256)`. Uniform is 1 |
 
 Equal hit counts keep the lower expert index, matching promote. A gap between capture and ideal means live traffic has drifted from the promote list.
