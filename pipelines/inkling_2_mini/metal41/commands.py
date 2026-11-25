@@ -240,6 +240,38 @@ def _check_f16(session: Session, rng: np.random.Generator) -> None:
         (cols, 1, 1),
     )
     _close(session.download_f32(gemv, cols), expect[0], 1e-3, "half gemv")
+    _check_attn_f16(session, rng)
+
+
+def _check_attn_f16(session: Session, rng: np.random.Generator) -> None:
+    from inkling_2_mini.metal41.weights import ATTN_ROWS, ROW_K, ROW_V
+
+    inner = 128
+    q = rng.standard_normal(inner).astype(np.float32)
+    k = rng.standard_normal(inner).astype(np.float32)
+    v = rng.standard_normal(inner).astype(np.float32)
+    weight = rng.standard_normal((ATTN_ROWS, inner)).astype(np.float16)
+    sink = np.zeros((24, inner), dtype=np.float16)
+    dest = session.zeros((ATTN_ROWS + 24) * 4)
+    session.dispatch(
+        "gemv_attn_f16",
+        [
+            session.upload(q),
+            session.upload(k),
+            session.upload(v),
+            session.upload(np.ascontiguousarray(weight)),
+            session.upload(sink),
+            session.upload(sink),
+            session.upload(sink),
+            dest,
+        ],
+        [u32(ATTN_ROWS), u32(inner)],
+        (ATTN_ROWS // 4, 1, 1),
+    )
+    found = session.download_f32(dest, ATTN_ROWS)
+    for row, act in ((0, q), (ROW_K, k), (ROW_V, v), (ROW_K - 4, q)):
+        expect = weight[row].astype(np.float32) @ act
+        _close(np.array([found[row]]), np.array([expect]), 2e-3, f"half attention gemv row {row}")
 
 
 def _check_fp8(session: Session, rng: np.random.Generator) -> None:

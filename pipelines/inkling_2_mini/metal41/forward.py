@@ -746,24 +746,43 @@ class InklingRuntime:
         sink: Any = self.sink
         k_taps: Any = self.k_taps
         v_taps: Any = self.v_taps
-        if tokens == 1 and plane.fp8:
+        if tokens == 1:
             groups = ATTN_ROWS // 4 + 6 + (16 if layer.full else 0)
-            self.session.dispatch(
-                "gemv_attn",
-                [
-                    q_in,
-                    k_in,
-                    v_in,
-                    plane.handle,
-                    plane.scale,
-                    layer.sink.handle,
-                    layer.k_proj.handle if layer.full else layer.sink.handle,
-                    layer.v_proj.handle if layer.full else layer.sink.handle,
-                    self.proj,
-                ],
-                [u32(ATTN_ROWS), u32(HIDDEN)],
-                (groups, 1, 1),
+            taps = (
+                layer.k_proj.handle if layer.full else layer.sink.handle,
+                layer.v_proj.handle if layer.full else layer.sink.handle,
             )
+            if plane.fp8:
+                self.session.dispatch(
+                    "gemv_attn",
+                    [
+                        q_in,
+                        k_in,
+                        v_in,
+                        plane.handle,
+                        plane.scale,
+                        layer.sink.handle,
+                        *taps,
+                        self.proj,
+                    ],
+                    [u32(ATTN_ROWS), u32(HIDDEN)],
+                    (groups, 1, 1),
+                )
+            else:
+                self.session.dispatch(
+                    "gemv_attn_f16",
+                    [
+                        q_in,
+                        k_in,
+                        v_in,
+                        plane.handle,
+                        layer.sink.handle,
+                        *taps,
+                        self.proj,
+                    ],
+                    [u32(ATTN_ROWS), u32(HIDDEN)],
+                    (groups, 1, 1),
+                )
             sink = (self.proj, ATTN_ROWS * 4)
             k_taps = (self.proj, (ATTN_ROWS + 24) * 4)
             v_taps = (self.proj, (ATTN_ROWS + 56) * 4)
@@ -874,6 +893,19 @@ class InklingRuntime:
                     (HIDDEN // 4, 1, 1),
                 )
                 return
+            self.session.dispatch(
+                "gemv_f16_conv_add",
+                [
+                    self.attn_out,
+                    layer.wo.handle,
+                    layer.attn_conv,
+                    attn_state,
+                    dest,
+                ],
+                [u32(HIDDEN), u32(Q_DIM)],
+                (HIDDEN // 4, 1, 1),
+            )
+            return
         else:
             self.session.dispatch(
                 "attend_flash",

@@ -693,6 +693,43 @@ kernel void route_gemv(
     }
 }
 
+// The fused float16 attention plane, same row bands as gemv_attn.
+// [q; rel; gate; k; v], then the sink, then the full-layer key and value taps.
+kernel void gemv_attn_f16(
+    device const float* q_in [[buffer(0)]],
+    device const float* k_in [[buffer(1)]],
+    device const float* v_in [[buffer(2)]],
+    device const half* weights [[buffer(3)]],
+    device const half* sink_w [[buffer(4)]],
+    device const half* k_tap_w [[buffer(5)]],
+    device const half* v_tap_w [[buffer(6)]],
+    device float* destination [[buffer(7)]],
+    constant uint& attn_rows [[buffer(8)]],
+    constant uint& inner [[buffer(9)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group * 4u;
+    float4 acc;
+    if (row0 < attn_rows) {
+        device const float* act = row0 < ATTN_ROW_K ? q_in : (row0 < ATTN_ROW_V ? k_in : v_in);
+        acc = f16_part4(act, weights, row0, inner, lane);
+    } else {
+        uint local = row0 - attn_rows;
+        if (local < 24u) {
+            acc = f16_part4(q_in, sink_w, local, inner, lane);
+        } else if (local < 56u) {
+            acc = f16_part4(k_in, k_tap_w, local - 24u, inner, lane);
+        } else {
+            acc = f16_part4(v_in, v_tap_w, local - 56u, inner, lane);
+        }
+    }
+    acc = simd_sum4(acc);
+    if (lane < 4u) {
+        destination[row0 + lane] = acc[lane];
+    }
+}
+
 // One simdgroup per row. inner is a multiple of 8.
 kernel void gemv_f16(
     device const float* activation [[buffer(0)]],

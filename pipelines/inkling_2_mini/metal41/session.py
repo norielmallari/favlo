@@ -28,6 +28,7 @@ KERNELS: dict[str, int] = {
     "gemv_f16_conv_add": 32,
     "gemv_f16": 32,
     "gemv_attn": 32,
+    "gemv_attn_f16": 32,
     "route_gemv": 32,
     "moe_gate_fp4": 32,
     "moe_gate_fp8": 32,
