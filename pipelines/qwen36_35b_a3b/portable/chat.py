@@ -799,18 +799,16 @@ def _response_payload(
     if search is not None:
         output.append(search)
     if reasoning:
-        item: dict[str, Any] = {
-            "type": "reasoning",
-            "id": new_id("rs_"),
-            "summary": [],
-            "status": "completed",
-            "content": [{"type": "reasoning_text", "text": reasoning}],
-        }
-        summary = prepared.get("reasoning")
-        if isinstance(summary, dict) and summary.get("summary"):
-            item["summary"] = [{"type": "summary_text", "text": reasoning}]
-        item["encrypted_content"] = reasoning
-        output.append(item)
+        output.append(
+            {
+                "type": "reasoning",
+                "id": new_id("rs_"),
+                "summary": [{"type": "summary_text", "text": reasoning}],
+                "status": "completed",
+                "content": [{"type": "reasoning_text", "text": reasoning}],
+                "encrypted_content": reasoning,
+            }
+        )
     annotations: list[dict[str, Any]] = []
     visible = content or ""
     if calls:
@@ -934,9 +932,12 @@ def _stream(
     failed: list[BaseException] = []
     text = ""
     content_index: list[int] = []
+    reasoning_closed = False
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
 
     def write() -> None:
-        nonlocal text
+        nonlocal text, reasoning_closed
         produced: list[int] = []
         previous = ""
         gate = StreamText(thinking, keep_calls=not emit_tools)
@@ -950,7 +951,50 @@ def _stream(
                 base += 1
             return base + ordinal
 
+        def close_reasoning() -> None:
+            nonlocal reasoning_closed
+            if reasoning_closed or "reasoning" not in opened:
+                return
+            body = "".join(reasoning_parts)
+            event(
+                {
+                    "type": "response.reasoning_text.done",
+                    "content_index": 0,
+                    "item_id": reasoning_id,
+                    "output_index": 0,
+                    "text": body,
+                }
+            )
+            event(
+                {
+                    "type": "response.content_part.done",
+                    "content_index": 0,
+                    "item_id": reasoning_id,
+                    "output_index": 0,
+                    "part": {"type": "reasoning_text", "text": body},
+                }
+            )
+            event(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "reasoning",
+                        "id": reasoning_id,
+                        "summary": (
+                            [{"type": "summary_text", "text": body}] if body else []
+                        ),
+                        "content": (
+                            [{"type": "reasoning_text", "text": body}] if body else []
+                        ),
+                        "status": "completed",
+                    },
+                }
+            )
+            reasoning_closed = True
+
         def emit_tool(channel: str, payload: dict[str, Any]) -> None:
+            close_reasoning()
             call_id = str(payload.get("id") or "")
             output_index = tool_output_index(int(payload.get("index") or 0))
             if channel == "tool_start":
@@ -990,17 +1034,42 @@ def _stream(
             if not isinstance(visible, str) or not visible:
                 return
             if channel not in opened:
+                if channel != "reasoning":
+                    close_reasoning()
                 opened.add(channel)
                 if channel == "content":
                     content_index.append(1 if "reasoning" in opened else 0)
-                _open_item(
-                    event,
-                    channel,
-                    reasoning_id,
-                    message_id,
-                    0 if channel == "reasoning" else content_index[0],
-                )
+                index = 0 if channel == "reasoning" else content_index[0]
+                _open_item(event, channel, reasoning_id, message_id, index)
+                if channel == "reasoning":
+                    event(
+                        {
+                            "type": "response.content_part.added",
+                            "content_index": 0,
+                            "item_id": reasoning_id,
+                            "output_index": 0,
+                            "part": {"type": "reasoning_text", "text": ""},
+                        }
+                    )
+                if channel == "content":
+                    event(
+                        {
+                            "type": "response.content_part.added",
+                            "content_index": 0,
+                            "item_id": message_id,
+                            "output_index": index,
+                            "part": {
+                                "type": "output_text",
+                                "text": "",
+                                "annotations": [],
+                            },
+                        }
+                    )
             index = 0 if channel == "reasoning" else content_index[0]
+            if channel == "reasoning":
+                reasoning_parts.append(visible)
+            else:
+                content_parts.append(visible)
             _emit_response(event, channel, visible, reasoning_id, message_id, index)
 
         try:
@@ -1084,20 +1153,78 @@ def _stream(
     )
     if isinstance(message, dict):
         message["id"] = message_id
+    reasoning_item = next(
+        (
+            (index, item)
+            for index, item in enumerate(payload["output"])
+            if isinstance(item, dict) and item.get("type") == "reasoning"
+        ),
+        None,
+    )
+    if reasoning_item is not None:
+        index, item = reasoning_item
+        item["id"] = reasoning_id
+        item["status"] = "completed"
+        if not reasoning_closed:
+            body = "".join(reasoning_parts)
+            event(
+                {
+                    "type": "response.reasoning_text.done",
+                    "content_index": 0,
+                    "item_id": reasoning_id,
+                    "output_index": index,
+                    "text": body,
+                }
+            )
+            event(
+                {
+                    "type": "response.content_part.done",
+                    "content_index": 0,
+                    "item_id": reasoning_id,
+                    "output_index": index,
+                    "part": {"type": "reasoning_text", "text": body},
+                }
+            )
+            item["summary"] = [{"type": "summary_text", "text": body}] if body else []
+            event({"type": "response.output_item.done", "output_index": index, "item": item})
+            reasoning_closed = True
     if content_index and isinstance(message, dict):
+        body = "".join(content_parts)
+        index = content_index[0]
+        part = {
+            "type": "output_text",
+            "text": body,
+            "annotations": [],
+        }
+        event(
+            {
+                "type": "response.output_text.done",
+                "content_index": 0,
+                "item_id": message_id,
+                "output_index": index,
+                "text": body,
+                "logprobs": [],
+            }
+        )
+        event(
+            {
+                "type": "response.content_part.done",
+                "content_index": 0,
+                "item_id": message_id,
+                "output_index": index,
+                "part": part,
+            }
+        )
         event(
             {
                 "type": "response.output_item.done",
-                "output_index": content_index[0],
+                "output_index": index,
                 "item": message,
             }
         )
     for index, item in enumerate(payload["output"]):
         kind = item.get("type")
-        if kind == "reasoning":
-            item["id"] = reasoning_id
-            event({"type": "response.output_item.done", "output_index": index, "item": item})
-        elif kind == "function_call":
+        if kind == "function_call":
             arguments = item.get("arguments") or "{}"
             if not isinstance(arguments, str):
                 arguments = json.dumps(arguments)

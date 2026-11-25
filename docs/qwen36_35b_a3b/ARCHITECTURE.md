@@ -12,6 +12,7 @@ Kernels, the packed record layout, the registry field table, and the forward pat
 - `kernels`, `quantize`, `mtp-fp8`, `bf16`, `complete`, and `models` require `favlo --qwen36_35b_a3b`.
 - That flag loads `qwen36_35b_a3b.portable`.
 - `portable` is the serve entry. `metal41` is the Metal device that entry opens.
+- `portable` re-exports `idle_heartbeat` so the worker lull can write `firing.sqlite`.
 - The package does not import `qwen38_flash_next` or `qwen38_27b`.
 
 - The official checkpoint is [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B).
@@ -172,7 +173,7 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - `serve` draws a load row while the resident record and the expert images are read, then a prefill row that counts prompt tokens as each layer of a chunk finishes, then a decode row that counts sampled tokens as they are drawn.
 - Each count posts onto `favlo.host_progress`; that host thread builds the fact for the console queue, and the CLI thread paints it.
 - A streaming client receives each sampled token as a `chat.completion.chunk` with `id`, `object`, `created`, and `model`.
-- Reasoning is `delta.reasoning_content` until `</think>`, and the reply is `delta.content`.
+- Reasoning is `delta.reasoning_content` and `delta.reasoning` until `</think>`, including whitespace, and the reply is `delta.content`.
 - The prefill clock starts at the uncached forward, after the prefix align, and ends when the first output token is sampled.
 - The forward that produced that token's logits stays inside prefill.
 - The prompt prefix write stays outside prefill.
@@ -421,8 +422,13 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 - Those fragments join to the same JSON object as the finished call.
 - A reply with no reasoning item is output index 0, and its text deltas use that index.
 - A reply after a reasoning item stays output index 1.
+- The reasoning item opens with `response.output_item.added`, then `response.content_part.added` for an empty `reasoning_text` part.
+- Deltas are `response.reasoning_text.delta`.
+- The same trace is `summary` (`summary_text`) and `content` (`reasoning_text`) on the completed item.
+- That item is closed (`response.reasoning_text.done`, `response.content_part.done`, then `response.output_item.done`) before the message item opens.
+- The first text delta is preceded by `response.content_part.added`.
 - The completed response reuses the streamed message id.
-- `response.output_item.done` for that message is sent before `response.completed`.
+- `response.output_text.done`, `response.content_part.done`, and `response.output_item.done` for that message are sent before `response.completed`.
 - A parameter body that is a JSON array, object, or number is that value.
 - Any other body stays a string.
 - A leading zero keeps a digit string as text.

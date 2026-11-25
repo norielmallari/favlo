@@ -883,6 +883,26 @@ def test_a_thinking_reply_completes_after_the_text_deltas() -> None:
 
     reply = MemoryReply("qwen36_35b_a3b")
     _stream(reply, _Runtime(), [9], [], False, 8, 0.0, 1.0, 1, 0.0, True, [], None)
+    kinds = [payload.get("type") for payload in reply.events]
+    assert "response.reasoning_text.done" in kinds
+    assert "response.content_part.added" in kinds
+    assert "response.output_text.done" in kinds
+    closed = next(
+        payload
+        for payload in reply.events
+        if payload.get("type") == "response.output_item.done"
+        and (payload.get("item") or {}).get("type") == "reasoning"
+    )
+    assert closed["item"]["summary"][0]["text"] == "Need a plan\n"
+    assert closed["item"]["content"][0]["text"] == "Need a plan\n"
+    reason_done = kinds.index("response.output_item.done")
+    message_added = next(
+        i
+        for i, payload in enumerate(reply.events)
+        if payload.get("type") == "response.output_item.added"
+        and (payload.get("item") or {}).get("type") == "message"
+    )
+    assert reason_done < message_added
     content_indexes = [
         payload.get("output_index")
         for payload in reply.events
@@ -891,6 +911,83 @@ def test_a_thinking_reply_completes_after_the_text_deltas() -> None:
     assert content_indexes
     assert set(content_indexes) == {1}
     assert _responses_stream_accepts(reply.events) == []
+
+
+def test_chat_completions_stream_content_after_thinking() -> None:
+    from favlo.reply import MemoryReply
+    from favlo.responses import ChatWire
+    from qwen36_35b_a3b.portable.chat import _stream
+
+    class _Runtime:
+        _hit_limit = False
+        _cached_tokens = 0
+        _prefill_seconds = 0.1
+        _decode_seconds = 0.2
+        _output_ids: list[int] = []
+
+        def decode(self, ids: list[int]) -> str:
+            words = {1: "Need", 2: " a plan", 3: "\n</think>\n\n", 4: "The", 5: " answer."}
+            return "".join(words[token] for token in ids)
+
+        def generate(self, prompt, limit, temperature, top_p, top_k, presence, stop, **kwargs):
+            del prompt, limit, temperature, top_p, top_k, presence, stop
+            ids = [1, 2, 3, 4, 5]
+            for token in ids:
+                kwargs["on_token"](token)
+            self._output_ids = ids
+            return ids
+
+    inner = MemoryReply("qwen36_35b_a3b")
+    _stream(ChatWire(inner), _Runtime(), [9], [], False, 8, 0.0, 1.0, 1, 0.0, True, [], None)
+    seen: list[tuple[str, str]] = []
+    for payload in inner.events:
+        choices = payload.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        if delta.get("reasoning_content"):
+            seen.append(("reasoning", str(delta["reasoning_content"])))
+        if delta.get("content"):
+            seen.append(("content", str(delta["content"])))
+    assert ("reasoning", "Need") in seen
+    assert ("reasoning", "\n") in seen
+    assert ("content", "The") in seen
+    assert ("content", " answer.") in seen
+    assert seen.index(("reasoning", "Need")) < seen.index(("content", "The"))
+
+
+def test_live_reply_keeps_streaming_past_a_brief_stall() -> None:
+    import threading
+    import time
+
+    from favlo.reply import LiveReply
+
+    reply = LiveReply(threading.Event())
+    reply.begin_events()
+    errors: list[BaseException] = []
+
+    def producer() -> None:
+        try:
+            for index in range(200):
+                reply.event({"type": "tick", "n": index})
+            reply.done()
+            reply.finish_stream()
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=producer)
+    thread.start()
+    time.sleep(0.05)
+    got = 0
+    while True:
+        item = reply.pull()
+        if item is None:
+            break
+        if item:
+            got += 1
+    thread.join(timeout=2)
+    assert errors == []
+    assert got >= 200
 
 
 def _responses_stream_accepts(events: list[dict]) -> list[str]:
