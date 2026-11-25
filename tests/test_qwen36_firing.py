@@ -27,6 +27,17 @@ def _clear_pending() -> None:
     firing._pending.clear()
 
 
+def test_portable_exports_idle_heartbeat() -> None:
+    from favlo.cli import load_pipeline
+    from qwen36_35b_a3b.metal41 import firing as metal_firing
+
+    module = load_pipeline("qwen36_35b_a3b")
+    assert module.__name__ == "qwen36_35b_a3b.portable"
+    assert callable(module.idle_heartbeat)
+    assert module.idle_heartbeat.__module__ == "qwen36_35b_a3b.portable"
+    assert metal_firing.idle_heartbeat.__module__ == "qwen36_35b_a3b.metal41.firing"
+
+
 def test_a_uniform_expert_scores_one() -> None:
     assert relative_score(4, 4 * 256) == 1
     assert relative_score(0, 0) == 0
