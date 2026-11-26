@@ -82,6 +82,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     quantize.add_argument("--promote", choices=("error", "firing"), default="error")
     quantize.add_argument("--firing-db", type=Path, default=None)
     quantize.add_argument("--since", type=int, default=None)
+    repack = sub.add_parser(
+        "repack",
+        help="seal an NVFP4 checkpoint into a raw record for direct pread",
+    )
+    repack.add_argument(
+        "--src", type=Path, required=True, help="folder that holds the NVFP4 safetensors shard"
+    )
+    repack.add_argument(
+        "--name",
+        type=_folder_name,
+        default="inkling-2-mini-repack",
+        help="folder under models/ and the registry id",
+    )
     try:
         args = parser.parse_args(list(argv) if argv is not None else None)
     except SystemExit as exc:
@@ -98,7 +111,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _bake()
     if args.command == "quantize":
         return _quantize(args)
+    if args.command == "repack":
+        return _repack(args)
     return _models()
+
+
+def _repack(args: argparse.Namespace) -> int:
+    from favlo.registry import models_dir
+    from inkling_2_mini.metal41.record import repack_nvfp4
+
+    dest = models_dir() / args.name
+    repack_nvfp4(
+        args.src,
+        dest,
+        log=lambda line: print(line, flush=True),
+    )
+    return 0
 
 
 def _quantize(args: argparse.Namespace) -> int:

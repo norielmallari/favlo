@@ -553,36 +553,17 @@ class Checkpoint:
         self._done = 0
         self._noted = 0
         del calibrated
-        self._pack = None
         self.dense_tag = "fp8-nearest"
-        self._shared_dense = False
-        if ready(root):
-            self._tensors, self.experts = open_language(root, on_read=self._read)
-            self._dense = self._tensors
-            self._shared_dense = True
-        else:
-            path = checkpoint_file(root)
-            if not path.is_file():
-                message = f"checkpoint is missing {path.name}"
-                raise FileNotFoundError(message)
-            self._tensors = Tensors(path, on_read=self._read)
-            from inkling_2_mini.metal41.resident import open_expert_pack
-
-            self.experts = open_expert_pack(self.pack_root, self.root)
-            self._dense = open_dense_pack(self.pack_root)
+        if not ready(root):
+            message = "Inkling record is not sealed; run repack or setup first"
+            raise FileNotFoundError(message)
+        self._tensors, self.experts = open_language(root, on_read=self._read)
+        self._dense = self._tensors
         try:
             self._load()
         except Exception:
             self.close()
             raise
-        finally:
-            if self._pack is not None:
-                self._pack.close()
-                self._pack = None
-            dense = getattr(self, "_dense", None)
-            if dense is not None and not self._shared_dense:
-                dense.close()
-                self._dense = None
 
     def _load(self) -> None:
         session = self.session
@@ -625,10 +606,6 @@ class Checkpoint:
             if callable(note):
                 note(self._done)
 
-    def blob(self, offset: int, nbytes: int) -> bytes:
-        """Bytes from the mapped checkpoint. ``offset`` is into the map."""
-        return self._tensors.blob(offset, nbytes)
-
     def _vector_f32(self, name: str, shape: tuple[int, ...]) -> np.ndarray:
         return self._tensors.vector(name, shape)
 
@@ -637,22 +614,6 @@ class Checkpoint:
 
     def _f32(self, name: str, shape: tuple[int, ...]) -> Any:
         return self.session.upload(np.ascontiguousarray(self._vector_f32(name, shape)))
-
-    def _dense(self, name: str, cols: int, rows: int, inner: int, build: Any) -> Plane:
-        """A Metal fp4 plane: the calibrated pack when present, else round to nearest."""
-        pack = self._pack
-        if pack is not None:
-            data_off, data_n = pack.span(f"{name}.data", (rows, inner // 2))
-            scale_off, scale_n = pack.span(f"{name}.scale", (rows, inner // 32))
-            data = self._device(data_n)
-            scale = self._device(scale_n)
-            pack.into(data, data_off, data_n, note=self._read)
-            pack.into(scale, scale_off, scale_n, note=self._read)
-            return Plane(data, cols, rows, inner, scale=scale)
-        packed, scales = _quantize_fp4(build())
-        return Plane(
-            self.session.upload(packed), cols, rows, inner, scale=self.session.upload(scales)
-        )
 
     def _device(self, nbytes: int) -> Any:
         from favlo.memory import memory
@@ -734,9 +695,6 @@ class Checkpoint:
         array = np.ascontiguousarray(_pad_rows(matrix, padded).astype(np.float16))
         return Plane(self.session.upload(array), cols, padded, inner)
 
-    def _span(self, name: str, shape: tuple[int, ...]) -> tuple[int, int]:
-        return self._tensors.span(name, shape)
-
     def _conv(self, name: str, channels: int) -> Any:
         array = self._vector_f32(name, (channels, 1, 4)).reshape(channels, 4)
         return self.session.upload(np.ascontiguousarray(array))
@@ -806,51 +764,44 @@ class Checkpoint:
         return experts
 
     def _experts(self, layer: int, kind: str, rows: int, cols: int, nvfp4: bool) -> Experts:
-        record = getattr(self, "experts", None)
-        if record is not None and "widths" in record.header:
+        record = self.experts
+        if "widths" in record.header:
             return self._mixed_experts(layer, kind, rows, cols)
-        if record is not None:
-            from inkling_2_mini.metal41.resident import baked_shapes
-
-            data_shape, scale_shape = baked_shapes(layer, kind)
+        gs_name = f"layers.{layer}.{kind}.global_scale"
+        if nvfp4 and gs_name in record.header:
+            scale_cols = cols // 16
+            data_shape = (EXPERTS, rows, cols // 2)
+            scale_shape = (EXPERTS, rows, scale_cols)
+            global_scale = record.vector(gs_name, (EXPERTS,))
             experts = Experts(
                 rows,
                 cols,
-                int(scale_shape[-1]),
+                scale_cols,
                 int(np.prod(data_shape[1:])),
                 int(np.prod(scale_shape[1:])),
-                None,
+                global_scale,
                 record.span(f"layers.{layer}.{kind}.data", data_shape),
                 record.span(f"layers.{layer}.{kind}.scale", scale_shape),
-                nvfp4,
+                True,
             )
             experts.baked = True
             return experts
-        stem = f"model.llm.layers.{layer}.mlp.experts.{kind}"
-        scale_cols = cols // 16 if nvfp4 else cols // 32
-        data_shape = (EXPERTS, rows, cols // 2 if nvfp4 else cols)
-        scale_shape = (EXPERTS, rows, scale_cols)
-        file_data = self._span(f"{stem}_weight", data_shape)
-        file_scale = self._span(f"{stem}_weight_scale", scale_shape)
-        global_scale = None
-        if nvfp4:
-            amax = self._vector_f32(f"{stem}_weight_amax", (EXPERTS,))
-            denom = self._vector_f32(f"{stem}_weight_outer_scale_denominator", (1,))
-            if float(denom[0]) != OUTER_SCALE_DENOMINATOR:
-                message = f"{stem} outer scale denominator is not {OUTER_SCALE_DENOMINATOR}"
-                raise ValueError(message)
-            global_scale = (amax / denom[0]).astype(np.float32)
-        return Experts(
+        from inkling_2_mini.metal41.resident import baked_shapes
+
+        data_shape, scale_shape = baked_shapes(layer, kind)
+        experts = Experts(
             rows,
             cols,
-            scale_cols,
+            int(scale_shape[-1]),
             int(np.prod(data_shape[1:])),
             int(np.prod(scale_shape[1:])),
-            global_scale,
-            file_data,
-            file_scale,
+            None,
+            record.span(f"layers.{layer}.{kind}.data", data_shape),
+            record.span(f"layers.{layer}.{kind}.scale", scale_shape),
             nvfp4,
         )
+        experts.baked = True
+        return experts
 
     def _controllers(self, layer: int) -> tuple[Any, Any]:
         downs = []

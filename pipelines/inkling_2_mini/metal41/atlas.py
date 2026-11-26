@@ -1,11 +1,12 @@
 """Resident expert images.
 
-A baked ``experts-fp4.safetensors`` is read straight into device buffers, in
-8 MiB pieces. Without that file, NVFP4 tensors stay packed and the expert
-kernels decode them, and MXFP8 tensors are copied as stored. When every image does
-not fit beside the dense weights, the half key/value cache, and the
-activation buffers, the atlas keeps eight slots per projection and stages
-the experts a token routes before they run.
+A sealed ``experts.bin`` is read straight into device buffers in 8 MiB pieces:
+NVFP4 tensors with per-expert tensor scales stay packed for the NVFP4 decode
+kernels, Metal fp4 packs and MXFP8 tensors are read as stored, and mixed
+fp4/fp8 packs use per-expert offset tables. When every image does not fit
+beside the dense weights, the half key/value cache, and the activation buffers,
+the atlas keeps eight slots per projection and stages the experts a token
+routes before they run.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ import numpy as np
 
 from favlo.memory import device_buffer, memory
 from inkling_2_mini.metal41.layout import EXPERTS, HIDDEN, INTERMEDIATE, TOP_K, stored_k
-from inkling_2_mini.metal41.session import u32
 
 # Largest stored tensor of one expert: MXFP8 fused gate/up, then the widest block scale.
 _MAX_DATA = HIDDEN * HIDDEN
@@ -99,7 +99,6 @@ class ExpertAtlas:
         self.complete = bool(complete)
         self._spans: list[Any] = []
         self._staged: dict[int, tuple[int, ...]] = {}
-        self._baked = weights.experts is not None
         self.slot_data_off = [session.zeros(EXPERTS * 4) for _ in range(2)]
         self.slot_scale_off = [session.zeros(EXPERTS * 4) for _ in range(2)]
         self.slot_widths = session.zeros(EXPERTS)
@@ -112,7 +111,7 @@ class ExpertAtlas:
             for which, experts in enumerate((layer.w13, layer.w2)):
                 experts.data = stage_data[which]
                 experts.scale = stage_scale[which]
-                if experts.nvfp4 and experts.global_scale is not None and not self._baked:
+                if experts.nvfp4 and experts.global_scale is not None:
                     experts.global_handle = session.zeros(EXPERTS * 4)
                 elif experts.nvfp4:
                     _converted(experts)
@@ -143,39 +142,21 @@ class ExpertAtlas:
             self._load_mixed()
             return
         weights = self.weights
-        if self._baked:
-            record = weights.experts
-            for layer in weights.layers:
-                for experts in (layer.w13, layer.w2):
-                    data_off, data_n = experts.file_data
-                    scale_off, scale_n = experts.file_scale
-                    experts.data = self._device(data_n)
-                    experts.scale = self._device(scale_n)
-                    record.pread(experts.data, data_off, data_n, note=weights._read)
-                    record.pread(experts.scale, scale_off, scale_n, note=weights._read)
-                    if experts.nvfp4:
-                        _converted(experts)
-            self._bind_offsets()
-            return
+        record = weights.experts
         for layer in weights.layers:
             for experts in (layer.w13, layer.w2):
                 data_off, data_n = experts.file_data
                 scale_off, scale_n = experts.file_scale
+                experts.data = self._device(data_n)
+                experts.scale = self._device(scale_n)
+                record.pread(experts.data, data_off, data_n, note=weights._read)
+                record.pread(experts.scale, scale_off, scale_n, note=weights._read)
                 if experts.nvfp4 and experts.global_scale is not None:
-                    experts.data = self._device(data_n)
-                    experts.scale = self._device(scale_n)
-                    memory.store(experts.data, 0, weights.blob(data_off, data_n))
-                    memory.store(experts.scale, 0, weights.blob(scale_off, scale_n))
                     experts.global_handle = self.session.upload(
                         np.ascontiguousarray(experts.global_scale, dtype=np.float32)
                     )
-                    continue
-                if not experts.nvfp4:
-                    experts.data = self.session.upload(weights.blob(data_off, data_n))
-                    experts.scale = self.session.upload(weights.blob(scale_off, scale_n))
-                    continue
-                message = f"layer {layer.index} NVFP4 experts have no tensor scale"
-                raise RuntimeError(message)
+                elif experts.nvfp4:
+                    _converted(experts)
         self._bind_offsets()
 
     def _load_mixed(self) -> None:
@@ -214,38 +195,6 @@ class ExpertAtlas:
                 scale = np.arange(count, dtype=np.uint32) * np.uint32(experts.scale_stride)
                 experts.data_offsets = self.session.upload(data)
                 experts.scale_offsets = self.session.upload(scale)
-
-    def _convert(
-        self,
-        experts: Any,
-        raw_data: Any,
-        raw_scale: Any,
-        global_scale: np.ndarray,
-        count: int,
-        global_handle: Any,
-    ) -> None:
-        """Requant ``count`` NVFP4 images in ``raw_*`` to Metal fp4 slots 0..count-1."""
-        src_k = experts.cols
-        if global_handle is None:
-            data = self.session.zeros(EXPERTS * experts.rows * (stored_k(src_k) // 2))
-            scale = self.session.zeros(EXPERTS * experts.rows * (stored_k(src_k) // 32))
-            gs = device_buffer(self.owner, EXPERTS * 4)
-            memory.store(gs, 0, np.ascontiguousarray(global_scale, dtype=np.float32).tobytes())
-            experts.data = data
-            experts.scale = scale
-            _converted(experts)
-        else:
-            gs = global_handle
-            memory.store(gs, 0, np.ascontiguousarray(global_scale, dtype=np.float32).tobytes())
-        blocks = count * experts.rows * (experts.inner // 32)
-        self.session.launch(
-            "pack_nvfp4_fp4",
-            [raw_data, raw_scale, gs, experts.data, experts.scale],
-            [u32(count), u32(experts.rows), u32(src_k), u32(experts.inner)],
-            blocks,
-        )
-        if global_handle is None:
-            memory.release(gs)
 
     def _stage_mixed(self, layer: Any, chosen: list[int]) -> None:
         """Copy interleaved fp4 and fp8 images into per-slot strides."""
@@ -298,57 +247,26 @@ class ExpertAtlas:
         if self._staged.get(layer.index) == key and self._staged.get(-1) == (layer.index,):
             return
         weights = self.weights
-        if self._baked:
-            record = weights.experts
-            for experts in (layer.w13, layer.w2):
-                data_off, _data_n = experts.file_data
-                scale_off, _scale_n = experts.file_scale
-                for slot, expert in enumerate(chosen):
-                    record.pread(
-                        experts.data,
-                        data_off + expert * experts.data_stride,
-                        experts.data_stride,
-                        dest_off=slot * experts.data_stride,
-                    )
-                    record.pread(
-                        experts.scale,
-                        scale_off + expert * experts.scale_stride,
-                        experts.scale_stride,
-                        dest_off=slot * experts.scale_stride,
-                    )
-            self._staged = {layer.index: key, -1: (layer.index,)}
-            return
-        for which, experts in enumerate((layer.w13, layer.w2)):
-            data_off, data_n = experts.file_data
-            scale_off, scale_n = experts.file_scale
-            src_data = data_n // EXPERTS
-            src_scale = scale_n // EXPERTS
-            if experts.nvfp4 and not experts.fp4:
+        record = weights.experts
+        for experts in (layer.w13, layer.w2):
+            data_off, _data_n = experts.file_data
+            scale_off, _scale_n = experts.file_scale
+            if experts.nvfp4 and not experts.fp4 and experts.global_scale is not None:
                 picked = np.asarray(chosen, dtype=np.int64)
                 staged = np.zeros(EXPERTS, dtype=np.float32)
                 staged[: len(chosen)] = experts.global_scale[picked]
                 memory.store(experts.global_handle, 0, staged.tobytes())
-                for slot, expert in enumerate(chosen):
-                    memory.store(
-                        experts.data,
-                        slot * src_data,
-                        weights.blob(data_off + expert * src_data, src_data),
-                    )
-                    memory.store(
-                        experts.scale,
-                        slot * src_scale,
-                        weights.blob(scale_off + expert * src_scale, src_scale),
-                    )
-                continue
             for slot, expert in enumerate(chosen):
-                memory.store(
+                record.pread(
                     experts.data,
-                    slot * src_data,
-                    weights.blob(data_off + expert * src_data, src_data),
+                    data_off + expert * experts.data_stride,
+                    experts.data_stride,
+                    dest_off=slot * experts.data_stride,
                 )
-                memory.store(
+                record.pread(
                     experts.scale,
-                    slot * src_scale,
-                    weights.blob(scale_off + expert * src_scale, src_scale),
+                    scale_off + expert * experts.scale_stride,
+                    experts.scale_stride,
+                    dest_off=slot * experts.scale_stride,
                 )
         self._staged = {layer.index: key, -1: (layer.index,)}

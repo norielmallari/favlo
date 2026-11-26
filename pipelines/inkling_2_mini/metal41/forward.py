@@ -193,9 +193,8 @@ class InklingRuntime:
         self._states: list[Any] = []
         from inkling_2_mini.metal41.record import ready
 
-        weight = self.root / "model-00001-of-00001.safetensors"
-        if not ready(self.root) and not weight.is_file():
-            message = "Inkling checkpoint is not in the models folder"
+        if not ready(self.root):
+            message = "Inkling record is not sealed; run repack or setup first"
             raise FileNotFoundError(message)
         self.max_memory = memory.budget()
         self._disk_done = 0
@@ -296,27 +295,13 @@ class InklingRuntime:
 
     def _opening_bytes(self) -> int:
         """Resident record and expert record plus the largest working set."""
-        from inkling_2_mini.metal41.record import EXPERTS, RESIDENT, ready
-        from inkling_2_mini.metal41.resident import EXPERT_PACK
+        from inkling_2_mini.metal41.record import EXPERTS, RESIDENT
 
         total = 0
-        if ready(self.root):
-            for name in (RESIDENT, EXPERTS):
-                path = self.root / name
-                if path.is_file():
-                    total += path.stat().st_size
-        else:
-            checkpoint = self.root / "model-00001-of-00001.safetensors"
-            from inkling_2_mini.metal41.weights import DENSE_PACK
-
-            experts = getattr(self, "packs", self.root) / EXPERT_PACK
-            dense = getattr(self, "packs", self.root) / DENSE_PACK
-            if checkpoint.is_file():
-                total += checkpoint.stat().st_size
-            if experts.is_file():
-                total += experts.stat().st_size
-            if dense.is_file():
-                total += dense.stat().st_size
+        for name in (RESIDENT, EXPERTS):
+            path = self.root / name
+            if path.is_file():
+                total += path.stat().st_size
         total += self._footprint(CONTEXTS[0], CHUNK)
         return max(total, 1)
 

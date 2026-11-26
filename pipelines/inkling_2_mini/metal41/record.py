@@ -541,6 +541,198 @@ def _drop_sources(root: Path) -> None:
     (folder / "model.safetensors.index.json").unlink(missing_ok=True)
 
 
+def _copy_sidecars(src: Path, dest: Path) -> None:
+    """Copy tokenizer and config files into ``dest`` without touching ``src``."""
+    import shutil
+
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in dest.glob("*.safetensors"):
+        path.unlink()
+    for path in src.rglob("*"):
+        if path.name.endswith(".incomplete") or not path.is_file() or path.suffix == ".safetensors":
+            continue
+        rel = path.relative_to(src)
+        target = dest / rel
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
+def _index_shards(shards: list[Path]) -> dict[str, tuple[Path, dict[str, Any], int]]:
+    index: dict[str, tuple[Path, dict[str, Any], int]] = {}
+    for shard in shards:
+        fd, header, base = _open_header(shard)
+        os.close(fd)
+        for name, info in header.items():
+            if name == "__metadata__" or not isinstance(info, dict):
+                continue
+            index[name] = (shard, info, base)
+    return index
+
+
+def _read_f32_tensor(
+    index: dict[str, tuple[Path, dict[str, Any], int]],
+    name: str,
+    shape: tuple[int, ...],
+) -> np.ndarray:
+    found = index.get(name)
+    if found is None:
+        message = f"checkpoint is missing {name}"
+        raise KeyError(message)
+    shard, info, base = found
+    if tuple(info.get("shape", ())) != shape or info.get("dtype") != "F32":
+        message = f"{name} is not F32 {shape}"
+        raise ValueError(message)
+    start, end = info["data_offsets"]
+    fd = os.open(shard, os.O_RDONLY)
+    try:
+        raw = os.pread(fd, int(end) - int(start), base + int(start))
+    finally:
+        os.close(fd)
+    return np.frombuffer(raw, dtype=np.float32).reshape(shape).copy()
+
+
+def _nvfp4_experts(
+    shards: list[Path],
+    dest: Path,
+    log: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    """Copy NVFP4 and MXFP8 experts verbatim into ``dest`` for direct pread."""
+    from inkling_2_mini.metal41.layout import (
+        EXPERTS as NUM_EXPERTS,
+        HIDDEN,
+        INTERMEDIATE,
+        LAYERS,
+        NVFP4_LAYERS,
+        OUTER_SCALE_DENOMINATOR,
+    )
+
+    index = _index_shards(shards)
+    entries: dict[str, Any] = {}
+    fds: dict[Path, int] = {}
+    try:
+        with dest.open("wb") as out:
+            for layer in range(LAYERS):
+                is_nvfp4 = layer < NVFP4_LAYERS
+                for kind, rows, cols in (("w13", INTERMEDIATE * 2, HIDDEN), ("w2", HIDDEN, INTERMEDIATE)):
+                    stem = f"model.llm.layers.{layer}.mlp.experts.{kind}"
+                    data_shape = [NUM_EXPERTS, rows, cols // 2 if is_nvfp4 else cols]
+                    scale_shape = [NUM_EXPERTS, rows, cols // 16 if is_nvfp4 else cols // 32]
+                    for suffix, tag, shape in (
+                        ("_weight", "data", data_shape),
+                        ("_weight_scale", "scale", scale_shape),
+                    ):
+                        src_name = f"{stem}{suffix}"
+                        found = index.get(src_name)
+                        if found is None:
+                            message = f"checkpoint is missing {src_name}"
+                            raise KeyError(message)
+                        shard, info, base = found
+                        if list(info.get("shape", ())) != shape:
+                            message = f"{src_name} shape {info.get('shape')} is not {shape}"
+                            raise ValueError(message)
+                        fd = fds.get(shard)
+                        if fd is None:
+                            fd = os.open(shard, os.O_RDONLY)
+                            fds[shard] = fd
+                        start, end = info["data_offsets"]
+                        nbytes = int(end) - int(start)
+                        at = out.tell()
+                        _copy(fd, base + int(start), nbytes, out)
+                        entries[f"layers.{layer}.{kind}.{tag}"] = {
+                            "dtype": info.get("dtype"),
+                            "shape": shape,
+                            "data_offsets": [at, at + nbytes],
+                        }
+                    if is_nvfp4:
+                        amax = _read_f32_tensor(index, f"{stem}_weight_amax", (NUM_EXPERTS,))
+                        denom = _read_f32_tensor(
+                            index, f"{stem}_weight_outer_scale_denominator", (1,)
+                        )
+                        if float(denom[0]) != OUTER_SCALE_DENOMINATOR:
+                            message = (
+                                f"{stem} outer scale denominator is not {OUTER_SCALE_DENOMINATOR}"
+                            )
+                            raise ValueError(message)
+                        global_scale = np.ascontiguousarray(
+                            (amax / denom[0]).astype(np.float32)
+                        ).tobytes()
+                        at = out.tell()
+                        out.write(global_scale)
+                        entries[f"layers.{layer}.{kind}.global_scale"] = {
+                            "dtype": "F32",
+                            "shape": [NUM_EXPERTS],
+                            "data_offsets": [at, at + len(global_scale)],
+                        }
+                if log is not None:
+                    log(f"repacked experts layer {layer}")
+    finally:
+        for fd in fds.values():
+            os.close(fd)
+    return entries
+
+
+def repack_nvfp4(
+    src: Path,
+    dest: Path,
+    *,
+    log: Callable[[str], None] | None = None,
+) -> Path:
+    """Seal an NVFP4 checkpoint in ``src`` into a raw pread record in ``dest``.
+
+    Layers 0–19 stay NVFP4 (packed E2M1, E4M3 block scales, fp32 global scale).
+    Layers 20–23 stay MXFP8. BF16 language and MTP planes become float16.
+    Source files in ``src`` are left untouched.
+    """
+    from inkling_2_mini.metal41.commands import register_folder
+    from inkling_2_mini.metal41.vision import PACK_NAME, ensure_pack
+    from inkling_2_mini.metal41.weights import safetensor_files
+
+    source = Path(src).resolve()
+    output = Path(dest).resolve()
+    if source == output:
+        message = "repack writes a new folder"
+        raise ValueError(message)
+    shards = safetensor_files(source)
+    _copy_sidecars(source, output)
+    if ready(output):
+        if log is not None:
+            log("record is current")
+        register_folder(output, alias=None, source=source)
+        return output
+    ensure_pack(output, log=log, language=source)
+    vision = output / PACK_NAME
+    mtp = source / "mtp.safetensors"
+    try:
+        groups = {
+            "language": _resident(shards, output, None),
+            "experts": _nvfp4_experts(shards, output / f"{EXPERTS}.partial", log),
+            "vision": _export_payload(vision, output / f"{VISION}.partial"),
+            "mtp": _mtp(output, shards, mtp),
+        }
+        _check_groups(output, groups)
+        for name in (RESIDENT, EXPERTS, VISION, MTP):
+            partial = output / f"{name}.partial"
+            partial.replace(output / name)
+            if log is not None:
+                log(f"wrote {name}")
+        _matches_payload(vision, output / VISION)
+        _write_manifest(output, groups)
+        if not ready(output):
+            message = "record does not match config.json"
+            raise RuntimeError(message)
+        _drop_sources(output)
+    except Exception:
+        for name in (RESIDENT, EXPERTS, VISION, MTP, MANIFEST):
+            (output / f"{name}.partial").unlink(missing_ok=True)
+        raise
+    register_folder(output, alias=None, source=source)
+    if log is not None:
+        log(f"registered {output.name}")
+    return output
+
+
 __all__ = [
     "EXPERTS",
     "FORMAT",
@@ -553,5 +745,6 @@ __all__ = [
     "open_vision",
     "publish",
     "ready",
+    "repack_nvfp4",
     "seal",
 ]

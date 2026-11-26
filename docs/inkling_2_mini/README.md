@@ -5,7 +5,7 @@ Summary for the `inkling_2_mini` language pipeline. Kernels, the checkpoint layo
 - Clients reach this pipeline through `favlo serve`, which loads `inkling_2_mini.portable`.
 - `portable` is the serve entry. `metal41` is the Metal device that entry opens on Apple Silicon.
 - After the checkpoint is registered, `GET /v1/models` lists it and `model` on `POST /v1/responses` loads it.
-- `kernels`, `setup`, `calibrate`, `bake`, `quantize`, `complete`, and `models` require `favlo --inkling_2_mini`, which loads that same entry.
+- `kernels`, `setup`, `calibrate`, `bake`, `repack`, `quantize`, `complete`, and `models` require `favlo --inkling_2_mini`, which loads that same entry.
 
 - The official checkpoint is [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini).
 - Those weights are under the Apache License, Version 2.0.
@@ -23,6 +23,7 @@ uv run favlo --inkling_2_mini setup
 uv run favlo --inkling_2_mini calibrate
 uv run favlo --inkling_2_mini bake
 uv run favlo --inkling_2_mini kernels
+uv run favlo --inkling_2_mini repack --src <nvfp4-folder> --name inkling-2-mini-repack
 uv run favlo --inkling_2_mini quantize --src <bf16-folder> --name Inkling-2-mini-fp8-e50 --expert-fp8 50
 ```
 

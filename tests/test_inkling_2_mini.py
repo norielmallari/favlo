@@ -1121,3 +1121,97 @@ def test_portable_import_leaves_the_device_unloaded() -> None:
     assert loaded == []
     assert inkling_2_mini.portable.PIPELINE == "inkling_2_mini"
 
+
+def test_repack_nvfp4_seals_experts_and_leaves_source_untouched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from inkling_2_mini.metal41 import commands, layout, record, vision
+
+    monkeypatch.setattr(layout, "LAYERS", 2)
+    monkeypatch.setattr(layout, "NVFP4_LAYERS", 1)
+    monkeypatch.setattr(layout, "EXPERTS", 2)
+    monkeypatch.setattr(layout, "HIDDEN", 32)
+    monkeypatch.setattr(layout, "INTERMEDIATE", 32)
+
+    src = tmp_path / "src"
+    dest = tmp_path / "dest"
+    src.mkdir()
+    (src / "config.json").write_text(json.dumps({"model_type": "inkling_2_mini"}))
+    embed = np.array([[0x3F80, 0xC000]], dtype=np.uint16)  # 1.0, -2.0 in bf16
+    tensors: dict[str, tuple[str, np.ndarray]] = {
+        "model.llm.embed.weight": ("BF16", embed),
+        "model.llm.norm.weight": ("F32", np.array([0.5, 1.5], np.float32)),
+        "mtp.block.weight": ("BF16", np.array([0x3F80], np.uint16)),
+    }
+    # Layer 0: NVFP4
+    for kind, rows, cols in (("w13", 64, 32), ("w2", 32, 32)):
+        stem = f"model.llm.layers.0.mlp.experts.{kind}"
+        tensors[f"{stem}_weight"] = (
+            "U8",
+            np.arange(2 * rows * (cols // 2), dtype=np.uint8).reshape(2, rows, cols // 2),
+        )
+        tensors[f"{stem}_weight_scale"] = (
+            "F8_E4M3",
+            np.full((2, rows, cols // 16), 0x38, dtype=np.uint8),
+        )
+        tensors[f"{stem}_weight_amax"] = ("F32", np.array([2688.0, 5376.0], dtype=np.float32))
+        tensors[f"{stem}_weight_outer_scale_denominator"] = (
+            "F32",
+            np.array([2688.0], dtype=np.float32),
+        )
+    # Layer 1: MXFP8
+    for kind, rows, cols in (("w13", 64, 32), ("w2", 32, 32)):
+        stem = f"model.llm.layers.1.mlp.experts.{kind}"
+        tensors[f"{stem}_weight"] = (
+            "F8_E4M3",
+            np.full((2, rows, cols), 0x38, dtype=np.uint8),
+        )
+        tensors[f"{stem}_weight_scale"] = (
+            "U8",
+            np.full((2, rows, cols // 32), 127, dtype=np.uint8),
+        )
+    _shard(src / "model-00001-of-00001.safetensors", tensors)
+
+    def fake_vision(root: Path, *_args: object, **_kwargs: object) -> None:
+        _shard(root / vision.PACK_NAME, {"pos.code": ("U8", np.array([3, 1], np.uint8))})
+
+    registered: list[tuple[Path, Path | None]] = []
+
+    def fake_register(folder: Path, *, alias: str | None, source: Path | None = None, **_kw) -> None:
+        assert alias is None
+        registered.append((folder, source))
+
+    monkeypatch.setattr(vision, "ensure_pack", fake_vision)
+    monkeypatch.setattr(commands, "register_folder", fake_register)
+
+    out = record.repack_nvfp4(src, dest)
+    assert out == dest.resolve()
+    assert record.ready(dest)
+    assert (src / "model-00001-of-00001.safetensors").is_file()
+    assert list(dest.glob("*.safetensors")) == []
+    assert registered == [(dest.resolve(), src.resolve())]
+
+    resident, experts = record.open_language(dest)
+    try:
+        assert resident.header["model.llm.embed.weight"]["dtype"] == "F16"
+        assert np.allclose(resident.vector("model.llm.embed.weight", (1, 2)), [[1.0, -2.0]])
+        assert "layers.0.w13.global_scale" in experts.header
+        assert "layers.1.w13.global_scale" not in experts.header
+        assert np.allclose(experts.vector("layers.0.w13.global_scale", (2,)), [1.0, 2.0])
+        assert experts.span("layers.0.w13.data", (2, 64, 16))[1] == 2 * 64 * 16
+        assert experts.span("layers.0.w13.scale", (2, 64, 2))[1] == 2 * 64 * 2
+        assert experts.span("layers.1.w2.data", (2, 32, 32))[1] == 2 * 32 * 32
+    finally:
+        resident.close()
+        experts.close()
+
+
+def test_checkpoint_refuses_unsealed_folder(tmp_path: Path) -> None:
+    import pytest
+
+    from inkling_2_mini.metal41.weights import Checkpoint
+
+    (tmp_path / "config.json").write_text("{}\n")
+    with pytest.raises(FileNotFoundError, match="not sealed"):
+        Checkpoint(tmp_path, session=None)
+
