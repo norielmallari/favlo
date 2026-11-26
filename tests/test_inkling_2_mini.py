@@ -59,7 +59,12 @@ from inkling_2_mini.metal41.resident import (
 )
 from inkling_2_mini.metal41.weights import _quantize_fp4, open_pack
 from inkling_2_mini.portable import markup
-from inkling_2_mini.portable.chat import _required_name, forced_text
+from inkling_2_mini.portable.chat import (
+    _declared_tools,
+    _required_name,
+    _slim_schema,
+    forced_text,
+)
 from inkling_2_mini.portable.sampling import (
     DEFAULT_REASONING_EFFORT,
     DEFAULT_VARIANT,
@@ -315,6 +320,62 @@ def test_required_name_reads_the_responses_choice() -> None:
     )
     assert _required_name({"tool_choice": "auto"}) is None
     assert _required_name({}) is None
+
+
+def test_slim_schema_keeps_property_names() -> None:
+    params = {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "background": {
+                "type": "boolean",
+                "description": "Keep running after this call returns.",
+                "default": False,
+                "title": "Background",
+            },
+            "notify": {
+                "description": "Exit or pattern notify.",
+                "anyOf": [{"type": "boolean"}, {"type": "array", "items": {"type": "string"}}],
+            },
+        },
+        "required": ["command"],
+        "additionalProperties": False,
+    }
+    slimmed = _slim_schema(params)
+    assert slimmed["required"] == ["command"]
+    assert "additionalProperties" not in slimmed
+    assert set(slimmed["properties"]) == {"command", "background", "notify"}
+    assert slimmed["properties"]["background"] == {
+        "type": "boolean",
+        "description": "Keep running after this call returns.",
+    }
+    assert slimmed["properties"]["notify"]["anyOf"] == [
+        {"type": "boolean"},
+        {"type": "array", "items": {"type": "string"}},
+    ]
+    flat = {
+        "type": "function",
+        "name": "terminal",
+        "description": "Run a shell command.",
+        "parameters": params,
+    }
+    declared = _declared_tools([flat])
+    assert declared is not None
+    assert "background" in declared[0]["parameters"]["properties"]
+
+
+def test_shield_image_sentinel_accepts_list_type() -> None:
+    from inkling_2_mini.portable.chat import shield_image_sentinel
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "nullable": {"type": ["string", "null"], "description": "a <|unused_200054|> note"},
+        },
+    }
+    shielded = shield_image_sentinel(schema)
+    assert shielded["properties"]["nullable"]["type"] == ["string", "null"]
+    assert "<|unused_200054|>" not in shielded["properties"]["nullable"]["description"]
 
 
 def test_gptq_identity_hessian_is_round_to_nearest() -> None:

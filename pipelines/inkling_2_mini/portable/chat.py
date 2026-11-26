@@ -127,7 +127,8 @@ def shield_image_sentinel(value: Any) -> Any:
     if isinstance(value, list):
         return [shield_image_sentinel(item) for item in value]
     if isinstance(value, dict):
-        if value.get("type") in _IMAGE_PARTS:
+        kind = value.get("type")
+        if isinstance(kind, str) and kind in _IMAGE_PARTS:
             return value
         return {key: shield_image_sentinel(item) for key, item in value.items()}
     return value
@@ -186,14 +187,26 @@ def encode_chat(
     return list(load_tokenizer(root).encode(text + opening).ids)
 
 
-_SCHEMA_KEYS = ("type", "description", "enum", "properties", "required", "items")
+_SCHEMA_KEYS = (
+    "type",
+    "description",
+    "enum",
+    "properties",
+    "required",
+    "items",
+    "anyOf",
+    "oneOf",
+    "allOf",
+)
 
 
 def _slim_schema(value: Any) -> Any:
     """The declaration the checkpoint template was written for.
 
     Extra JSON-schema fields such as ``title`` and ``additionalProperties``
-    make a required call come out as prose.
+    make a required call come out as prose. A ``properties`` map keeps each
+    property name and slims that property's schema; treating the map itself as
+    a schema would drop every name.
     """
     if isinstance(value, list):
         return [_slim_schema(item) for item in value]
@@ -204,7 +217,9 @@ def _slim_schema(value: Any) -> Any:
         if key not in value:
             continue
         item = value[key]
-        if key in ("properties", "items"):
+        if key == "properties" and isinstance(item, dict):
+            kept[key] = {name: _slim_schema(schema) for name, schema in item.items()}
+        elif key in ("items", "anyOf", "oneOf", "allOf"):
             kept[key] = _slim_schema(item)
         else:
             kept[key] = item
