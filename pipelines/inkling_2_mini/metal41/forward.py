@@ -990,6 +990,8 @@ class InklingRuntime:
             return ("fp4", "fp8")
         if getattr(layer.w13, "fp4", False):
             return ("fp4",)
+        if getattr(layer.w13, "nvfp4", False) and layer.w13.global_scale is not None:
+            return ("nvfp4",)
         return ("fp8",)
 
     def _expert_tables(
@@ -1011,9 +1013,12 @@ class InklingRuntime:
     def _gate(self, layer: Any, ids: Any, kind: str) -> None:
         w13 = layer.w13
         tables, expect = self._expert_tables(layer, w13, 0, kind)
+        buffers = [self.moe_norm, w13.data, w13.scale, ids, self.expert_out, *tables]
+        if kind == "nvfp4":
+            buffers.append(w13.global_handle)
         self.session.dispatch(
             f"moe_gate_{kind}",
-            [self.moe_norm, w13.data, w13.scale, ids, self.expert_out, *tables],
+            buffers,
             [
                 u32(w13.data_stride),
                 u32(w13.scale_stride),
@@ -1058,19 +1063,22 @@ class InklingRuntime:
         w2 = layer.w2
         tables, expect = self._expert_tables(layer, w2, 1, kind)
         stored = stored_k(INTERMEDIATE) if kind == "fp4" else INTERMEDIATE
+        buffers = [
+            self.expert_out,
+            w2.data,
+            w2.scale,
+            ids,
+            self.route,
+            layer.mlp_conv,
+            state,
+            dest,
+            *tables,
+        ]
+        if kind == "nvfp4":
+            buffers.append(w2.global_handle)
         self.session.dispatch(
             f"moe_down_{kind}",
-            [
-                self.expert_out,
-                w2.data,
-                w2.scale,
-                ids,
-                self.route,
-                layer.mlp_conv,
-                state,
-                dest,
-                *tables,
-            ],
+            buffers,
             [
                 u32(HIDDEN),
                 u32(w2.data_stride),
@@ -1100,9 +1108,12 @@ class InklingRuntime:
             inner = HIDDEN
         else:
             inner = stored_k(INTERMEDIATE) if kind == "fp4" else INTERMEDIATE
+        buffers = [source, experts.data, experts.scale, dest, *grouping, *tables]
+        if kind == "nvfp4":
+            buffers.append(experts.global_handle)
         self.session.dispatch(
             f"expert_{kind}_tile",
-            [source, experts.data, experts.scale, dest, *grouping, *tables],
+            buffers,
             [
                 u32(inner),
                 u32(cols),

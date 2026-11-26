@@ -107,6 +107,7 @@ class Experts:
         self.file_data = file_data
         self.file_scale = file_scale
         self.nvfp4 = bool(nvfp4)
+        self.global_handle = None
         self.fp4 = False
         self.baked = False
         self.inner = int(cols)

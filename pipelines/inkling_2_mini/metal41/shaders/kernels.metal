@@ -246,6 +246,79 @@ kernel void expert_fp4_tile(
     op.run(tile_left, tile_right, tile_out);
 }
 
+// NVFP4 tile. A 64-wide K strip is decoded to half in threadgroup memory,
+// then matmul2d accumulates it. DRAM traffic stays the packed weights.
+constant uint NV_STRIP = 64u;
+
+kernel void expert_nvfp4_tile(
+    device half* pack [[buffer(0)]],
+    device uchar* weights [[buffer(1)]],
+    device uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    device const uint* jobs [[buffer(4)]],
+    device const uint* expert_of [[buffer(5)]],
+    device const uint* row_base [[buffer(6)]],
+    device const uint* info [[buffer(7)]],
+    device const uint* data_offsets [[buffer(8)]],
+    device const uint* scale_offsets [[buffer(9)]],
+    device const uchar* widths [[buffer(10)]],
+    device const float* global_scale [[buffer(11)]],
+    constant uint& inner [[buffer(12)]],
+    constant uint& cols [[buffer(13)]],
+    constant uint& data_stride [[buffer(14)]],
+    constant uint& scale_stride [[buffer(15)]],
+    constant uint& expect [[buffer(16)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup half btile[128 * NV_STRIP];
+    if (tgid.y >= info[1]) {
+        return;
+    }
+    uint slot = jobs[tgid.y * 2u];
+    uint row0 = jobs[tgid.y * 2u + 1u] * 32u;
+    uint expert = expert_of[slot];
+    if (expect != 0u && widths[expert] != expect) {
+        return;
+    }
+    uint col0 = tgid.x * 128u;
+    uint base_row = row_base[slot] + row0;
+    uint row = col0 + tid;
+    float gs = global_scale[expert];
+    device const uchar* src = weights + data_offsets[expert] + (ulong)row * (inner >> 1u);
+    device const uchar* sc = scales + scale_offsets[expert] + (ulong)row * (inner >> 4u);
+    tensor<device half, dextents<int, 2>, tensor_inline> left(
+        pack + (ulong)base_row * inner, dextents<int, 2>(int(inner), 32), array<int, 2>{1, int(inner)});
+    tensor<threadgroup half, dextents<int, 2>, tensor_inline> right(
+        btile, dextents<int, 2>(int(NV_STRIP), 128), array<int, 2>{1, int(NV_STRIP)});
+    tensor<device float, dextents<int, 2>, tensor_inline> out(
+        destination + (ulong)base_row * cols, dextents<int, 2>(int(cols), 32), array<int, 2>{1, int(cols)});
+    constexpr auto mul = matmul2d_descriptor(32, 128, int(NV_STRIP), false, true, false);
+    constexpr auto acc = matmul2d_descriptor(
+        32, 128, int(NV_STRIP), false, true, false,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<mul, execution_simdgroups<4>> mul_op;
+    matmul2d<acc, execution_simdgroups<4>> acc_op;
+    auto tile_out = out.slice(int(col0), 0);
+    for (uint k0 = 0u; k0 < inner; k0 += NV_STRIP) {
+        uint base = k0 >> 1u;
+        for (uint pair = 0u; pair < (NV_STRIP >> 1u); ++pair) {
+            uchar byte = src[base + pair];
+            float factor = E4M3_TABLE[sc[(k0 >> 4u) + (pair >> 3u)]] * gs;
+            btile[tid * NV_STRIP + pair * 2u] = half(E2M1_SIGNED[byte & 15u] * factor);
+            btile[tid * NV_STRIP + pair * 2u + 1u] = half(E2M1_SIGNED[byte >> 4u] * factor);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        auto tile_left = left.slice(int(k0), 0);
+        if (k0 == 0u) {
+            mul_op.run(tile_left, right, tile_out);
+        } else {
+            acc_op.run(tile_left, right, tile_out);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
 kernel void expert_fp8_tile(
     device half* pack [[buffer(0)]],
     device uchar* weights [[buffer(1)]],
@@ -401,6 +474,43 @@ static inline float4 fp8_part4(
     return acc;
 }
 
+// NVFP4: one E4M3 scale per 16 values, two words. The fp32 tensor scale is
+// applied by the caller so the inner loop stays one table load.
+static inline float4 nvfp4_part4(
+    device const float* act,
+    device const uchar* weights,
+    device const uchar* scales,
+    uint row0,
+    uint words,
+    uint row_bytes,
+    uint row_blocks,
+    uint lane)
+{
+    device const uint* p0 = (device const uint*)(weights + (ulong)row0 * row_bytes);
+    device const uint* p1 = (device const uint*)(weights + (ulong)(row0 + 1u) * row_bytes);
+    device const uint* p2 = (device const uint*)(weights + (ulong)(row0 + 2u) * row_bytes);
+    device const uint* p3 = (device const uint*)(weights + (ulong)(row0 + 3u) * row_bytes);
+    device const uchar* s0 = scales + (ulong)row0 * row_blocks;
+    device const uchar* s1 = s0 + row_blocks;
+    device const uchar* s2 = s1 + row_blocks;
+    device const uchar* s3 = s2 + row_blocks;
+    float4 acc = float4(0.0f);
+    for (uint i = lane; i < words; i += 32u) {
+        uint b = i >> 1u;
+        float f0 = E4M3_TABLE[s0[b]];
+        float f1 = E4M3_TABLE[s1[b]];
+        float f2 = E4M3_TABLE[s2[b]];
+        float f3 = E4M3_TABLE[s3[b]];
+        float4 a0 = *(device const float4*)(act + (i << 3u));
+        float4 a1 = *(device const float4*)(act + (i << 3u) + 4u);
+        acc.x = fma(f0, fp4_word(p0[i], a0, a1), acc.x);
+        acc.y = fma(f1, fp4_word(p1[i], a0, a1), acc.y);
+        acc.z = fma(f2, fp4_word(p2[i], a0, a1), acc.z);
+        acc.w = fma(f3, fp4_word(p3[i], a0, a1), acc.w);
+    }
+    return acc;
+}
+
 static inline float4 simd_sum4(float4 v) {
     return float4(simd_sum(v.x), simd_sum(v.y), simd_sum(v.z), simd_sum(v.w));
 }
@@ -421,6 +531,30 @@ kernel void gemv_fp4(
         return;
     }
     float4 acc = simd_sum4(fp4_part4(activation, weights, scales, row0, inner >> 3u, inner >> 1u, inner >> 5u, lane));
+    if (lane < 4u) {
+        destination[row0 + lane] = acc[lane];
+    }
+}
+
+// One NVFP4 matrix. inner is a multiple of 16. The tensor scale is one float.
+kernel void gemv_nvfp4(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant uint& cols [[buffer(4)]],
+    constant uint& inner [[buffer(5)]],
+    constant float& tensor_scale [[buffer(6)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group * 4u;
+    if (row0 >= cols) {
+        return;
+    }
+    float4 acc = simd_sum4(nvfp4_part4(
+        activation, weights, scales, row0, inner >> 3u, inner >> 1u, inner >> 4u, lane));
+    acc *= tensor_scale;
     if (lane < 4u) {
         destination[row0 + lane] = acc[lane];
     }
@@ -793,6 +927,43 @@ kernel void moe_gate_fp4(
     }
 }
 
+kernel void moe_gate_nvfp4(
+    device const float* activation [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device const uint* ids [[buffer(3)]],
+    device float* gated [[buffer(4)]],
+    device const uint* data_offsets [[buffer(5)]],
+    device const uint* scale_offsets [[buffer(6)]],
+    device const uchar* widths [[buffer(7)]],
+    device const float* global_scale [[buffer(8)]],
+    constant uint& data_stride [[buffer(9)]],
+    constant uint& scale_stride [[buffer(10)]],
+    constant uint& inner [[buffer(11)]],
+    constant uint& half_width [[buffer(12)]],
+    constant uint& expect [[buffer(13)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]])
+{
+    uint row0 = tgid.x * 4u;
+    uint slot = tgid.y;
+    uint expert = ids[slot];
+    if (expect != 0u && widths[expert] != expect) {
+        return;
+    }
+    float4 acc = simd_sum4(nvfp4_part4(
+        activation,
+        weights + data_offsets[expert],
+        scales + scale_offsets[expert],
+        row0, inner >> 3u, inner >> 1u, inner >> 4u, lane));
+    acc *= global_scale[expert];
+    if (lane == 0u) {
+        uint col = row0 >> 1u;
+        gated[slot * half_width + col] = swiglu_f(acc.x, acc.y);
+        gated[slot * half_width + col + 1u] = swiglu_f(acc.z, acc.w);
+    }
+}
+
 kernel void moe_gate_fp8(
     device const float* activation [[buffer(0)]],
     device const uchar* weights [[buffer(1)]],
@@ -868,6 +1039,57 @@ kernel void moe_down_fp4(
             scales + scale_offsets[expert],
             row0, inner >> 3u, stored >> 1u, stored >> 5u, lane);
         acc = fma(float4(route[slot]), part, acc);
+    }
+    acc = simd_sum4(acc);
+    if (lane < 4u) {
+        uint c = row0 + lane;
+        float value = acc[lane];
+        if (apply_conv != 0u) {
+            value = conv_step(value, conv_w, state, c, cols);
+        }
+        sum[c] += value;
+    }
+}
+
+kernel void moe_down_nvfp4(
+    device const float* gated [[buffer(0)]],
+    device const uchar* weights [[buffer(1)]],
+    device const uchar* scales [[buffer(2)]],
+    device const uint* ids [[buffer(3)]],
+    device const float* route [[buffer(4)]],
+    device const float* conv_w [[buffer(5)]],
+    device float* state [[buffer(6)]],
+    device float* sum [[buffer(7)]],
+    device const uint* data_offsets [[buffer(8)]],
+    device const uint* scale_offsets [[buffer(9)]],
+    device const uchar* widths [[buffer(10)]],
+    device const float* global_scale [[buffer(11)]],
+    constant uint& cols [[buffer(12)]],
+    constant uint& data_stride [[buffer(13)]],
+    constant uint& scale_stride [[buffer(14)]],
+    constant uint& inner [[buffer(15)]],
+    constant uint& stored [[buffer(16)]],
+    constant uint& expect [[buffer(17)]],
+    constant uint& apply_conv [[buffer(18)]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint group [[threadgroup_position_in_grid]])
+{
+    uint row0 = group * 4u;
+    if (row0 >= cols) {
+        return;
+    }
+    float4 acc = float4(0.0f);
+    for (uint slot = 0u; slot < 8u; ++slot) {
+        uint expert = ids[slot];
+        if (expect != 0u && widths[expert] != expect) {
+            continue;
+        }
+        float4 part = nvfp4_part4(
+            gated + slot * inner,
+            weights + data_offsets[expert],
+            scales + scale_offsets[expert],
+            row0, inner >> 3u, stored >> 1u, stored >> 4u, lane);
+        acc = fma(float4(route[slot] * global_scale[expert]), part, acc);
     }
     acc = simd_sum4(acc);
     if (lane < 4u) {

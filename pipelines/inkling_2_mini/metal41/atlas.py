@@ -1,8 +1,8 @@
 """Resident expert images.
 
 A baked ``experts-fp4.safetensors`` is read straight into device buffers, in
-8 MiB pieces. Without that file, NVFP4 tensors are requantized to Metal fp4
-on the device and MXFP8 tensors are copied as stored. When every image does
+8 MiB pieces. Without that file, NVFP4 tensors stay packed and the expert
+kernels decode them, and MXFP8 tensors are copied as stored. When every image does
 not fit beside the dense weights, the half key/value cache, and the
 activation buffers, the atlas keeps eight slots per projection and stages
 the experts a token routes before they run.
@@ -50,8 +50,8 @@ def image_bytes() -> int:
 
 
 def partial_bytes() -> int:
-    """Eight slots per projection plus the raw staging for eight NVFP4 images."""
-    return 2 * TOP_K * (_MAX_DATA + _MAX_SCALE) + TOP_K * image_bytes()
+    """Eight slots per projection. NVFP4 images are decoded in place."""
+    return 2 * TOP_K * (_MAX_DATA + _MAX_SCALE)
 
 
 def plan_opening(remaining: int, expert_bytes: int, activation) -> tuple[int, bool]:
@@ -106,17 +106,15 @@ class ExpertAtlas:
         if complete:
             self._load_all()
             return
-        if not self._baked:
-            self._raw_data = [self._span(TOP_K * _MAX_DATA) for _ in range(2)]
-            self._raw_scale = [self._span(TOP_K * _MAX_SCALE) for _ in range(2)]
-            self._global = [self._span(TOP_K * 4) for _ in range(2)]
         stage_data = [self._span(TOP_K * _MAX_DATA) for _ in range(2)]
         stage_scale = [self._span(TOP_K * _MAX_SCALE) for _ in range(2)]
         for layer in weights.layers:
             for which, experts in enumerate((layer.w13, layer.w2)):
                 experts.data = stage_data[which]
                 experts.scale = stage_scale[which]
-                if experts.nvfp4:
+                if experts.nvfp4 and experts.global_scale is not None and not self._baked:
+                    experts.global_handle = session.zeros(EXPERTS * 4)
+                elif experts.nvfp4:
                     _converted(experts)
         self._bind_offsets()
 
@@ -159,31 +157,25 @@ class ExpertAtlas:
                         _converted(experts)
             self._bind_offsets()
             return
-        largest_data = 0
-        largest_scale = 0
         for layer in weights.layers:
             for experts in (layer.w13, layer.w2):
-                if experts.nvfp4:
-                    largest_data = max(largest_data, experts.file_data[1])
-                    largest_scale = max(largest_scale, experts.file_scale[1])
-        raw_data = device_buffer(self.owner, largest_data) if largest_data else None
-        raw_scale = device_buffer(self.owner, largest_scale) if largest_scale else None
-        try:
-            for layer in weights.layers:
-                for experts in (layer.w13, layer.w2):
-                    data_off, data_n = experts.file_data
-                    scale_off, scale_n = experts.file_scale
-                    if not experts.nvfp4:
-                        experts.data = self.session.upload(weights.blob(data_off, data_n))
-                        experts.scale = self.session.upload(weights.blob(scale_off, scale_n))
-                        continue
-                    memory.store(raw_data, 0, weights.blob(data_off, data_n))
-                    memory.store(raw_scale, 0, weights.blob(scale_off, scale_n))
-                    self._convert(experts, raw_data, raw_scale, experts.global_scale, EXPERTS, None)
-        finally:
-            for handle in (raw_data, raw_scale):
-                if handle is not None:
-                    memory.release(handle)
+                data_off, data_n = experts.file_data
+                scale_off, scale_n = experts.file_scale
+                if experts.nvfp4 and experts.global_scale is not None:
+                    experts.data = self._device(data_n)
+                    experts.scale = self._device(scale_n)
+                    memory.store(experts.data, 0, weights.blob(data_off, data_n))
+                    memory.store(experts.scale, 0, weights.blob(scale_off, scale_n))
+                    experts.global_handle = self.session.upload(
+                        np.ascontiguousarray(experts.global_scale, dtype=np.float32)
+                    )
+                    continue
+                if not experts.nvfp4:
+                    experts.data = self.session.upload(weights.blob(data_off, data_n))
+                    experts.scale = self.session.upload(weights.blob(scale_off, scale_n))
+                    continue
+                message = f"layer {layer.index} NVFP4 experts have no tensor scale"
+                raise RuntimeError(message)
         self._bind_offsets()
 
     def _load_mixed(self) -> None:
@@ -331,27 +323,22 @@ class ExpertAtlas:
             scale_off, scale_n = experts.file_scale
             src_data = data_n // EXPERTS
             src_scale = scale_n // EXPERTS
-            if experts.nvfp4:
+            if experts.nvfp4 and not experts.fp4:
+                picked = np.asarray(chosen, dtype=np.int64)
+                staged = np.zeros(EXPERTS, dtype=np.float32)
+                staged[: len(chosen)] = experts.global_scale[picked]
+                memory.store(experts.global_handle, 0, staged.tobytes())
                 for slot, expert in enumerate(chosen):
                     memory.store(
-                        self._raw_data[which],
+                        experts.data,
                         slot * src_data,
                         weights.blob(data_off + expert * src_data, src_data),
                     )
                     memory.store(
-                        self._raw_scale[which],
+                        experts.scale,
                         slot * src_scale,
                         weights.blob(scale_off + expert * src_scale, src_scale),
                     )
-                scales = experts.global_scale[np.asarray(chosen, dtype=np.int64)]
-                self._convert(
-                    experts,
-                    self._raw_data[which],
-                    self._raw_scale[which],
-                    scales,
-                    len(chosen),
-                    self._global[which],
-                )
                 continue
             for slot, expert in enumerate(chosen):
                 memory.store(

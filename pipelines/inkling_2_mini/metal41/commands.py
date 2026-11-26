@@ -399,6 +399,58 @@ def _check_nvfp4(session: Session, rng: np.random.Generator) -> None:
             got_scale.reshape(experts, rows, cols // 32)[expert],
         )
         _close(requant, source, 0.2, "NVFP4 requant")
+    _check_nvfp4_decode(session, rng)
+
+
+def _check_nvfp4_decode(session: Session, rng: np.random.Generator) -> None:
+    """Software NVFP4 GEMV and the prefill tile against the host dequant."""
+    rows, cols, inner = 32, 128, 128
+    packed = rng.integers(0, 256, (cols, inner // 2), dtype=np.uint8)
+    scales = rng.integers(1, 127, (cols, inner // 16), dtype=np.uint8)
+    tensor_scale = np.float32(0.25)
+    weight = np.stack(
+        [nvfp4_row(packed[row], scales[row], float(tensor_scale)) for row in range(cols)]
+    )
+    activation = rng.standard_normal((rows, inner)).astype(np.float16)
+    expect = activation.astype(np.float32) @ weight.T
+    data = session.upload(packed)
+    scale = session.upload(scales)
+    jobs = session.upload(np.array([0, 0], dtype=np.uint32))
+    expert_of = session.upload(np.zeros(1, dtype=np.uint32))
+    row_base = session.upload(np.zeros(1, dtype=np.uint32))
+    info = session.upload(np.array([1, 1, rows], dtype=np.uint32))
+    offsets = session.upload(np.zeros(1, dtype=np.uint32))
+    widths = session.upload(np.zeros(1, dtype=np.uint8))
+    dest = session.zeros(rows * cols * 4)
+    session.dispatch(
+        "expert_nvfp4_tile",
+        [
+            session.upload(activation),
+            data,
+            scale,
+            dest,
+            jobs,
+            expert_of,
+            row_base,
+            info,
+            offsets,
+            offsets,
+            widths,
+            session.upload(np.array([tensor_scale], dtype=np.float32)),
+        ],
+        [u32(inner), u32(cols), u32(cols * inner // 2), u32(cols * inner // 16), u32(0)],
+        (cols // 128, 1, 1),
+    )
+    found = session.download_f32(dest, rows * cols).reshape(rows, cols)
+    _close(found, expect, 2e-2, "NVFP4 tile")
+    gemv = session.zeros(cols * 4)
+    session.dispatch(
+        "gemv_nvfp4",
+        [session.upload(activation[0].astype(np.float32)), data, scale, gemv],
+        [u32(cols), u32(inner), f32(float(tensor_scale))],
+        (cols // 4, 1, 1),
+    )
+    _close(session.download_f32(gemv, cols), expect[0], 2e-4, "NVFP4 gemv")
 
 
 def _check_argmax(session: Session, rng: np.random.Generator) -> None:
