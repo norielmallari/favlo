@@ -1,14 +1,16 @@
 """Sampling card for Inkling 2 Mini.
 
-``generation_config.json`` publishes temperature 1.0 and ``do_sample``. It does
-not publish a different temperature or top-k for thinking and non-thinking, so
-``thinking`` and ``instruct`` store one sampler. A request sets the effort with
-``reasoning_effort``. ``high`` is the template default, 0.9. The template keeps
-an assistant ``reasoning_content`` when the message carries one, so the
-registry row preserves thinking.
+``generation_config.json`` publishes temperature 1.0 and ``do_sample``. The
+published run settings are temperature 1.0, top-p 1.0, and top-k 0, with no
+presence penalty. The checkpoint has no thinking or instruct sampler. A
+request sets the effort with ``reasoning_effort``. ``high`` is the template
+default, 0.9. The template has no ``preserve_thinking`` switch. It renders
+an assistant ``reasoning_content`` when that field is present, so the
+registry row keeps the field. A request that sets it false drops the field
+before render.
 """
 
-DEFAULT_VARIANT = "thinking"
+DEFAULT_VARIANT = None
 DEFAULT_THINKING = True
 DEFAULT_REASONING_EFFORT = "high"
 PRESERVE_THINKING = True
@@ -28,18 +30,14 @@ EFFORT_LEVEL = {
     "max": 0.99,
 }
 
-_CARD = {
+CARD = {
     "temperature": 1.0,
     "top_p": 1.0,
     "top_k": 0,
     "presence_penalty": 0.0,
 }
 
-
-VARIANTS = {
-    "thinking": dict(_CARD),
-    "instruct": dict(_CARD),
-}
+VARIANTS: dict[str, dict[str, float | int]] = {}
 
 
 def template_effort(value: str | float | int | None) -> float:

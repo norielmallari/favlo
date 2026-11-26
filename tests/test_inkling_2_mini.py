@@ -66,6 +66,7 @@ from inkling_2_mini.portable.chat import (
     forced_text,
 )
 from inkling_2_mini.portable.sampling import (
+    CARD,
     DEFAULT_REASONING_EFFORT,
     DEFAULT_VARIANT,
     EFFORT_LEVEL,
@@ -127,6 +128,30 @@ def test_a_listed_mode_keeps_its_name() -> None:
     assert _listed_effort("medium", modes) == "medium"
     assert _listed_effort("none", modes) == "off"
     assert _listed_effort("high", None) == "high"
+
+
+def test_reasoning_stays_until_the_request_drops_it() -> None:
+    from inkling_2_mini.portable.chat import decode_text, encode_chat, keep_reasoning
+
+    assert keep_reasoning({}) is True
+    assert keep_reasoning({}, False) is False
+    assert keep_reasoning({"preserve_thinking": False}, True) is False
+    assert keep_reasoning({"chat_template_kwargs": {"preserve_thinking": True}}, False) is True
+    root = Path(__file__).resolve().parents[1] / "models" / "inkling-2-mini-repack"
+    if not (root / "tokenizer.json").is_file():
+        return
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "reasoning_content": "thought-token", "content": "answer"},
+        {"role": "user", "content": "next"},
+    ]
+    kept = decode_text(root, encode_chat(root, messages, None, True, effort="high"))
+    dropped = decode_text(
+        root, encode_chat(root, messages, None, True, effort="high", preserve=False)
+    )
+    assert "<|content_thinking|>thought-token<|end_message|>" in kept
+    assert "thought-token" not in dropped
+    assert "answer" in dropped
 
 
 def test_template_effort_is_the_number_the_checkpoint_writes() -> None:
@@ -579,17 +604,14 @@ def test_pack_round_trip(tmp_path: Path) -> None:
 
 
 def test_sampling_card_follows_the_published_defaults() -> None:
-    assert DEFAULT_VARIANT == "thinking"
+    assert DEFAULT_VARIANT is None
+    assert VARIANTS == {}
     assert DEFAULT_REASONING_EFFORT == "high"
     assert PRESERVE_THINKING is True
-    assert set(VARIANTS) == {"thinking", "instruct"}
-    assert VARIANTS["thinking"] == VARIANTS["instruct"]
-    thinking = VARIANTS["thinking"]
-    assert thinking["temperature"] == 1.0
-    assert thinking["top_p"] == 1.0
-    assert thinking["top_k"] == 0
-    assert thinking["presence_penalty"] == 0.0
-    assert "reasoning_effort" not in thinking
+    assert CARD["temperature"] == 1.0
+    assert CARD["top_p"] == 1.0
+    assert CARD["top_k"] == 0
+    assert CARD["presence_penalty"] == 0.0
 
 
 def test_progress_reports_through_the_console(tmp_path: Path) -> None:
@@ -871,14 +893,15 @@ def test_register_writes_the_recommended_card(tmp_path: Path) -> None:
     assert Path(row["directory"]) == folder
     assert row["alias"] == "inkling_2_mini"
     assert row["kv_cache"] == "half"
-    assert row["default_variant"] == "thinking"
+    assert row["default_variant"] is None
+    assert row["variants"] == {}
     assert row["enable_thinking"] is True
     assert row["reasoning_effort"] == "high"
     assert row["preserve_thinking"] is True
-    assert set(row["variants"]) == {"thinking", "instruct"}
-    assert "reasoning_effort" not in row["variants"]["thinking"]
-    assert row["variants"]["thinking"]["temperature"] == 1.0
-    assert row["variants"]["instruct"]["top_k"] == 0
+    assert row["temperature"] == 1.0
+    assert row["top_p"] == 1.0
+    assert row["top_k"] == 0
+    assert row["presence_penalty"] == 0.0
 
 
 def _shard(path: Path, tensors: dict[str, tuple[str, np.ndarray]]) -> None:
@@ -1097,3 +1120,4 @@ def test_portable_import_leaves_the_device_unloaded() -> None:
     ]
     assert loaded == []
     assert inkling_2_mini.portable.PIPELINE == "inkling_2_mini"
+

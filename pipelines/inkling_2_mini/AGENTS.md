@@ -16,7 +16,7 @@ This package implements the Responses API only. The listener owns the Chat Compl
 
 ## Variants and effort
 
-Registration copies `VARIANTS` and `DEFAULT_VARIANT` from `sampling.py`. `generation_config.json` publishes temperature 1.0 and does not publish a separate top-k for thinking and non-thinking, so `thinking` and `instruct` store that one sampler. A request sets the effort with `reasoning_effort`. The row default is `high`. The template accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `resolve_effort` keeps a supported name. `template_effort` converts that name, or a number, to the float in `[0.0, 0.99]` that the checkpoint template writes. `setup` sets `preserve_thinking` true, because the template keeps an assistant `reasoning_content` when the message carries one.
+Registration copies `CARD` from `sampling.py` onto the row. The package has no sampling suffixes. `generation_config.json` publishes temperature 1.0, and the published run settings are top-p 1.0 and top-k 0 with no presence penalty. A request sets the effort with `reasoning_effort`. The row default is `high`. The template accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `resolve_effort` keeps a supported name. `template_effort` converts that name, or a number, to the float in `[0.0, 0.99]` that the checkpoint template writes. `setup` sets `preserve_thinking` true. The template has no such switch: it renders an assistant `reasoning_content` when the field is present. A request that sets the field false removes it before render.
 
 ## Setup
 

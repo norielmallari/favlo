@@ -32,6 +32,7 @@ from favlo.responses import (
 from inkling_2_mini.portable import markup
 from inkling_2_mini.portable.closed import RequestClosed
 from inkling_2_mini.portable.sampling import (
+    CARD,
     DEFAULT_THINKING,
     DEFAULT_VARIANT,
     VARIANTS,
@@ -159,6 +160,35 @@ def _objects(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return copied
 
 
+def keep_reasoning(body: dict[str, Any], registry: bool | None = None) -> bool:
+    """Whether historical ``reasoning_content`` stays on the messages.
+
+    The checkpoint template has no ``preserve_thinking`` flag. It renders an
+    assistant ``reasoning_content`` whenever that field is present. A request
+    that sets the field false drops it before render. Omitted keeps it, which
+    is the template's own behavior. The registry row is the default.
+    """
+    if "preserve_thinking" in body:
+        return bool(body.get("preserve_thinking"))
+    kwargs = body.get("chat_template_kwargs")
+    if isinstance(kwargs, dict) and "preserve_thinking" in kwargs:
+        return bool(kwargs.get("preserve_thinking"))
+    if registry is None:
+        return True
+    return bool(registry)
+
+
+def _drop_reasoning(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove thinking fields so the template does not render them."""
+    cleaned: list[dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        item.pop("reasoning_content", None)
+        item.pop("reasoning", None)
+        cleaned.append(item)
+    return cleaned
+
+
 def encode_chat(
     root: Path,
     messages: list[dict[str, Any]],
@@ -167,20 +197,24 @@ def encode_chat(
     *,
     effort: str | float | int | None = None,
     opening: str | None = None,
+    preserve: bool = True,
 ) -> list[int]:
     """Render the checkpoint template, append the opening, and encode it.
 
-    The template has no generation prompt. ``opening`` is the markup the
-    prompt ends with. When it is omitted, a request with no tools takes the
-    opening of its card. ``reasoning_effort`` is the template's number, in
-    ``[0.0, 0.99]``.
+    The template has no generation prompt and no ``preserve_thinking`` switch.
+    ``opening`` is the markup the prompt ends with. When it is omitted, a
+    request with no tools takes the opening of its card. ``reasoning_effort``
+    is the template's number, in ``[0.0, 0.99]``. ``preserve`` false removes
+    ``reasoning_content`` before render.
     """
     chosen = effort if effort is not None else ("high" if thinking else "none")
+    prepared = _objects(messages)
+    if not preserve:
+        prepared = _drop_reasoning(prepared)
     text = _chat_template(root).render(
-        messages=_objects(messages),
+        messages=prepared,
         tools=shield_image_sentinel(_declared_tools(tools)),
         reasoning_effort=_effort_argument(root, chosen),
-        enable_thinking=thinking,
     )
     if opening is None:
         opening = forced_text(thinking, None, plain=not tools)
@@ -290,7 +324,9 @@ def _card(selection: Any) -> dict[str, Any]:
     sampling = getattr(selection, "sampling", None) if selection is not None else None
     if isinstance(sampling, dict):
         return sampling
-    return dict(VARIANTS[DEFAULT_VARIANT])
+    if DEFAULT_VARIANT and DEFAULT_VARIANT in VARIANTS:
+        return dict(VARIANTS[DEFAULT_VARIANT])
+    return dict(CARD)
 
 
 def _number(body: dict[str, Any], card: dict[str, Any], key: str, default: float) -> float:
@@ -454,7 +490,7 @@ class Pipeline(LanguagePipeline):
     """One Responses completion. The runtime owns the token loop."""
 
     variants = VARIANTS
-    default_variant = DEFAULT_VARIANT
+    default_variant = DEFAULT_VARIANT or ""
     default_thinking = DEFAULT_THINKING
     default_reasoning_effort = "high"
 
@@ -541,7 +577,15 @@ def _respond(
     runtime._vision_plan = None
     try:
         prompt = encode_chat(
-            runtime.root, messages, tools, thinking, effort=effort, opening=opening
+            runtime.root,
+            messages,
+            tools,
+            thinking,
+            effort=effort,
+            opening=opening,
+            preserve=keep_reasoning(
+                prepared, getattr(selection, "preserve_thinking", None)
+            ),
         )
         from inkling_2_mini.metal41.vision import expand_prompt
 

@@ -278,9 +278,6 @@ def register_quantized(
         pipeline=pipeline,
         runtime=runtime,
     )
-    variants, default_variant = pipeline_sampling(
-        pipeline, runtime=runtime, pipeline_root=stored_root
-    )
     thinking = pipeline_enable_thinking(pipeline, runtime=runtime, pipeline_root=stored_root)
     effort = pipeline_reasoning_effort(pipeline, runtime=runtime, pipeline_root=stored_root)
     if current is not None:
@@ -288,8 +285,7 @@ def register_quantized(
         if stored and _same_path(stored, source):
             current["directory"] = directory_text
             _merge_parts(current, part_text)
-            current["variants"] = variants
-            current["default_variant"] = default_variant
+            _write_sampling(current, pipeline, runtime=runtime, pipeline_root=stored_root)
             current["enable_thinking"] = thinking
             if effort is not None:
                 current["reasoning_effort"] = effort
@@ -651,6 +647,8 @@ _EMBEDDINGS_VARIANTS = frozenset({"embed"})
 
 
 def _is_language_model_entry(entry: dict[str, Any]) -> bool:
+    if _row_sampler(entry) is not None:
+        return True
     variants = entry.get("variants")
     if not isinstance(variants, dict):
         return False
@@ -706,7 +704,12 @@ def _public_id(entry: dict[str, Any], folder: str) -> str:
 
 
 def _language_model_id(entry: dict[str, Any], folder: str) -> str:
-    return f"{_public_id(entry, folder)}:{_language_variant(entry)}"
+    variants = entry.get("variants")
+    named = isinstance(variants, dict) and any(name in variants for name in _LANGUAGE_VARIANTS)
+    public = _public_id(entry, folder)
+    if not named:
+        return public
+    return f"{public}:{_language_variant(entry)}"
 
 
 def _ensure_default_llm(
@@ -979,9 +982,6 @@ def _entry(
     kv_cache: str | None = None,
 ) -> dict[str, Any]:
     stored_root = _stored_pipeline_root(pipeline_root, pipeline=pipeline, runtime=runtime)
-    variants, default_variant = pipeline_sampling(
-        pipeline, runtime=runtime, pipeline_root=stored_root
-    )
     thinking = pipeline_enable_thinking(pipeline, runtime=runtime, pipeline_root=stored_root)
     effort = pipeline_reasoning_effort(pipeline, runtime=runtime, pipeline_root=stored_root)
     ctx = card_context_length(pipeline, runtime=runtime, pipeline_root=stored_root)
@@ -993,14 +993,13 @@ def _entry(
         "directory": directory,
         "kv_cache": kv_cache or "f16",
         "resident_percent": None,
-        "variants": variants,
-        "default_variant": default_variant,
         "enable_thinking": thinking,
         "context_length": ctx if ctx is not None else DEFAULT_CONTEXT_LENGTH,
         "pipeline_root": stored_root,
     }
     if effort is not None:
         entry["reasoning_effort"] = effort
+    _write_sampling(entry, pipeline, runtime=runtime, pipeline_root=stored_root)
     if parts:
         entry["parts"] = parts
     if max_prompt_tokens is not None:
@@ -1122,6 +1121,8 @@ def _selection(
     if variant is not None:
         row = stored.get(variant)
         sampling = _sampling_fields(row) if isinstance(row, dict) else None
+    else:
+        sampling = _row_sampler(entry)
     alias = entry.get("alias")
     alias_text = alias if isinstance(alias, str) and alias else None
     parent = _public_id(entry, folder)
@@ -1222,17 +1223,71 @@ def card_context_length(
     return value
 
 
+def pipeline_card(
+    pipeline: str, *, runtime: str, pipeline_root: str | None = None
+) -> dict[str, float | int]:
+    """The row sampler from ``CARD`` when the package has no variants."""
+    module = _sampling_module(pipeline, runtime=runtime, pipeline_root=pipeline_root)
+    return _card_fields(getattr(module, "CARD", None), pipeline)
+
+
+def _write_sampling(
+    entry: dict[str, Any],
+    pipeline: str,
+    *,
+    runtime: str,
+    pipeline_root: str | None,
+) -> None:
+    """Copy the package sampler onto ``entry``.
+
+    A package with no variants stores the card on the row. A package with
+    variants keeps those suffixes and does not also store the card on the row.
+    """
+    variants, default_variant = pipeline_sampling(
+        pipeline, runtime=runtime, pipeline_root=pipeline_root
+    )
+    entry["variants"] = variants
+    if default_variant is None:
+        entry["default_variant"] = None
+        entry.update(
+            pipeline_card(pipeline, runtime=runtime, pipeline_root=pipeline_root)
+        )
+        return
+    entry["default_variant"] = default_variant
+    for key in _CARD_FIELDS:
+        entry.pop(key, None)
+
+
+def _card_fields(raw: Any, pipeline: str) -> dict[str, float | int]:
+    if not isinstance(raw, dict):
+        message = f"{pipeline} sampling card must define CARD"
+        raise ValueError(message)
+    keys = set(raw)
+    if not set(_CARD_FIELDS).issubset(keys):
+        message = f"{pipeline} CARD must set {', '.join(_CARD_FIELDS)}"
+        raise ValueError(message)
+    extra = keys - set(_CARD_FIELDS)
+    if extra:
+        message = f"{pipeline} CARD has unknown fields: {', '.join(sorted(extra))}"
+        raise ValueError(message)
+    return _sampling_fields(raw)
+
+
 def pipeline_sampling(
     pipeline: str, *, runtime: str, pipeline_root: str | None = None
-) -> tuple[dict[str, dict[str, Any]], str]:
+) -> tuple[dict[str, dict[str, Any]], str | None]:
     """Load ``VARIANTS`` and ``DEFAULT_VARIANT`` from ``<package>/sampling.py``.
 
     The module is loaded by path so registration does not import the pipeline.
-    Each row must set the sampler fields. ``reasoning_effort`` is optional.
+    An empty ``VARIANTS`` means the sampler lives on the row via ``CARD``.
+    Each named row must set the sampler fields. ``reasoning_effort`` is optional.
     """
     module = _sampling_module(pipeline, runtime=runtime, pipeline_root=pipeline_root)
     raw = getattr(module, "VARIANTS", None)
     default = getattr(module, "DEFAULT_VARIANT", None)
+    if isinstance(raw, dict) and not raw:
+        _card_fields(getattr(module, "CARD", None), pipeline)
+        return {}, None
     if not isinstance(raw, dict) or not raw:
         message = f"{pipeline} sampling card must define VARIANTS"
         raise ValueError(message)
@@ -1315,6 +1370,13 @@ def _stored_variants(entry: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if isinstance(name, str) and isinstance(row, dict):
             stored[name] = dict(row)
     return stored
+
+
+def _row_sampler(entry: dict[str, Any]) -> dict[str, float | int] | None:
+    """Sampler fields stored on the row. Missing any field means no row card."""
+    if not all(key in entry for key in _CARD_FIELDS):
+        return None
+    return _sampling_fields(entry)
 
 
 def _sampling_fields(card: dict[str, Any]) -> dict[str, float | int]:
