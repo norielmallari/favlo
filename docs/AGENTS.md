@@ -12,7 +12,7 @@ Do not commit personal data or secrets. Placeholders are `~/.favlo`, `127.0.0.1`
 
 A pipeline note names the official base model and its model card. A finetune or other derived checkpoint stays out of `docs/<pipeline>/`. The directory stem in the note is the official repository name plus the weight quants.
 
-Use calm, short sentences. A list of facts is a bullet list. A paragraph that stacks several facts becomes bullets. A measured time names the machine as an M5 Pro with 48 GB. Outside a block quote, a claim by the author is in the third person.
+Use calm, short sentences. Related facts share one sentence, and a bullet starts the next topic. One fact per bullet is too fine, and a paragraph that stacks unrelated facts is too coarse. A measured time names the machine as an M5 Pro with 48 GB. Outside a block quote, a claim by the author is in the third person.
 
 The root README says what the project is, how to install it, one minimal command, the license, and where to report a problem. Prefer relative links.
 

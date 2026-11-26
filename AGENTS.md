@@ -86,6 +86,8 @@ Do not invent routing hits, calibration energies, or hidden-state errors. A meas
 
 ## Docs
 
+A doc groups related facts into one sentence, and a bullet starts the next topic. One fact per bullet is too fine. A paragraph that stacks unrelated facts is too coarse. Tables, trees, and command blocks stay as they are.
+
 A package change updates that package's `docs/<model>/` files in the same change. The README there is a summary: what the package is, how to run it, the checkpoint and license, and links. Kernel layout, record bytes, forward order, and registry field tables go in `ARCHITECTURE.md` in that same folder. A caller-visible default changes the README. A dispatch or layout change changes `ARCHITECTURE.md`. A process change (listener, registry, console, or the write set) updates [ARCHITECTURE.md](ARCHITECTURE.md). An AI-assisted feature change updates [docs/ai-assistance](docs/ai-assistance/README.md) in the same change. Add a page under that folder when the feature needs its own note, and list the page from that folder's README. Do not edit another package's note to describe this one.
 
 `docs/` is as-built only, plus a measured research remainder at `docs/<model>/research/<slug>.md`. That file does not change the serving note until the behavior ships. Do not commit plan or option-comparison notes under `docs/`. Load research-claims before documenting a research claim. A needle or coding-agent run that printed a prefill sum and a decode sum files a Historical row. A protocol-complete synthetic run writes the Active models row.
