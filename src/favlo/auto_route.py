@@ -1,9 +1,10 @@
 """Public model ``auto``. The listener picks the concrete row.
 
 ``~/.favlo/settings.json`` maps ``default`` and ``coding`` to registry
-aliases. ``auto.tools`` maps a task to the tool names that select it. The
-latest listed call selects that task. Any other call, and a turn with no
-tool call, uses ``default``. One open follows, on that alias.
+aliases. ``auto.tools`` maps a task to the tool names that select it.
+``auto.reasoning_effort`` maps a task to the effort that replaces the
+request. The latest listed call selects that task. Any other call, and a
+turn with no tool call, uses ``default``. One open follows, on that alias.
 """
 
 from __future__ import annotations
@@ -58,6 +59,20 @@ def tool_tasks(settings: dict[str, Any] | None = None) -> dict[str, str]:
     return found
 
 
+def task_efforts(settings: dict[str, Any] | None = None) -> dict[str, str]:
+    """Task name to the effort that replaces the request. A missing table is empty."""
+    raw = _auto(settings)
+    listed = raw.get("reasoning_effort") if isinstance(raw, dict) else None
+    if not isinstance(listed, dict):
+        return {}
+    found: dict[str, str] = {}
+    for task in TASKS:
+        value = listed.get(task)
+        if isinstance(value, str) and value.strip():
+            found[task] = value.strip().lower()
+    return found
+
+
 def request_label(concrete: str) -> str:
     """Log owner for a turn the client addressed as ``auto``."""
     if concrete:
@@ -66,7 +81,7 @@ def request_label(concrete: str) -> str:
 
 
 def prepare(body: dict[str, Any], state: dict[str, Any] | None = None) -> dict[str, Any]:
-    """The pipeline body. The model is the task the current tool calls select."""
+    """The pipeline body. The model and, when set, the effort come from the task."""
     mapping = auto_map()
     if mapping is None:
         raise AutoRouteError("auto is not configured")
@@ -74,9 +89,15 @@ def prepare(body: dict[str, Any], state: dict[str, Any] | None = None) -> dict[s
     if task not in mapping:
         task = "default"
     alias = mapping[task]
+    effort = task_efforts().get(task)
     routed = dict(body)
     routed["model"] = alias
-    _log(f"auto {task} {alias}")
+    if effort is not None:
+        current = routed.get("reasoning")
+        reasoning = dict(current) if isinstance(current, dict) else {}
+        reasoning["effort"] = effort
+        routed["reasoning"] = reasoning
+    _log(f"auto {task} {alias}" if effort is None else f"auto {task} {alias} {effort}")
     return routed
 
 

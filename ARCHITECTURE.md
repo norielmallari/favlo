@@ -1,7 +1,7 @@
 # Favlo architecture
 
 - One model is one pipeline: `favlo serve` listens with nothing loaded, and a new `favlo serve` stops another listener on that address and any pipeline process before it listens.
-- The `model` field on `POST /v1/responses` loads one registry row, while `auto` is not a row and `~/.favlo/settings.json` maps `default` and `coding` to aliases, with `auto.tools` listing the tool names for each task.
+- The `model` field on `POST /v1/responses` loads one registry row, while `auto` is not a row and `~/.favlo/settings.json` maps `default` and `coding` to aliases, with `auto.tools` listing the tool names for each task and `auto.reasoning_effort` the effort that replaces the request for that task.
 - The latest listed call selects that task, any other call or a turn with no tool call uses `default`, and the pipeline then runs as that alias.
 - Every served language pipeline answers that route through `handle_responses`, and `POST /v1/chat/completions` is translated on the listener (`chat_to_responses` and `ChatWire` in `favlo.responses`) into that same path because pipelines do not implement Chat Completions.
 - A chat record and a media record are not resident together, and an embeddings record opens beside the resident model and stays warm for `embeddings_ttl_seconds` after the request returns (`0` closes immediately).

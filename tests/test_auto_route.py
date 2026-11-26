@@ -14,6 +14,7 @@ from favlo.auto_route import (
     prepare,
     request_label,
     select_task,
+    task_efforts,
     tool_tasks,
 )
 from favlo.listener import bind_log
@@ -70,11 +71,18 @@ def test_tool_names_map_to_the_task() -> None:
     assert tool_tasks({"auto": _mapping()}) == {}
 
 
+def test_task_efforts_keep_named_tasks() -> None:
+    settings = {"auto": {**_mapping(), "reasoning_effort": {"default": "None", "other": "high"}}}
+    assert task_efforts(settings) == {"default": "none"}
+    assert task_efforts({"auto": _mapping()}) == {}
+
+
 def test_no_tool_call_uses_default(
     monkeypatch: pytest.MonkeyPatch, log_lines: list[str]
 ) -> None:
     monkeypatch.setattr("favlo.auto_route.auto_map", lambda settings=None: _mapping())
     monkeypatch.setattr("favlo.auto_route.tool_tasks", lambda settings=None: _tools())
+    monkeypatch.setattr("favlo.auto_route.task_efforts", lambda settings=None: {})
     body = {"model": PUBLIC_ID, "input": "hello", "tools": [{"type": "function", "name": "write_file"}]}
     routed = prepare(body, None)
     assert routed["model"] == "example-chat"
@@ -86,6 +94,7 @@ def test_no_tool_call_uses_default(
 def test_a_listed_tool_selects_coding(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("favlo.auto_route.auto_map", lambda settings=None: _mapping())
     monkeypatch.setattr("favlo.auto_route.tool_tasks", lambda settings=None: _tools())
+    monkeypatch.setattr("favlo.auto_route.task_efforts", lambda settings=None: {})
     body = {
         "model": PUBLIC_ID,
         "input": [_user("build the ledger"), _call("glob"), _call("write_file")],
@@ -105,6 +114,7 @@ def test_a_user_message_with_no_call_uses_default() -> None:
 def test_a_tool_result_keeps_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("favlo.auto_route.auto_map", lambda settings=None: _mapping())
     monkeypatch.setattr("favlo.auto_route.tool_tasks", lambda settings=None: _tools())
+    monkeypatch.setattr("favlo.auto_route.task_efforts", lambda settings=None: {})
     state = {
         "responses": {"resp_1": {"id": "resp_1", "output": [_call("write_file")]}},
         "response_inputs": {"resp_1": [_user("build it")]},
@@ -121,9 +131,27 @@ def test_a_tool_result_keeps_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_unmapped_tool_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("favlo.auto_route.auto_map", lambda settings=None: _mapping())
     monkeypatch.setattr("favlo.auto_route.tool_tasks", lambda settings=None: _tools())
+    monkeypatch.setattr("favlo.auto_route.task_efforts", lambda settings=None: {})
     body = {"model": PUBLIC_ID, "input": [_user("hold this"), _call("locker")]}
     assert prepare(body, None)["model"] == "example-chat"
     assert select_task(body, None, _tools()) == "default"
+
+
+def test_settings_replace_the_request_effort(
+    monkeypatch: pytest.MonkeyPatch, log_lines: list[str]
+) -> None:
+    monkeypatch.setattr("favlo.auto_route.auto_map", lambda settings=None: _mapping())
+    monkeypatch.setattr("favlo.auto_route.tool_tasks", lambda settings=None: _tools())
+    monkeypatch.setattr(
+        "favlo.auto_route.task_efforts",
+        lambda settings=None: {"default": "none"},
+    )
+    sent = {"effort": "high", "summary": "auto"}
+    body = {"model": PUBLIC_ID, "input": "hello", "reasoning": sent}
+    routed = prepare(body, None)
+    assert routed["reasoning"] == {"effort": "none", "summary": "auto"}
+    assert sent == {"effort": "high", "summary": "auto"}
+    assert "auto default example-chat none" in log_lines
 
 
 def test_a_missing_map_fails_before_an_open(monkeypatch: pytest.MonkeyPatch) -> None:

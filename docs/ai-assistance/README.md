@@ -6,7 +6,7 @@ The guides the configuration tools read are [../guides](../guides). The process 
 
 ## Auto
 
-`auto` is a public model id. The client selects it and still sends `reasoning_effort` and the rest of the body. `~/.favlo/settings.json` maps `default` and `coding` to registry aliases, and lists the tool names that select each task. The latest listed call selects that task. Any other call uses `default`. A turn with no tool call uses `default`. The listener note is [../serve.md](../serve.md).
+`auto` is a public model id. The client selects it and sends the rest of the body. `~/.favlo/settings.json` maps `default` and `coding` to registry aliases, lists the tool names that select each task, and maps `auto.reasoning_effort` to the effort that replaces the request for that task. The latest listed call selects that task. Any other call uses `default`. A turn with no tool call uses `default`. The listener note is [../serve.md](../serve.md).
 
 ## Voice
 
