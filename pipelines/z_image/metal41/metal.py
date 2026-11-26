@@ -579,6 +579,8 @@ class Gpu:
         stored: int,
         pixel0: int,
         pixels: int,
+        stride: int = 1,
+        out_width: int | None = None,
     ) -> None:
         self._dispatch(
             "im2col",
@@ -592,6 +594,8 @@ class Gpu:
                 struct.pack("I", stored),
                 struct.pack("I", pixel0),
                 struct.pack("I", pixels),
+                struct.pack("I", stride),
+                struct.pack("I", width if out_width is None else out_width),
             ],
             (pixels, 1, 1),
             (1, 1, 1),

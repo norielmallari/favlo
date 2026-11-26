@@ -1,6 +1,6 @@
 # Z-Image-Turbo
 
-Eight-step text-to-image.
+Eight-step text-to-image. An optional source PNG is image-to-image: the VAE encodes it, `strength` noises that latent, and the remaining Euler steps denoise it.
 
 The official checkpoint is [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo).
 
@@ -20,6 +20,7 @@ uv run favlo --z_image_turbo kernels
 
 ```text
 uv run favlo media --pipeline z_image_turbo prompt="a red cube on a white table" size=1024x1024 seed=0
+uv run favlo media --pipeline z_image_turbo prompt="a real tan horse galloping left" image=file:///absolute/still.png strength=0.75
 ```
 
 Kernels, packed layout, registry, listener fields, and the forward path are in [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -97,7 +98,7 @@ That command reads `models/Z-Image-Turbo` and registers the folder `Z-Image-Turb
 - A later pack of another folder does not replace it.
 - It copies `tokenizer/` into that folder. Generation reads that copy.
 - A finished directory has `manifest.json` with `complete: true`.
-- Running `quantize --int8` again on that directory returns it.
+- Running `quantize` again on that directory packs any missing VAE encoder tensors and leaves the other planes in place.
 - An unfinished directory is replaced.
 
 `quantize` without `--int8` writes `models/Z-Image-Turbo-fp4`.
@@ -176,7 +177,10 @@ An image client calls `generate_image`.
 uv run favlo media --pipeline z_image_turbo prompt="a red cube on a white table" size=1024x1024 seed=0
 uv run favlo media --pipeline z_image_turbo prompt="a red cube on a white table" size=1024x1024 seed=0 quality=high
 uv run favlo media --pipeline z_image_turbo --model Z-Image-Turbo-int8 --out pack.json prompt="a red cube on a white table"
+uv run favlo media --pipeline z_image_turbo prompt="A real tan horse galloping left on a white field." image=file:///absolute/still.png strength=0.75
 ```
+
+An optional `image` is an 8-bit RGB PNG. `strength` is from 0 to 1 and defaults to 0.6. An omitted `size` uses that image's edges.
 
 `favlo media` does not start the listener.
 

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,3 +93,47 @@ def test_generate_matches_the_recorded_latent() -> None:
         match = next(item for item in stored["sizes"] if int(item["width"]) == width)
         assert int(match["height"]) == height
         assert match["latent_sha256"] == digests[(width, height)]
+
+
+HORSE = ROOT / "tests" / "assets" / "favlo-horse.png"
+HORSE_PROMPT = (
+    "A real tan horse galloping toward the left, dark brown mane and tail, "
+    "four legs in a running stride, pale coat, white studio background, "
+    "soft gray shadow on the ground, photograph, natural daylight."
+)
+
+
+@pytest.mark.skipif(
+    os.environ.get("ZIMAGE_IMG2IMG") != "1",
+    reason="set ZIMAGE_IMG2IMG=1 to restyle the horse",
+)
+def test_img2img_horse() -> None:
+    record = _installed_record()
+    if record is None:
+        pytest.skip("packed record is not present")
+    from z_image_turbo.metal41.png import decode_png, encode_png
+    from z_image_turbo.metal41.runtime import Runtime
+
+    source = decode_png(HORSE.read_bytes())
+    runtime = Runtime(record)
+    try:
+        pixels, digest, timing = runtime.generate(
+            HORSE_PROMPT,
+            int(source.shape[1]),
+            int(source.shape[0]),
+            8,
+            SEED,
+            image=source,
+            strength=0.75,
+        )
+    finally:
+        runtime.close()
+    assert pixels.shape == source.shape
+    assert pixels.dtype == source.dtype
+    assert digest
+    assert timing["steps"]
+    assert not np.array_equal(pixels, source)
+    out = ROOT / "artifacts" / "z-image-turbo-horse.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(encode_png(pixels, "high"))
+    print(f"img2img {out} steps {len(timing['steps'])} total {timing['total']:.2f}s", flush=True)

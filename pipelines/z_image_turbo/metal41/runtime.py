@@ -19,9 +19,9 @@ from z_image_turbo.metal41.dit import velocity
 from z_image_turbo.metal41.formats import TILE_M, pad_to
 from z_image_turbo.metal41.hold import ImageHold
 from z_image_turbo.metal41.metal import Gpu
-from z_image_turbo.metal41.progress import ImageProgress, LoadProgress, sample_total
+from z_image_turbo.metal41.progress import ENCODER_PIECES, ImageProgress, LoadProgress, sample_total
 from z_image_turbo.metal41.record import Plane, load, weight_bytes
-from z_image_turbo.metal41.schedule import STEPS, sigmas
+from z_image_turbo.metal41.schedule import STEPS, denoise_start, sigmas
 from z_image_turbo.metal41.scratch import MAX_EDGE, Scratch, scratch_bytes
 from z_image_turbo.metal41.text import embed_caption, prompt_ids
 
@@ -167,6 +167,8 @@ class Runtime:
         done_steps: int = 0,
         step_times: list[float] | None = None,
         spent: float = 0.0,
+        image: np.ndarray | None = None,
+        strength: float | None = None,
     ) -> tuple[np.ndarray, str, dict[str, Any]]:
         if getattr(self, "_closed", False):
             self._open()
@@ -175,8 +177,14 @@ class Runtime:
         if done_steps and latent is None:
             message = "a resumed step needs its latent"
             raise ValueError(message)
+        opened = done_steps
+        encode_pieces = 0
+        if image is not None and latent is None:
+            opened = denoise_start(steps, 0.6 if strength is None else strength)
+            if strength is None or strength < 1.0:
+                encode_pieces = ENCODER_PIECES
         progress = ImageProgress(self.console, f"{width}x{height}")
-        progress.open(sample_total(steps=steps, done_steps=done_steps))
+        progress.open(sample_total(steps=steps, done_steps=opened, encode=encode_pieces))
         try:
             pixels, digest, timing = self._run(
                 prompt,
@@ -190,6 +198,8 @@ class Runtime:
                 step_times=step_times,
                 spent=spent,
                 progress=progress,
+                image=image,
+                strength=strength,
             )
         except MediaPaused as paused:
             label = "sample paused" if paused.reason == "preempt" else "sample cancelled"
@@ -222,6 +232,8 @@ class Runtime:
         step_times: list[float] | None,
         spent: float,
         progress: ImageProgress,
+        image: np.ndarray | None = None,
+        strength: float | None = None,
     ) -> tuple[np.ndarray, str, dict[str, Any]]:
         wall = time.perf_counter()
         times = list(step_times or [])
@@ -232,7 +244,12 @@ class Runtime:
         count = 16 * latent_h * latent_w
         caption_s = 0.0
         length = 0
-        if done_steps < steps:
+        begin = done_steps
+        encode_image = False
+        if image is not None and latent is None:
+            begin = denoise_start(steps, 0.6 if strength is None else strength)
+            encode_image = strength is None or strength < 1.0
+        if done_steps < steps and begin < steps:
             progress.stage("caption")
             caption_started = time.perf_counter()
             with objc.autorelease_pool():
@@ -258,13 +275,41 @@ class Runtime:
                     wall=wall,
                 )
         image_rows = pad_to(patch_h * patch_w, TILE_M)
+        knots = sigmas(steps)
+        if latent is None and encode_image:
+            progress.stage("encode")
+            generator = np.random.default_rng(seed)
+            with objc.autorelease_pool():
+                encoded = _encode_image(self, image, generator, progress.advance)
+            self.gpu.reclaim()
+            if callable(stop) and stop() == "cancel":
+                self._stop(
+                    stop,
+                    stage="step",
+                    step=begin,
+                    times=times,
+                    caption_s=caption_s,
+                    spent=spent,
+                    wall=wall,
+                )
+            latent = _mix(encoded, float(knots[begin]), generator)
+            if callable(stop) and stop() == "preempt":
+                self._stop(
+                    stop,
+                    stage="step",
+                    step=begin,
+                    latent=latent,
+                    times=times,
+                    caption_s=caption_s,
+                    spent=spent,
+                    wall=wall,
+                )
         if latent is None:
             noise = np.random.default_rng(seed).standard_normal((16, latent_h, latent_w))
             self.gpu.store_f32(self.scratch.latent, noise.astype(np.float32))
         else:
             self.gpu.store_f32(self.scratch.latent, np.ascontiguousarray(latent, dtype=np.float32))
-        knots = sigmas(steps)
-        for index in range(done_steps, steps):
+        for index in range(max(done_steps, begin), steps):
             progress.stage(f"step {index + 1}/{steps}")
             started = time.perf_counter()
             with objc.autorelease_pool():
@@ -403,6 +448,26 @@ def open_device(
     del kv_cache, resident_percent
     memory.set_max_memory(max_memory)
     return Runtime(Path(path), console, owner=owner)
+
+
+def _encode_image(
+    runtime: Runtime,
+    image: np.ndarray,
+    generator: np.random.Generator,
+    on_layer: Callable[[], None] | None,
+) -> np.ndarray:
+    from z_image_turbo.metal41.vae import encode
+
+    if "encoder.conv_in.weight" not in runtime.weights:
+        message = "the packed record has no VAE encoder; run quantize again"
+        raise RuntimeError(message)
+    return encode(runtime.gpu, runtime.weights, image, generator, on_layer=on_layer)
+
+
+def _mix(encoded: np.ndarray, sigma: float, generator: np.random.Generator) -> np.ndarray:
+    noise = generator.standard_normal(encoded.shape).astype(np.float32)
+    mixed = np.float32(sigma) * noise + (np.float32(1.0) - np.float32(sigma)) * encoded
+    return np.ascontiguousarray(mixed, dtype=np.float32)
 
 
 def _decode_image(

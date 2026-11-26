@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -83,7 +84,16 @@ def _quantize(
     origin = weights or source or source_dir()
     try:
         dest = _record_dir(origin, name, out, int8=int8)
-        quantize(origin, dest, tokenizer_source=tokenizer_source, kind="int8" if int8 else "fp4")
+        kind = "int8" if int8 else "fp4"
+        if _finished(dest):
+            from z_image_turbo.metal41.record import pack_encoder
+
+            pack_encoder(origin, dest, kind=kind)
+        else:
+            quantize(origin, dest, tokenizer_source=tokenizer_source, kind=kind)
+            from z_image_turbo.metal41.record import pack_encoder
+
+            pack_encoder(origin, dest, kind=kind)
         register_quantized(
             dest.name,
             source=origin,
@@ -98,6 +108,14 @@ def _quantize(
         return 1
     print(dest, flush=True)
     return 0
+
+
+def _finished(dest: Path) -> bool:
+    manifest = dest / "manifest.json"
+    if not manifest.is_file():
+        return False
+    body = json.loads(manifest.read_text(encoding="utf-8"))
+    return body.get("complete") is True
 
 
 def _record_dir(

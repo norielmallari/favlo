@@ -10,7 +10,7 @@ The package holds:
 - the Metal shaders in `shaders/kernels.metal`
 - the Qwen3 caption encoder
 - the S3-DiT velocity
-- the Flux VAE decoder
+- the Flux VAE encoder and decoder
 - the flow-matching knots
 - the host image hold for preempt
 - the resumable Hugging Face file download
@@ -26,7 +26,7 @@ Served pipelines import this package. `z_image_turbo` re-exports many modules un
 
 ## Pack
 
-- `quantize` packs generate-path weights. The VAE encoder is left unpacked.
+- `quantize` packs generate-path weights and skips `encoder.*` keys. `pack_encoder` adds those keys to a finished record from the VAE safetensors.
 - `kind` is `int8` or `fp4`.
 - Int8 stores one float32 scale per output row and pads that row count to 128.
 - The activation is quantized in groups of 128 along K.
@@ -55,7 +55,7 @@ Served pipelines import this package. `z_image_turbo` re-exports many modules un
 - Caption refine has no AdaLN. Image refine uses AdaLN.
 - The main DiT stack sees image tokens, then caption tokens.
 - RoPE puts the caption index on the temporal axis and the patch coordinate on the two spatial axes.
-- The Euler update and the VAE decode stay on device shaders.
+- The Euler update and the VAE encode and decode stay on device shaders.
 - The tokenizer and the PNG container stay on the host.
 - `ImageHold` keeps host values for a paused job. Device buffers do not survive `close`.
 

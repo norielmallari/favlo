@@ -52,7 +52,8 @@ The official checkpoint is `Qwen/Qwen3.8-27B`. The steps are [qwen38_27b/README.
 
 The official checkpoint is `Tongyi-MAI/Z-Image-Turbo`. The steps are [z_image_turbo/README.md](../z_image_turbo/README.md).
 
-`favlo --z_image_turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize --int8` packs `models/Z-Image-Turbo-int8` and copies `tokenizer/` into that record. That is the served record. Generation reads the copy. `quantize` without `--int8` packs `models/Z-Image-Turbo-fp4`. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-int8` when `--int8` is set, or `-fp4` otherwise. `--name` is the registry id.
+`favlo --z_image_turbo setup` downloads that repository into `models/Z-Image-Turbo`. `quantize --int8` packs `models/Z-Image-Turbo-int8` and copies `tokenizer/` into that record. That is the served record. Generation reads the copy. `quantize` without `--int8` packs `models/Z-Image-Turbo-fp4`. A later `quantize` on a finished record packs any missing VAE encoder tensors and leaves the other planes in place. `--weights` is one `.safetensors` file or a directory of shards. With no `--name`, the folder is that file or directory name plus `-int8` when `--int8` is set, or `-fp4` otherwise. `--name` is the registry id. `favlo media` accepts an optional source PNG and `strength`. The field detail is on the turbo note.
+
 ## Wan 2.2 I2V
 
 The official checkpoint is `Wan-AI/Wan2.2-I2V-A14B`. The text encoder is `google/umt5-xxl`. The steps are [wan22_i2v/README.md](../wan22_i2v/README.md).

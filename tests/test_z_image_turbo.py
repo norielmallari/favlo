@@ -27,13 +27,14 @@ from z_image_turbo.metal41.png import ZLIB_LEVEL, encode_png, pack_rgb, unpack_r
 from z_image_turbo.metal41.progress import (
     CAPTION_PIECES,
     DECODER_PIECES,
+    ENCODER_PIECES,
     STEP_PIECES,
     ImageProgress,
     sample_total,
 )
 from z_image_turbo.metal41.record import Plane, load, quantize, weight_bytes
 from z_image_turbo.metal41.runtime import Runtime, _patchify, _unpatchify, open_device
-from z_image_turbo.metal41.schedule import sigmas, timestep
+from z_image_turbo.metal41.schedule import denoise_start, sigmas, timestep
 from z_image_turbo.metal41.scratch import MAX_EDGE, Scratch, scratch_bytes
 from z_image_turbo.portable.chat import ImageRequestError, _fields, handle_image
 
@@ -295,6 +296,41 @@ def test_image_request_default_size() -> None:
     assert fields.output_format == "png"
     assert fields.size == "1024x1024"
     assert fields.safety_identifier is None
+    assert fields.image is None
+    assert fields.strength is None
+
+
+def test_image_request_reads_a_source_png(tmp_path: Path) -> None:
+    from z_image_turbo.metal41.png import decode_png, encode_png
+
+    source = np.zeros((32, 48, 3), dtype=np.uint8)
+    source[4, 8] = (12, 34, 56)
+    path = tmp_path / "source.png"
+    path.write_bytes(encode_png(source, "high"))
+    fields = _fields(
+        {
+            "prompt": "a horse",
+            "image": path.resolve().as_uri(),
+            "strength": 0.75,
+        }
+    )
+    assert fields.size == "48x32"
+    assert fields.strength == 0.75
+    assert np.array_equal(fields.image, decode_png(path.read_bytes()))
+    with pytest.raises(ImageRequestError, match="strength needs an image") as raised:
+        _fields({"prompt": "a horse", "strength": 0.5})
+    assert raised.value.param == "strength"
+    with pytest.raises(ImageRequestError, match="0 to 1"):
+        _fields({"prompt": "a horse", "image": path.resolve().as_uri(), "strength": 1.5})
+
+
+def test_denoise_start_cuts_the_schedule() -> None:
+    assert denoise_start(8, 1.0) == 0
+    assert denoise_start(8, 0.75) == 2
+    assert denoise_start(8, 0.6) == 3
+    assert denoise_start(8, 0.0) == 8
+    with pytest.raises(ValueError):
+        denoise_start(8, 1.2)
 
 
 def test_image_request_accepts_a_standard_body() -> None:
@@ -746,7 +782,9 @@ def test_sample_total_counts_finished_layers() -> None:
     assert CAPTION_PIECES == 36
     assert STEP_PIECES == 35
     assert DECODER_PIECES == 25
+    assert ENCODER_PIECES == 17
     assert sample_total(steps=8, done_steps=0) == 36 + 8 * 35 + 25
+    assert sample_total(steps=8, done_steps=2, encode=ENCODER_PIECES) == 36 + 6 * 35 + 17 + 25
     assert sample_total(steps=8, done_steps=4) == 36 + 4 * 35 + 25
     assert sample_total(steps=8, done_steps=8) == 25
     with pytest.raises(ValueError):

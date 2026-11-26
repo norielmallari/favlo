@@ -57,7 +57,7 @@ def quantize(
     source_repo: str = "Tongyi-MAI/Z-Image-Turbo",
     format_id: str | None = None,
 ) -> Path:
-    """Pack generate-path weights. The VAE encoder is left unpacked.
+    """Pack generate-path weights. The VAE encoder is left for ``pack_encoder``.
 
     ``kind`` ``int8`` reads the original floating weights. It does not read an
     fp4 record. A finished directory of the same format is returned as it is.
@@ -157,6 +157,98 @@ def quantize(
     if kind == "int8":
         _install_tokenizer(dest, root)
     return dest
+
+
+def pack_encoder(weights: Path, dest: Path, *, kind: str) -> Path:
+    """Add missing ``encoder.*`` tensors to a finished record.
+
+    A record that already has one encoder tensor is returned as it is. The VAE
+    file is ``weights`` itself or ``weights/vae/diffusion_pytorch_model.safetensors``.
+    """
+    if kind not in {"fp4", "int8"}:
+        message = f"kind must be fp4 or int8, got {kind}"
+        raise ValueError(message)
+    manifest_path = dest / "manifest.json"
+    body = json.loads(manifest_path.read_text(encoding="utf-8"))
+    tensors = body.get("tensors")
+    if not isinstance(tensors, dict) or any(name.startswith("encoder.") for name in tensors):
+        return dest
+    vae = _vae_file(weights)
+    header, data_start = _header(vae)
+    out_weights = dest / "weights"
+    out_weights.mkdir(parents=True, exist_ok=True)
+    worst = 0.0
+    worst_name = ""
+    for key, info in header.items():
+        if not key.startswith("encoder."):
+            continue
+        array = _read(vae, info, data_start)
+        entry, error = _store_tensor(key, array, kind, out_weights)
+        tensors[key] = entry
+        if error is not None and error >= worst:
+            worst = error
+            worst_name = key
+        del array
+    if kind == "int8" and worst_name:
+        print(f"int8 encoder worst {worst_name} {worst:.6f}", flush=True)
+    temporary = manifest_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(body), encoding="utf-8")
+    temporary.replace(manifest_path)
+    return dest
+
+
+def _vae_file(weights: Path) -> Path:
+    if weights.is_file():
+        return weights
+    path = weights / "vae" / "diffusion_pytorch_model.safetensors"
+    if path.is_file():
+        return path
+    message = f"VAE weights are missing under {weights}"
+    raise FileNotFoundError(message)
+
+
+def _store_tensor(
+    key: str, array: np.ndarray, kind: str, out_weights: Path
+) -> tuple[dict[str, Any], float | None]:
+    plane = _kind(key, array.shape)
+    if plane == "fp4" and kind == "int8":
+        plane = "int8"
+    entry: dict[str, Any] = {"plane": plane, "shape": list(array.shape)}
+    error: float | None = None
+    if plane == "f16":
+        raw = np.ascontiguousarray(array, dtype=np.float32).astype(np.float16)
+        file_name = f"{key}.f16"
+        (out_weights / file_name).write_bytes(raw.tobytes())
+        entry["file"] = f"weights/{file_name}"
+    elif plane == "int8":
+        matrix = np.ascontiguousarray(array.reshape(array.shape[0], -1), dtype=np.float32)
+        codes, scales, stored, padded = pack_int8(matrix)
+        error = relative_error(
+            restore_int8(codes, scales, matrix.shape[0], matrix.shape[1]),
+            matrix,
+        )
+        data_name = f"{key}.i8"
+        scale_name = f"{key}.scale"
+        (out_weights / data_name).write_bytes(codes.tobytes())
+        (out_weights / scale_name).write_bytes(scales.tobytes())
+        entry["logical_k"] = int(matrix.shape[1])
+        entry["stored_k"] = int(stored)
+        entry["padded_n"] = int(padded)
+        entry["file"] = f"weights/{data_name}"
+        entry["scale"] = f"weights/{scale_name}"
+        print(f"int8 {key} {error:.6f}", flush=True)
+    else:
+        matrix = array.reshape(array.shape[0], -1)
+        packed, scales, stored = pack_fp4(matrix)
+        data_name = f"{key}.fp4"
+        scale_name = f"{key}.scale"
+        (out_weights / data_name).write_bytes(np.ascontiguousarray(packed).tobytes())
+        (out_weights / scale_name).write_bytes(np.ascontiguousarray(scales).tobytes())
+        entry["logical_k"] = int(matrix.shape[1])
+        entry["stored_k"] = int(stored)
+        entry["file"] = f"weights/{data_name}"
+        entry["scale"] = f"weights/{scale_name}"
+    return entry, error
 
 
 def weight_bytes(path: Path) -> int:

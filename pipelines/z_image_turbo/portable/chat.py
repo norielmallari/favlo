@@ -1,12 +1,15 @@
 """Chat is refused. Images use the OpenAI generations body.
 
 ``POST /v1/images/edits`` and ``POST /v1/images/variations`` are not routes.
-This pipeline has no image input. A transparent background, a hosted URL, and a
+An optional ``image`` is a source PNG, and ``strength`` noises that latent
+before the eight Euler steps. A transparent background, a hosted URL, and a
 streaming partial are not produced. JPEG and WebP are not encoded.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import secrets
 import time
 from collections.abc import Sequence
@@ -52,6 +55,8 @@ class ImageFields(NamedTuple):
     output_format: str
     size: str
     safety_identifier: str | None
+    image: np.ndarray | None
+    strength: float | None
 
 
 def handle_chat(
@@ -81,6 +86,9 @@ class Pipeline(MediaPipeline):
         return _fields(body)
 
     def identity(self, request: ImageFields) -> tuple[Any, ...]:
+        digest = None
+        if request.image is not None:
+            digest = hashlib.sha256(np.ascontiguousarray(request.image).tobytes()).hexdigest()
         return (
             request.prompt,
             request.seed,
@@ -88,6 +96,8 @@ class Pipeline(MediaPipeline):
             request.height,
             request.quality,
             request.background,
+            request.strength,
+            digest,
         )
 
     def matches(self, request: ImageFields, identity: Any) -> bool:
@@ -192,6 +202,14 @@ class Pipeline(MediaPipeline):
                         "size": {"type": "string", "description": "WxH; auto is 1024x1024."},
                         "quality": {"type": "string", "description": "Quality preset."},
                         "seed": {"type": "integer", "description": "Omit for random."},
+                        "image": {
+                            "type": "string",
+                            "description": "Source PNG as file://, an image id, or base64.",
+                        },
+                        "strength": {
+                            "type": "number",
+                            "description": "0 keeps the source and 1 ignores it. Default 0.6.",
+                        },
                     },
                     "required": ["prompt"],
                 },
@@ -239,6 +257,8 @@ def _draw(
         done_steps=done,
         step_times=times,
         spent=spent,
+        image=fields.image,
+        strength=fields.strength,
     )
     return pixels, timing
 
@@ -397,7 +417,13 @@ def _fields(body: dict[str, Any]) -> ImageFields:
     prompt = body.get("prompt")
     if not isinstance(prompt, str) or not prompt:
         raise ImageRequestError("prompt is required", "prompt")
-    width, height, size = _size(body.get("size"))
+    image = _image(body)
+    strength = _strength(body, image is not None)
+    width, height, size = _size(body.get("size"), image)
+    if image is not None and (image.shape[0] != height or image.shape[1] != width):
+        from z_image_turbo.metal41.png import resize_rgb
+
+        image = resize_rgb(image, height, width)
     return ImageFields(
         prompt=prompt,
         width=width,
@@ -408,6 +434,8 @@ def _fields(body: dict[str, Any]) -> ImageFields:
         output_format=output_format or "png",
         size=size,
         safety_identifier=_safety_identifier(body),
+        image=image,
+        strength=strength,
     )
 
 
@@ -456,9 +484,62 @@ def _safety_identifier(body: dict[str, Any]) -> str | None:
     return chosen
 
 
-def _size(value: Any) -> tuple[int, int, str]:
+def _image(body: dict[str, Any]) -> np.ndarray | None:
+    if body.get("image") is None:
+        return None
+    from z_image_turbo.metal41.png import decode_png
+
+    try:
+        return decode_png(_image_bytes(body.get("image")))
+    except (OSError, ValueError) as exc:
+        raise ImageRequestError("image must be an 8-bit RGB PNG", "image") from exc
+
+
+def _image_bytes(ref: Any) -> bytes:
+    if isinstance(ref, dict):
+        url = ref.get("image_url")
+        if isinstance(url, dict):
+            url = url.get("url")
+        ref = url
+    if not isinstance(ref, str) or not ref:
+        message = "image must be an 8-bit RGB PNG"
+        raise ValueError(message)
+    if ref.startswith("file://"):
+        from favlo.local_uri import read_file_uri
+
+        return read_file_uri(ref)
+    from favlo.media_name import MissingMediaFile, read_plain_filename
+
+    try:
+        return read_plain_filename(ref)
+    except MissingMediaFile:
+        pass
+    if ref.startswith("data:"):
+        _header, _sep, ref = ref.partition(",")
+    return base64.b64decode(ref)
+
+
+def _strength(body: dict[str, Any], has_image: bool) -> float | None:
+    if body.get("strength") is None:
+        return 0.6 if has_image else None
+    if not has_image:
+        raise ImageRequestError("strength needs an image", "strength")
+    value = body["strength"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ImageRequestError("strength must be from 0 to 1", "strength")
+    strength = float(value)
+    if strength < 0.0 or strength > 1.0:
+        raise ImageRequestError("strength must be from 0 to 1", "strength")
+    return strength
+
+
+def _size(value: Any, image: np.ndarray | None = None) -> tuple[int, int, str]:
     from z_image_turbo.metal41.scratch import MAX_EDGE
 
+    if (value is None or value == "auto") and image is not None:
+        height, width = int(image.shape[0]), int(image.shape[1])
+        _check_edge(width, height, MAX_EDGE)
+        return width, height, f"{width}x{height}"
     if value is None or value == "auto":
         return 1024, 1024, "1024x1024"
     if not isinstance(value, str) or "x" not in value:
@@ -467,14 +548,18 @@ def _size(value: Any) -> tuple[int, int, str]:
     if not left.isdigit() or not right.isdigit():
         raise ImageRequestError("size must be auto or WIDTHxHEIGHT", "size")
     width, height = int(left), int(right)
-    fits = 16 <= width <= MAX_EDGE and 16 <= height <= MAX_EDGE
+    _check_edge(width, height, MAX_EDGE)
+    return width, height, f"{width}x{height}"
+
+
+def _check_edge(width: int, height: int, limit: int) -> None:
+    fits = 16 <= width <= limit and 16 <= height <= limit
     if not fits or width % 16 or height % 16:
-        message = f"edge must be a multiple of 16 from 16 to {MAX_EDGE}, got {width}x{height}"
+        message = f"edge must be a multiple of 16 from 16 to {limit}, got {width}x{height}"
         raise ImageRequestError(message, "size")
     if width * 3 < height or height * 3 < width:
         message = f"aspect ratio must be between 1:3 and 3:1, got {width}x{height}"
         raise ImageRequestError(message, "size")
-    return width, height, f"{width}x{height}"
 
 
 def _reject(reply: Any, message: str, param: str | None) -> None:

@@ -21,6 +21,9 @@ STEP_PIECES = REFINER_BLOCKS + REFINER_BLOCKS + DIT_LAYERS + 1
 # conv in, two mid resnets, mid attention, four up blocks of three resnets,
 # three upsamplers (nearest and conv), norm, conv out, and the uint8 clip.
 DECODER_PIECES = 1 + 2 + 1 + 4 * 3 + 3 * 2 + 2 + 1
+# conv in, four down blocks (two resnets, three of them stride-2), mid resnet,
+# mid attention, mid resnet, norm, and conv out.
+ENCODER_PIECES = 1 + 4 * 2 + 3 + 2 + 1 + 1 + 1
 
 
 def sample_total(
@@ -29,11 +32,13 @@ def sample_total(
     done_steps: int,
     captions: int = 1,
     guided: int = 0,
+    encode: int = 0,
 ) -> int:
     """Layers this call will finish. A resumed step runs the caption again.
 
     ``captions`` is 1 for one prompt and 2 when a negative caption is encoded.
-    ``guided`` is how many remaining steps run a second velocity.
+    ``guided`` is how many remaining steps run a second velocity. ``encode`` is
+    the encoder layers when this call starts from a source image.
     """
     if steps < 1:
         message = f"steps must be positive, got {steps}"
@@ -41,12 +46,12 @@ def sample_total(
     if done_steps < 0:
         message = f"done_steps must be non-negative, got {done_steps}"
         raise ValueError(message)
-    if captions < 1 or guided < 0:
-        message = f"captions {captions} and guided {guided} are out of range"
+    if captions < 1 or guided < 0 or encode < 0:
+        message = f"captions {captions}, guided {guided}, and encode {encode} are out of range"
         raise ValueError(message)
     remaining = max(0, steps - done_steps)
     caption = CAPTION_PIECES * captions if done_steps < steps else 0
-    return caption + (remaining + guided) * STEP_PIECES + DECODER_PIECES
+    return caption + (remaining + guided) * STEP_PIECES + encode + DECODER_PIECES
 
 
 class LoadProgress:

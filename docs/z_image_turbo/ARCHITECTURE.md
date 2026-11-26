@@ -4,7 +4,7 @@ This page is the as-built detail for the `z_image_turbo` package.
 
 [README.md](README.md) is the summary.
 
-Eight-step text-to-image for [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo).
+Eight-step text-to-image for [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo). A source PNG is image-to-image on the same eight knots.
 
 The serve entry is `pipelines/z_image_turbo/portable`. `metal41` is the device. `favlo serve` and `favlo --z_image_turbo` import `z_image_turbo.portable`. `open_runtime` selects `metal41` and calls `open_device`. `metal41` re-exports that pipeline so a listener that still imports the device name serves the same object.
 
@@ -14,7 +14,7 @@ Download, pack, and drawing a picture are in [README.md](README.md).
 
 ## Layout
 
-- The DiT, the Qwen3 caption encoder, and the VAE decoder run as Metal shaders.
+- The DiT, the Qwen3 caption encoder, and the VAE encoder and decoder run as Metal shaders.
 - The latent stays on the device across the eight steps.
 - Patchify, the Euler update, the time sinusoid, the pad-token fill, the image and caption join, the RoPE index tables, the VAE scale, and the uint8 clip are shaders.
 - The tokenizer and the PNG container stay on the host.
@@ -33,7 +33,7 @@ The served pack is symmetric int8.
 
 - That matmul reads float16, and a row whose peak exceeds 60000 is scaled into that range.
 - A noise-refiner output projection reached 81884.
-- The VAE encoder is not packed.
+- `quantize` on a finished record packs any missing VAE encoder tensors from `vae/diffusion_pytorch_model.safetensors` and leaves the other planes in place.
 
 Setup and pack commands:
 
@@ -129,9 +129,10 @@ uv run python -c 'from favlo.smoke_lock import unload_model; unload_model()'
 ```text
 uv run favlo media --pipeline z_image_turbo prompt="a red cube on a white table" size=1024x1024 seed=0 quality=high
 uv run favlo media --pipeline z_image_turbo --model Z-Image-Turbo-int8 --out pack.json prompt="a red cube on a white table"
+uv run favlo media --pipeline z_image_turbo prompt="A real tan horse galloping left on a white field." image=file:///absolute/still.png strength=0.75
 ```
 
-`prompt` is required.
+`prompt` is required. `image` is an optional 8-bit RGB PNG (`file://`, an image id, or base64). `strength` is from 0 to 1 and defaults to 0.6 when `image` is set. 0 keeps the encoded source and 1 ignores it. The cut is `int(steps − min(steps · strength, steps))` on the eight knots. An omitted `size` with an image uses that image's edges.
 
 `size` is `auto` or `WIDTHxHEIGHT`.
 
@@ -152,8 +153,8 @@ A path under `/v1/images` is 404.
 - `prompt` is required.
 - `model` selects the row.
 - A request draws one image.
-- `size` is `auto` or `WIDTHxHEIGHT`, and `auto` is 1024×1024.
-- An omitted `generate_image` size is that same frame.
+- `size` is `auto` or `WIDTHxHEIGHT`, and `auto` is 1024×1024. An omitted size with an image uses that image's edges.
+- An omitted `generate_image` size is that same frame, or the source edges when an image was sent.
 - Each edge is a multiple of 16, from 16 to 2560, and the aspect ratio is between 1:3 and 3:1.
 - `quality` accepts `auto`, `low`, `medium`, `high`, `xhigh`, `max`, `standard`, and `hd`. Every accepted value runs the same eight steps.
 - The response reports `low`, `medium`, `high`, `xhigh`, or `max`.
@@ -242,13 +243,15 @@ The caption vector is the penultimate Qwen3 layer, then the DiT caption norm and
 - The final readout is a parameter-free LayerNorm with epsilon 1e-6, then `(1 + scale)`, where that scale is a SiLU followed by the 3840-wide projection.
 - The embedded time is `(1 − sigma) · 1000`, evaluated in float32 on device.
 - Sigma 1 is noise and sigma 0 is the image.
+- Image-to-image encodes the source, samples the posterior with the request seed, scales by `(z − 0.1159) · 0.3611`, and mixes `sigma · noise + (1 − sigma) · latent` at the first remaining knot.
+- The encoder downsample pads one pixel on the right and the bottom, then a stride-2 convolution.
 - The shift is 3.
 - The update adds `(sigma − sigma_next)` times the predicted velocity, on the latent buffer.
 - Head-128 attention is a 32×32 `matmul2d` tile.
 - The scores for that tile stay in the threadgroup.
 - The 512-wide decoder head stays on the scalar attention kernel.
 - The VAE latent is `z / 0.3611 + 0.1159`.
-- GroupNorm uses 32 groups and epsilon 1e-5.
+- GroupNorm uses 32 groups. The decoder epsilon is 1e-5 and the encoder epsilon is 1e-6.
 - The mid-block attention is one head of 512 channels.
 - PNG bytes use `(clip(x, −1, 1) + 1) / 2`.
 

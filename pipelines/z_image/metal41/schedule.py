@@ -27,6 +27,23 @@ def sigmas(steps: int = STEPS, shift: float = SHIFT) -> np.ndarray:
     return shifted.astype(np.float32)
 
 
+def denoise_start(steps: int, strength: float) -> int:
+    """First knot of an image-to-image run.
+
+    ``strength`` 1 starts on the noise knot. ``strength`` 0 starts on the image
+    knot, so the loop does not run. The cut is the published one:
+    ``int(steps − min(steps · strength, steps))``.
+    """
+    if steps < 1:
+        message = f"steps must be positive, got {steps}"
+        raise ValueError(message)
+    if strength < 0.0 or strength > 1.0:
+        message = f"strength must be from 0 to 1, got {strength}"
+        raise ValueError(message)
+    init = min(steps * float(strength), float(steps))
+    return int(max(float(steps) - init, 0.0))
+
+
 def timestep(sigma: float) -> float:
     """Embedded time. The network sees ``(1 − sigma) · t_scale``."""
     return (1.0 - float(sigma)) * T_SCALE

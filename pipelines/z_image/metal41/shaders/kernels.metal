@@ -939,22 +939,24 @@ kernel void im2col(
     constant uint& stored [[buffer(7)]],
     constant uint& pixel0 [[buffer(8)]],
     constant uint& pixels [[buffer(9)]],
+    constant uint& stride [[buffer(10)]],
+    constant uint& out_width [[buffer(11)]],
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= pixels) {
         return;
     }
     uint pixel = pixel0 + gid;
-    uint y = pixel / width;
-    uint x = pixel - y * width;
+    uint y = pixel / out_width;
+    uint x = pixel - y * out_width;
     device half* row = destination + gid * stored;
     uint logical = channels * ksize * ksize;
     uint cursor = 0;
     for (uint c = 0; c < channels; ++c) {
         for (uint ky = 0; ky < ksize; ++ky) {
             for (uint kx = 0; kx < ksize; ++kx) {
-                int iy = int(y) + int(ky) - int(pad);
-                int ix = int(x) + int(kx) - int(pad);
+                int iy = int(y) * int(stride) + int(ky) - int(pad);
+                int ix = int(x) * int(stride) + int(kx) - int(pad);
                 float v = 0.0f;
                 if (iy >= 0 && ix >= 0 && iy < int(height) && ix < int(width)) {
                     v = source[(c * height + uint(iy)) * width + uint(ix)];
